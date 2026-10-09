@@ -35,6 +35,25 @@ pub const CMTI1: Source = Source {
     shift: 4,
 };
 
+/// ADI0: vector 190, IPRJ bits 11..8 (after CMTI0 and ADT0 within the field).
+pub const ADI0: Source = Source {
+    vector: 190,
+    ipr: 9,
+    shift: 8,
+};
+/// ADI1: vector 194, IPRJ bits 7..4 (after CMTI1 and ADT1).
+pub const ADI1: Source = Source {
+    vector: 194,
+    ipr: 9,
+    shift: 4,
+};
+/// ADI2: vector 196, IPRJ bits 3..0.
+pub const ADI2: Source = Source {
+    vector: 196,
+    ipr: 9,
+    shift: 0,
+};
+
 /// The priority level of `src` given the 24 IPR bytes.
 pub fn level(ipr: &[u8], src: Source) -> u32 {
     let r = u16::from_be_bytes([ipr[2 * src.ipr], ipr[2 * src.ipr + 1]]);
@@ -69,6 +88,11 @@ mod tests {
         assert_eq!(level(&ipr, CMTI1), 9);
         assert_eq!(highest(&ipr, &[(CMTI0, false), (CMTI1, true)]), (9, 192));
         assert_eq!(highest(&ipr, &[(CMTI0, true), (CMTI1, true)]), (9, 188));
+        // Within one IPR field, table 7.3 order: CMTI0 before ADI0.
+        assert_eq!(highest(&ipr, &[(CMTI0, true), (ADI0, true)]), (9, 188));
+        assert_eq!(highest(&ipr, &[(ADI0, true), (ADI1, true)]), (9, 190));
+        assert_eq!(highest(&ipr, &[(ADI2, true)]), (9, 196));
+        assert_eq!(highest(&ipr, &[(ADI1, true)]), (9, 194));
         ipr[18..20].copy_from_slice(&0x0000u16.to_be_bytes());
         assert_eq!(highest(&ipr, &[(CMTI1, true)]), (0, 0), "level 0 is masked");
     }

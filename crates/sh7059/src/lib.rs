@@ -13,9 +13,11 @@
 //! states; the same table reserves everything up to H'FFFE7FFF, and the flash chapter
 //! gives H'FFFE8000–H'FFFFBFFF. That is the range used here.
 
+pub mod adc;
 pub mod cmt;
 pub mod intc;
 mod machine;
+pub mod sci;
 
 pub use machine::Machine;
 use sh2e::Bus;
@@ -33,6 +35,9 @@ pub const RAM_SIZE: usize = 0x1_4000;
 pub const IO_BASE: u32 = 0xFFFF_C000;
 /// Size of the on-chip peripheral register area: 16 KB.
 pub const IO_SIZE: usize = 0x4000;
+
+/// H-UDI instruction register SDIR; the status register SDSR follows it.
+pub const HUDI_SDIR: u32 = 0xFFFF_F7C0;
 
 /// A flash image that cannot be loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +119,39 @@ fn fit(r: Region, n: usize) -> Region {
     }
 }
 
+/// The modelled peripherals, by register block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Periph {
+    Cmt,
+    Sci,
+    Adc,
+}
+
+impl Periph {
+    /// Offset of the block in the register storage, and its length.
+    fn span(self) -> (usize, usize) {
+        let (b, e) = match self {
+            Periph::Cmt => (cmt::BASE, cmt::END),
+            Periph::Sci => (sci::BASE, sci::END),
+            Periph::Adc => (adc::BASE, adc::END),
+        };
+        ((b - IO_BASE) as usize, (e - b) as usize)
+    }
+}
+
+#[inline(always)]
+fn periph_at(addr: u32) -> Option<Periph> {
+    if (sci::BASE..sci::END).contains(&addr) {
+        Some(Periph::Sci)
+    } else if (cmt::BASE..cmt::END).contains(&addr) {
+        Some(Periph::Cmt)
+    } else if (adc::BASE..adc::END).contains(&addr) {
+        Some(Periph::Adc)
+    } else {
+        None
+    }
+}
+
 /// The chip: flash, RAM and the peripheral register area.
 ///
 /// Peripheral registers are plain storage for now: they read back what was written.
@@ -139,6 +177,10 @@ pub struct Sh7059 {
     pub now: u64,
     /// Compare match timer.
     pub cmt: cmt::Cmt,
+    /// Serial communication interface.
+    pub sci: sci::Sci,
+    /// A/D converter.
+    pub adc: adc::Adc,
     /// Highest pending interrupt: (level, vector), or (0, 0) for none.
     pub pending: (u32, u32),
     /// CPU cycle of the next timer event.
@@ -164,6 +206,8 @@ impl Sh7059 {
             rom_writes: 0,
             now: 0,
             cmt: cmt::Cmt::default(),
+            sci: sci::Sci::default(),
+            adc: adc::Adc::default(),
             pending: (0, 0),
             next_event: u64::MAX,
         })
@@ -197,9 +241,14 @@ impl Sh7059 {
             Region::Rom(o) => out.copy_from_slice(&self.rom[o..o + N]),
             Region::Ram(o) => out.copy_from_slice(&self.ram[o..o + N]),
             Region::Io(o) => {
-                if (cmt::BASE..cmt::END).contains(&addr) {
-                    let c = (cmt::BASE - IO_BASE) as usize;
-                    self.cmt.store(self.now, &mut self.io[c..c + 14]);
+                match periph_at(addr) {
+                    Some(Periph::Sci) => {
+                        let (b, len) = Periph::Sci.span();
+                        let k = ((addr - sci::BASE) / 8) as usize;
+                        self.sci.store_channel(k, &mut self.io[b..b + len]);
+                    }
+                    Some(p) => self.store_regs(p),
+                    None => {}
                 }
                 for (i, b) in out.iter_mut().enumerate() {
                     *b = self.io[o + i] | self.io_force[o + i];
@@ -216,12 +265,19 @@ impl Sh7059 {
             Region::Rom(_) => self.rom_writes += 1,
             Region::Ram(o) => self.ram[o..o + N].copy_from_slice(&bytes),
             Region::Io(o) => {
-                if (cmt::BASE..cmt::END).contains(&addr) {
-                    let c = (cmt::BASE - IO_BASE) as usize;
-                    self.cmt.store(self.now, &mut self.io[c..c + 14]);
-                    let before: [u8; 14] = self.io[c..c + 14].try_into().unwrap();
+                if let Some(p) = periph_at(addr) {
+                    self.store_regs(p);
+                    let (b, len) = p.span();
+                    let mut before = [0u8; 96];
+                    before[..len].copy_from_slice(&self.io[b..b + len]);
                     self.io[o..o + N].copy_from_slice(&bytes);
-                    self.cmt.load(self.now, &before, &self.io[c..c + 14]);
+                    let (before, after) = (&before[..len], &self.io[b..b + len]);
+                    match p {
+                        Periph::Cmt => self.cmt.load(self.now, before, after),
+                        Periph::Sci => self.sci.load(self.now, before, after),
+                        Periph::Adc => self.adc.load(self.now, before, after),
+                    }
+                    self.store_regs(p);
                     self.update_interrupts();
                 } else {
                     self.io[o..o + N].copy_from_slice(&bytes);
@@ -237,16 +293,36 @@ impl Sh7059 {
 
     /// Initial values of the modelled registers that are not zero after a power-on reset.
     fn reset_registers(&mut self) {
-        let c = (cmt::BASE - IO_BASE) as usize;
+        // H-UDI: SDIR = H'E000 and SDSR = H'0F01 on the SH7059F (manual table 20.2 and
+        // its errata, which give H'5001 for the SH7058SF and H'0B01 for the SH7058). They
+        // are set by TRST, not by reset; the board is taken to assert TRST at power-up
+        // [SUP]. The boot loader reads SDSR to tell the chip variant.
+        let h = (HUDI_SDIR - IO_BASE) as usize;
+        self.io[h..h + 4].copy_from_slice(&[0xE0, 0x00, 0x0F, 0x01]);
         self.cmt.ch[0].cor = 0xFFFF;
         self.cmt.ch[1].cor = 0xFFFF;
-        self.cmt.store(0, &mut self.io[c..c + 14]);
+        for p in [Periph::Cmt, Periph::Sci, Periph::Adc] {
+            self.store_regs(p);
+        }
     }
 
-    /// Takes the timer events due by `now` and refreshes the pending interrupt and the
-    /// next event.
+    /// Copies a peripheral model's registers into the register storage before a read.
+    fn store_regs(&mut self, p: Periph) {
+        let (b, len) = p.span();
+        let regs = &mut self.io[b..b + len];
+        match p {
+            Periph::Cmt => self.cmt.store(self.now, regs),
+            Periph::Sci => self.sci.store(regs),
+            Periph::Adc => self.adc.store(regs),
+        }
+    }
+
+    /// Takes the peripheral events due by `now` and refreshes the pending interrupt and
+    /// the next event.
     pub fn advance(&mut self) {
         self.cmt.advance(self.now);
+        self.sci.advance(self.now);
+        self.adc.advance(self.now);
         self.update_interrupts();
     }
 
@@ -256,10 +332,17 @@ impl Sh7059 {
             &self.io[i..i + 24],
             &[
                 (intc::CMTI0, self.cmt.ch[0].requesting()),
+                (intc::ADI0, self.adc.requesting(0)),
                 (intc::CMTI1, self.cmt.ch[1].requesting()),
+                (intc::ADI1, self.adc.requesting(1)),
+                (intc::ADI2, self.adc.requesting(2)),
             ],
         );
-        self.next_event = self.cmt.next_event();
+        self.next_event = self
+            .cmt
+            .next_event()
+            .min(self.sci.next_event())
+            .min(self.adc.next_event());
     }
 
     #[inline(always)]
@@ -364,6 +447,31 @@ mod tests {
         c.write32(0x0020_0000, 1);
         assert_eq!(c.read32(0x0020_0000), 0);
         assert_eq!(c.unmapped_accesses, 2);
+    }
+
+    #[test]
+    fn hudi_reads_as_an_sh7059f() {
+        let mut c = chip();
+        assert_eq!(c.read16(HUDI_SDIR), 0xE000);
+        assert_eq!(c.read16(HUDI_SDIR + 2), 0x0F01, "SDSR of the SH7059F");
+    }
+
+    #[test]
+    fn peripherals_answer_through_the_bus() {
+        let mut c = chip();
+        // SCI3 SSR starts at H'84; A/D2 ADCSR2 at H'08 and ADCR2 at H'0F.
+        assert_eq!(c.read8(0xFFFF_F01C), 0x84);
+        assert_eq!(c.read8(0xFFFF_F858), 0x08);
+        assert_eq!(c.read8(0xFFFF_F859), 0x0F);
+        // A/D0: convert AN0 once, read the result after the conversion time.
+        c.adc.input[0] = 0x155;
+        c.write8(0xFFFF_F818, 0x00);
+        c.write8(0xFFFF_F819, 0x20);
+        assert!(c.next_event < u64::MAX);
+        c.now = c.next_event;
+        c.advance();
+        assert_eq!(c.read8(0xFFFF_F818) & 0x80, 0x80, "ADF");
+        assert_eq!(c.read16(0xFFFF_F800), 0x155 << 6);
     }
 
     #[test]

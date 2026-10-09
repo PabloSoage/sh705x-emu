@@ -11,6 +11,7 @@ use std::path::PathBuf;
 pub const USAGE: &str = "\
 usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
        sh705x trace --flash <flash.bin> [--max <instructions>] [--force <addr:mask>]...
+                    [--adc <channel:code>]...
                     [--out <io-trace.txt>] [--no-address-errors] [--history]
 
 commands:
@@ -20,7 +21,7 @@ commands:
           'pc R|W addr size value' (hex). Prints instructions, cycles and speed.
           --no-address-errors makes misaligned accesses go through, as in Ghidra's
           emulator; only for comparing with it. --history prints the steps before the
-          first exception";
+          first exception. --adc sets an analog input (AN0-31) to a 10-bit code";
 
 /// A parsed command line.
 #[derive(Debug, PartialEq, Eq)]
@@ -53,6 +54,8 @@ pub struct TraceOptions {
     pub address_errors: bool,
     /// Keep the last steps and print them at the first exception (slower).
     pub history: bool,
+    /// A/D inputs: channel and 10-bit code.
+    pub adc: Vec<(usize, u16)>,
 }
 
 fn hex(s: &str) -> Result<u32, String> {
@@ -83,7 +86,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         }
         "trace" => {
             let (mut flash, mut out, mut max, mut force) = (None, None, 3_000_000, Vec::new());
-            let (mut address_errors, mut history) = (true, false);
+            let (mut address_errors, mut history, mut adc) = (true, false, Vec::new());
             let mut it = rest.iter();
             while let Some(opt) = it.next() {
                 match opt.as_str() {
@@ -102,6 +105,17 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                     "--flash" => flash = Some(PathBuf::from(value)),
                     "--out" => out = Some(PathBuf::from(value)),
                     "--max" => max = value.parse().map_err(|_| format!("bad --max '{value}'"))?,
+                    "--adc" => {
+                        let bad =
+                            || format!("--adc wants channel:code (0-31:0-1023), got '{value}'");
+                        let (c, v) = value.split_once(':').ok_or_else(bad)?;
+                        let c: usize = c.parse().map_err(|_| bad())?;
+                        let v: u16 = v.parse().map_err(|_| bad())?;
+                        if c > 31 || v > 1023 {
+                            return Err(bad());
+                        }
+                        adc.push((c, v));
+                    }
                     "--force" => {
                         let (a, m) = value
                             .split_once(':')
@@ -123,6 +137,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 out,
                 address_errors,
                 history,
+                adc,
             }))
         }
         other => Err(format!("unknown command '{other}'")),
@@ -159,6 +174,7 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
         out,
         address_errors,
         history,
+        adc,
     } = opts;
     let (max, address_errors, history, out) = (*max, *address_errors, *history, out.as_ref());
     let image = read(flash)?;
@@ -171,6 +187,9 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
     }
     if out.is_some() {
         chip.trace = Some(Vec::new());
+    }
+    for &(c, v) in adc {
+        chip.adc.input[c] = v;
     }
     let mut m = Machine::new(chip, address_errors);
     // The last steps before the first exception, to say where it came from.
@@ -250,6 +269,20 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
         .filter(|(_, n)| **n > 0)
         .map(|(v, n)| format!("vector {v}: {n}"))
         .collect();
+    for (k, c) in chip.sci.ch.iter().enumerate() {
+        if !c.sent.is_empty() {
+            let head: Vec<String> = c.sent.iter().take(16).map(|b| format!("{b:02X}")).collect();
+            writeln!(
+                o,
+                "SCI{k}: {} bytes sent, {} received; first sent: {}",
+                c.sent.len(),
+                c.received.len(),
+                head.join(" ")
+            )
+            .unwrap();
+        }
+    }
+    writeln!(o, "A/D rounds {:?}", chip.adc.rounds).unwrap();
     writeln!(
         o,
         "interrupts taken: {}; CMT matches {:?}; sleeping {}",
