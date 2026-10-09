@@ -4,7 +4,7 @@
 An independent oracle for crates/sh2e/src/fpu.rs: no floating-point arithmetic is used
 here, so the host's rounding cannot leak into the expected results.
 
-Rules (manual REJ09B0177-0500, section 3):
+Rules (hardware manual REJ09B0177-0500 section 3, software manual REJ09B0316-0200 7.3):
   - round toward zero;
   - denormal operands and results flushed to zero, keeping the sign;
   - overflow gives the largest finite value with the right sign.
@@ -83,14 +83,13 @@ def main():
         out.append(f"mul {a:08X} {b:08X} {rz(va * vb, sa * sb):08X}")
         if vb != 0:
             out.append(f"div {a:08X} {b:08X} {rz(va / vb, sa * sb):08X}")
+        # FMAC is FMUL then FADD, each rounded (software manual 7.3.9).
         c = rand_single(rng, kind)
         vc, sc = value(c)
-        p = va * vb
-        if p == 0 and vc == 0:
-            zs = -1 if (sa * sb < 0 and sc < 0) else 1
-        else:
-            zs = 1
-        out.append(f"mac {a:08X} {b:08X} {c:08X} {rz(p + vc, zs):08X}")
+        pb = rz(va * vb, sa * sb)
+        vp, sp = value(pb)
+        zs = -1 if (sp < 0 and sc < 0 and vp == 0 and vc == 0) else 1
+        out.append(f"mac {a:08X} {b:08X} {c:08X} {rz(vp + vc, zs):08X}")
     for _ in range(200):
         i = rng.choice([rng.getrandbits(32), rng.getrandbits(25), rng.getrandbits(12),
                         0x80000000, 0x7FFFFFFF, 0x01000001, 0xFEFFFFFF])

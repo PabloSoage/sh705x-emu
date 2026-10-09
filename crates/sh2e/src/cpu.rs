@@ -57,23 +57,13 @@ impl Vector {
 /// implemented). A non-zero count after a run says the result may depend on it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Unverified {
-    /// MAC.L or MAC.W with SR.S = 1 (saturating multiply-and-accumulate).
+    /// MAC.L or MAC.W with SR.S = 1 (saturating multiply-and-accumulate). The software
+    /// manual contradicts itself here: for MAC.W its text sets MACH bit 0 on overflow and
+    /// its code does not; for MAC.L its code uses only MACH bits 15..0. The text's ranges
+    /// are what is implemented.
     pub mac_saturation: u64,
-    /// MOV Rm,@-Rn with m = n: the value stored is the decremented one.
-    pub store_dec_same_reg: u64,
-    /// A PC-relative load (MOV.W/MOV.L @(disp,PC), MOVA) in a delay slot: PC is taken
-    /// as the slot's own address + 4.
-    pub pc_relative_in_slot: u64,
-    /// FMAC where a fused and a twice-rounded result differ (the fused one is used).
-    pub fmac_fused_differs: u64,
-    /// FNEG or FABS of a NaN (done as a plain sign-bit operation).
-    pub fneg_fabs_nan: u64,
-    /// FTRC of a NaN or of a value outside the 32-bit integer range.
-    pub ftrc_out_of_range: u64,
-    /// An arithmetic FPU instruction with a NaN operand (default qNaN H'7FBFFFFF returned).
-    pub nan_operand: u64,
-    /// One of the two FADD/FSUB cases of manual 3.6 (MAX against an infinity), which the
-    /// manual describes with an inconsistent sign; +INF is used for both.
+    /// One of the two FADD/FSUB cases of hardware manual 3.6 (MAX against an infinity),
+    /// which that manual describes with an inconsistent sign; +INF is used for both.
     pub inf_max_quirk: u64,
 }
 

@@ -3,7 +3,8 @@
 //! Semantics follow manual REJ09B0177-0500 tables 2.12 to 2.17 and section 6. Where the
 //! manual is silent, the reading used is noted and counted in [`crate::Unverified`].
 //!
-//! "PC" in a PC-relative operand is the address of the instruction plus 4.
+//! "PC" in a PC-relative operand is the address of the instruction plus 4, or the branch
+//! target plus 2 in a delay slot (SH-2E software manual REJ09B0316-0200, MOVA).
 
 use crate::cpu::{SR_M, SR_MASK, SR_Q, SR_S, vector};
 use crate::decode::{DECODE, Op, disp4, imm8, m, n, sdisp12, simm8};
@@ -104,10 +105,10 @@ impl Cpu {
             self.raise(bus, vector::SLOT_ILLEGAL, target);
             return false;
         }
-        if matches!(op, Op::MovWPc | Op::MovLPc | Op::Mova) {
-            self.unverified.pc_relative_in_slot += 1;
-        }
-        match self.exec(bus, op, code, slot, target) {
+        // In a delay slot, the PC a PC-relative instruction sees is the branch target + 2
+        // (software manual, MOV @(disp,PC) and MOVA), so the slot executes as if it sat
+        // at target - 2: that gives "PC" = target + 2.
+        match self.exec(bus, op, code, target.wrapping_sub(2), target) {
             Flow::Next => self.pc = target,
             Flow::Done => {}
             Flow::Jump(_) | Flow::Delayed(_) => unreachable!("branches are illegal in a slot"),
@@ -159,12 +160,11 @@ impl Cpu {
                     Op::MovWStoreDec => 2,
                     _ => 4,
                 };
-                if n == m {
-                    self.unverified.store_dec_same_reg += 1;
-                }
+                // Software manual 7.2.30: the write uses Rm before Rn is decremented, so
+                // with m = n the original value is stored.
+                let v = self.r[m];
                 let a = self.r[n].wrapping_sub(size);
                 self.r[n] = a;
-                let v = self.r[m];
                 match size {
                     1 => self.wr8(bus, a, v),
                     2 => self.wr16(bus, a, v),

@@ -1109,3 +1109,56 @@ fn rz_vectors_from_the_exact_oracle() {
     }
     assert!(checked > 1000, "only {checked} vectors");
 }
+
+// ---------------------------------------------------------------- from the software manual
+
+#[test]
+fn predecrement_store_with_the_same_register_stores_the_original() {
+    // Software manual 7.2.30: Write_Long(R[n]-4, R[m]); R[n] -= 4.
+    let (c, mut m) = one(nm("0010nnnnmmmm0110", 1, 1), |c, _| c.r[1] = 0x2008);
+    assert_eq!(c.r[1], 0x2004);
+    assert_eq!(m.read32(0x2004), 0x2008);
+}
+
+#[test]
+fn pc_relative_in_a_delay_slot_sees_the_target_plus_2() {
+    // Software manual, MOVA: "the PC must point to (the branch destination) + 2".
+    // BRA to CODE + 0x22; slot MOVA @(0,PC),R0 -> (target + 2) & ~3 = target + 2 here.
+    let bra = enc("1010dddddddddddd", &[('d', 0x0F)]); // CODE + 4 + 0x1E = CODE + 0x22
+    let mova = enc("11000111dddddddd", &[('d', 0)]);
+    let (c, _) = run(&[bra, mova], 1, |_, _| {});
+    assert_eq!(c.pc, CODE + 0x22);
+    assert_eq!(c.r[0], CODE + 0x24);
+    // MOV.W @(disp,PC),Rn in the slot reads target + 2 + disp * 2, without alignment.
+    let movw = enc("1001nnnndddddddd", &[('n', 3), ('d', 1)]);
+    let (c, _) = run(&[bra, movw], 1, |_, m| m.write16(CODE + 0x26, 0x1234));
+    assert_eq!(c.r[3], 0x1234);
+}
+
+#[test]
+fn fneg_and_fabs_follow_the_special_case_tables() {
+    let neg = enc("1111nnnn01001101", &[('n', 1)]);
+    let abs = enc("1111nnnn01011101", &[('n', 1)]);
+    let run1 = |code: u16, x: u32| {
+        let (c, _) = one(code, |c, _| c.fr[1] = x);
+        (c.fr[1], c.fpscr & (1 << 16) != 0)
+    };
+    assert_eq!(
+        run1(neg, 0x7F80_0001),
+        (crate::QNAN, false),
+        "qNaN -> default qNaN"
+    );
+    assert_eq!(
+        run1(neg, 0x7FC0_0000),
+        (crate::QNAN, true),
+        "sNaN -> invalid"
+    );
+    assert_eq!(run1(abs, 0xFFC0_0000), (crate::QNAN, true));
+    assert_eq!(
+        run1(neg, 0x0000_0001),
+        (0x8000_0000, false),
+        "denormal counts as +0"
+    );
+    assert_eq!(run1(abs, 0x8000_0001), (0, false));
+    assert_eq!(run1(neg, 0xFF80_0000), (0x7F80_0000, false));
+}

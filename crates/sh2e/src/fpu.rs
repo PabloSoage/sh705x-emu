@@ -11,12 +11,12 @@
 //!   with the address of the next instruction saved (6.5.5);
 //! - two documented deviations from IEEE 754 with infinities (3.6).
 //!
-//! What the manual leaves to the SH-2E Software Manual (not at hand) is implemented on the
-//! closest documented behaviour and counted in [`crate::Unverified`].
+//! Instruction by instruction, the special cases (NaN, infinities, zeros, the default
+//! quiet NaN H'7FBFFFFF, FTRC saturation, FMAC as FMUL then FADD) follow the SH-2E
+//! Software Manual, REJ09B0316-0200, section 7.3.
 //!
 //! Host arithmetic is only used where it is exact or where the exact result can be
-//! recovered (TwoSum, fused multiply-add remainder), so the host's round-to-nearest never
-//! leaks into a result.
+//! recovered (TwoSum), so the host's round-to-nearest never leaks into a result.
 
 use crate::cpu::vector;
 use crate::decode::{Op, m, n};
@@ -132,7 +132,6 @@ impl Out {
 impl Cpu {
     fn nan_out(&mut self, ops: &[u32]) -> Option<Out> {
         if ops.iter().any(|&x| is_nan(x)) {
-            self.unverified.nan_operand += 1;
             let snan = ops.iter().any(|&x| is_snan(x));
             return Some(Out {
                 value: QNAN,
@@ -226,60 +225,39 @@ impl Cpu {
         Out::ok(rz32(val(a) / val(b)))
     }
 
-    /// FR0 x FRm + FRn, computed fused (one rounding).
+    /// FR0 x FRm + FRn. Software manual 7.3.9 defines it as FMUL then FADD, each rounded
+    /// toward zero, with the cause bits of both kept: not a fused multiply-add.
     fn fmac(&mut self, fr0: u32, frm: u32, frn: u32) -> Out {
-        if let Some(o) = self.nan_out(&[fr0, frm, frn]) {
-            return o;
+        let p = self.fmul(frm, fr0);
+        let s = self.fadd(frn, p.value);
+        Out {
+            value: s.value,
+            invalid: p.invalid || s.invalid,
+            div_zero: false,
         }
-        let (a, b, c) = (flush(fr0), flush(frm), flush(frn));
-        let zero = |x: u32| x & !SIGN == 0;
-        if (is_inf(a) && zero(b)) || (zero(a) && is_inf(b)) {
-            return Out::invalid(QNAN);
-        }
-        if is_inf(a) || is_inf(b) {
-            let p = ((a ^ b) & SIGN) | INF;
-            if is_inf(c) && (p ^ c) & SIGN != 0 {
-                return Out::invalid(QNAN);
-            }
-            return Out::ok(p);
-        }
-        if is_inf(c) {
-            return Out::ok(c);
-        }
-        let p = val(a) * val(b);
-        let (s, err) = two_sum(p, val(c));
-        let fused = rz_exact(s, err);
-        let (s2, err2) = two_sum(val(rz32(p)), val(c));
-        if rz_exact(s2, err2) != fused {
-            self.unverified.fmac_fused_differs += 1;
-        }
-        Out::ok(fused)
     }
 
     /// FCMP/EQ and FCMP/GT: (result for T, invalid).
     fn fcmp(&mut self, frn: u32, frm: u32, gt: bool) -> (bool, bool) {
         if is_nan(frn) || is_nan(frm) {
-            self.unverified.nan_operand += 1;
             return (false, is_snan(frn) || is_snan(frm));
         }
         let (a, b) = (val(flush(frn)), val(flush(frm)));
         (if gt { a > b } else { a == b }, false)
     }
 
-    /// FTRC: truncation to a signed 32-bit integer. Out of range and NaN saturate and set V
-    /// ([`crate::Unverified::ftrc_out_of_range`]).
+    /// FTRC: truncation to a signed 32-bit integer. Positive out of range gives
+    /// H'7FFFFFFF; negative out of range and NaN give H'80000000; both set V (software
+    /// manual 7.3.15, special-case table: its code's range constants are misprinted).
     fn ftrc(&mut self, x: u32) -> (u32, bool) {
         if is_nan(x) {
-            self.unverified.ftrc_out_of_range += 1;
             return (0x8000_0000, true);
         }
         let v = val(flush(x));
         if v >= 2_147_483_648.0 {
-            self.unverified.ftrc_out_of_range += 1;
             return (0x7FFF_FFFF, true);
         }
         if v < -2_147_483_648.0 {
-            self.unverified.ftrc_out_of_range += 1;
             return (0x8000_0000, true);
         }
         (v.trunc() as i32 as u32, false)
@@ -340,13 +318,21 @@ impl Cpu {
                 }
                 self.set_t(t);
             }
+            // Software manual 7.3.1 and 7.3.12: a quiet NaN gives the default qNaN, a
+            // signalling one is an invalid operation, a denormal counts as zero.
             Op::Fneg | Op::Fabs => {
                 let x = self.fr[n];
-                if is_nan(x) {
-                    self.unverified.fneg_fabs_nan += 1;
+                let (v, invalid) = if is_nan(x) {
+                    (QNAN, is_snan(x))
+                } else {
+                    let f = flush(x);
+                    (if op == Op::Fneg { f ^ SIGN } else { f & !SIGN }, false)
+                };
+                if self.fpu_status(invalid, false) {
+                    self.raise(bus, vector::FPU, next);
+                    return Flow::Done;
                 }
-                self.fpu_status(false, false);
-                self.fr[n] = if op == Op::Fneg { x ^ SIGN } else { x & !SIGN };
+                self.fr[n] = v;
             }
             // FLDS and FTRC: 1111mmmm00x11101, the register is in bits 11..8.
             Op::Ftrc => {
@@ -530,13 +516,12 @@ mod tests {
     }
 
     #[test]
-    fn fmac_is_fused() {
+    fn fmac_rounds_the_product_first() {
         let mut c = Cpu::new();
-        // (1 + 2^-23)^2 - (1 + 2^-22) = 2^-46 exactly when fused; 0 when rounded twice.
+        // (1 + 2^-23)^2 - (1 + 2^-22): 2^-46 if fused, 0 with FMUL then FADD (7.3.9).
         let x = bits(1.0) + 1;
         let o = c.fmac(x, x, bits(-(1.0 + 2f32.powi(-22))));
-        assert_eq!(o.value, bits(2f32.powi(-46)));
-        assert_eq!(c.unverified.fmac_fused_differs, 1);
+        assert_eq!(o.value, 0);
     }
 
     #[test]
