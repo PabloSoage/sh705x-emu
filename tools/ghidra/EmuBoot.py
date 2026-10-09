@@ -6,8 +6,11 @@
 # windows is resolved automatically: the polled bits are set (bt) or cleared (bf)
 # in every later read of that address, and the report lists each one.
 #
-# Args: <report.txt> [max instructions] [ADDR:MASK ...]
+# Args: <report.txt> [max instructions] [ADDR:MASK ...] [trace:<file>] [noauto]
 #   ADDR:MASK sets bits MASK (hex) in every byte read at ADDR (hex), by hand.
+#   trace:<file> writes every I/O access, untrimmed: "pc R|W addr size value" in hex,
+#     with the pc of the instruction (of the branch, for a delay slot).
+#   noauto turns off the automatic resolution of polls.
 # Run it with emu_boot.ps1.
 # @runtime Jython
 from ghidra.app.emulator import EmulatorHelper, MemoryAccessFilter
@@ -19,9 +22,16 @@ args = getScriptArgs()
 OUT = args[0]
 MAXN = int(args[1]) if len(args) > 1 else 3000000
 FORCE = {}
+TRACE = None
+AUTO = True
 for a in args[2:]:
-    k, v = a.split(":")
-    FORCE[int(k, 16)] = int(v, 16)
+    if a.startswith("trace:"):
+        TRACE = open(a[len("trace:"):], "w")
+    elif a == "noauto":
+        AUTO = False
+    else:
+        k, v = a.split(":")
+        FORCE[int(k, 16)] = int(v, 16)
 
 mem = currentProgram.getMemory()
 ROM_END = mem.getMaxAddress().getOffset() + 1
@@ -62,6 +72,8 @@ def val(values, size):
 
 def note(kind, off, size, v):
     pc = state["pc"]
+    if TRACE is not None and off >= IO_START:
+        TRACE.write("%X %s %X %d %X\n" % (pc, kind, off, size, v))
     if off >= IO_START:
         e = io.get(off)
         if e is None:
@@ -186,13 +198,15 @@ while state["n"] < MAXN:
                 loops[-1][2] += 1
             else:
                 loops.append([state["n"], pcs, 1])
-            if loops[-1][2] >= 2 and len(auto) < 200 and resolve_poll(pcs):
+            if AUTO and loops[-1][2] >= 2 and len(auto) < 200 and resolve_poll(pcs):
                 loops[-1][2] = 0
             elif loops[-1][2] >= 5:
                 stop = "stuck: same %d PCs for %d instructions" % (len(pcs), loops[-1][2] * WINDOW)
                 break
         window = {}
 dt = time.time() - t0
+if TRACE is not None:
+    TRACE.close()
 
 f = open(OUT, "w")
 w = lambda s="": f.write(s + "\n")
