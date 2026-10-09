@@ -14,6 +14,7 @@
 //! gives H'FFFE8000–H'FFFFBFFF. That is the range used here.
 
 pub mod adc;
+pub mod atu;
 pub mod cmt;
 pub mod intc;
 mod machine;
@@ -125,6 +126,7 @@ enum Periph {
     Cmt,
     Sci,
     Adc,
+    Atu,
 }
 
 impl Periph {
@@ -134,6 +136,7 @@ impl Periph {
             Periph::Cmt => (cmt::BASE, cmt::END),
             Periph::Sci => (sci::BASE, sci::END),
             Periph::Adc => (adc::BASE, adc::END),
+            Periph::Atu => (atu::BASE, atu::END),
         };
         ((b - IO_BASE) as usize, (e - b) as usize)
     }
@@ -147,6 +150,8 @@ fn periph_at(addr: u32) -> Option<Periph> {
         Some(Periph::Cmt)
     } else if (adc::BASE..adc::END).contains(&addr) {
         Some(Periph::Adc)
+    } else if (atu::BASE..atu::END).contains(&addr) {
+        Some(Periph::Atu)
     } else {
         None
     }
@@ -181,6 +186,8 @@ pub struct Sh7059 {
     pub sci: sci::Sci,
     /// A/D converter.
     pub adc: adc::Adc,
+    /// Advanced timer unit II (the channels modelled so far).
+    pub atu: atu::Atu,
     /// Highest pending interrupt: (level, vector), or (0, 0) for none.
     pub pending: (u32, u32),
     /// CPU cycle of the next timer event.
@@ -208,6 +215,7 @@ impl Sh7059 {
             cmt: cmt::Cmt::default(),
             sci: sci::Sci::default(),
             adc: adc::Adc::default(),
+            atu: atu::Atu::default(),
             pending: (0, 0),
             next_event: u64::MAX,
         })
@@ -242,6 +250,7 @@ impl Sh7059 {
             Region::Ram(o) => out.copy_from_slice(&self.ram[o..o + N]),
             Region::Io(o) => {
                 match periph_at(addr) {
+                    Some(Periph::Atu) => self.atu.store(self.now, &mut self.io),
                     Some(Periph::Sci) => {
                         let (b, len) = Periph::Sci.span();
                         let k = ((addr - sci::BASE) / 8) as usize;
@@ -265,7 +274,15 @@ impl Sh7059 {
             Region::Rom(_) => self.rom_writes += 1,
             Region::Ram(o) => self.ram[o..o + N].copy_from_slice(&bytes),
             Region::Io(o) => {
-                if let Some(p) = periph_at(addr) {
+                if periph_at(addr) == Some(Periph::Atu) {
+                    self.atu.resync(self.now);
+                    self.atu.store(self.now, &mut self.io);
+                    let mut before = [0u8; N];
+                    before.copy_from_slice(&self.io[o..o + N]);
+                    self.io[o..o + N].copy_from_slice(&bytes);
+                    self.atu.load(self.now, addr, &before, &mut self.io);
+                    self.update_interrupts();
+                } else if let Some(p) = periph_at(addr) {
                     self.store_regs(p);
                     let (b, len) = p.span();
                     let mut before = [0u8; 96];
@@ -276,6 +293,7 @@ impl Sh7059 {
                         Periph::Cmt => self.cmt.load(self.now, before, after),
                         Periph::Sci => self.sci.load(self.now, before, after),
                         Periph::Adc => self.adc.load(self.now, before, after),
+                        Periph::Atu => unreachable!("handled above"),
                     }
                     self.store_regs(p);
                     self.update_interrupts();
@@ -304,16 +322,22 @@ impl Sh7059 {
         for p in [Periph::Cmt, Periph::Sci, Periph::Adc] {
             self.store_regs(p);
         }
+        self.atu.reset(&mut self.io);
     }
 
     /// Copies a peripheral model's registers into the register storage before a read.
     fn store_regs(&mut self, p: Periph) {
         let (b, len) = p.span();
+        if p == Periph::Atu {
+            self.atu.store(self.now, &mut self.io);
+            return;
+        }
         let regs = &mut self.io[b..b + len];
         match p {
             Periph::Cmt => self.cmt.store(self.now, regs),
             Periph::Sci => self.sci.store(regs),
             Periph::Adc => self.adc.store(regs),
+            Periph::Atu => unreachable!(),
         }
     }
 
@@ -323,26 +347,29 @@ impl Sh7059 {
         self.cmt.advance(self.now);
         self.sci.advance(self.now);
         self.adc.advance(self.now);
+        self.atu.advance(self.now, &mut self.io);
         self.update_interrupts();
     }
 
     fn update_interrupts(&mut self) {
         let i = (intc::IPR_BASE - IO_BASE) as usize;
-        self.pending = intc::highest(
-            &self.io[i..i + 24],
-            &[
-                (intc::CMTI0, self.cmt.ch[0].requesting()),
-                (intc::ADI0, self.adc.requesting(0)),
-                (intc::CMTI1, self.cmt.ch[1].requesting()),
-                (intc::ADI1, self.adc.requesting(1)),
-                (intc::ADI2, self.adc.requesting(2)),
-            ],
-        );
+        // In vector order, which is the default priority order of table 7.3.
+        let mut sources: [(intc::Source, bool); 39] = [(intc::CMTI0, false); 39];
+        for (k, (vector, ipr, shift, on)) in atu::requests(&self.io).into_iter().enumerate() {
+            sources[k] = (intc::Source { vector, ipr, shift }, on);
+        }
+        sources[34] = (intc::CMTI0, self.cmt.ch[0].requesting());
+        sources[35] = (intc::ADI0, self.adc.requesting(0));
+        sources[36] = (intc::CMTI1, self.cmt.ch[1].requesting());
+        sources[37] = (intc::ADI1, self.adc.requesting(1));
+        sources[38] = (intc::ADI2, self.adc.requesting(2));
+        self.pending = intc::highest(&self.io[i..i + 24], &sources);
         self.next_event = self
             .cmt
             .next_event()
             .min(self.sci.next_event())
-            .min(self.adc.next_event());
+            .min(self.adc.next_event())
+            .min(self.atu.next_event());
     }
 
     #[inline(always)]
