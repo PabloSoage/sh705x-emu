@@ -54,6 +54,31 @@ pub const ADI2: Source = Source {
     shift: 0,
 };
 
+/// DEI0-3: vectors 72, 74, 76, 78; DEI0 and DEI1 share IPRC bits 15..12, DEI2 and DEI3
+/// bits 11..8.
+pub const DEI: [Source; 4] = [
+    Source {
+        vector: 72,
+        ipr: 2,
+        shift: 12,
+    },
+    Source {
+        vector: 74,
+        ipr: 2,
+        shift: 12,
+    },
+    Source {
+        vector: 76,
+        ipr: 2,
+        shift: 8,
+    },
+    Source {
+        vector: 78,
+        ipr: 2,
+        shift: 8,
+    },
+];
+
 /// The priority level of `src` given the 24 IPR bytes.
 pub fn level(ipr: &[u8], src: Source) -> u32 {
     let r = u16::from_be_bytes([ipr[2 * src.ipr], ipr[2 * src.ipr + 1]]);

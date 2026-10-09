@@ -285,6 +285,12 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
     writeln!(o, "A/D rounds {:?}", chip.adc.rounds).unwrap();
     writeln!(
         o,
+        "DMA units {}; channels left on a peripheral request (not modelled) {}",
+        chip.dmac.transfers, chip.dmac.peripheral_requests
+    )
+    .unwrap();
+    writeln!(
+        o,
         "interrupts taken: {}; CMT matches {:?}; sleeping {}",
         if taken.is_empty() {
             "none".to_string()

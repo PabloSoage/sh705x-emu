@@ -23,7 +23,7 @@ The first target is a Denso ECU with an SH7059 (Opel Astra J, A17DTJ engine).
 |---|---|---|
 | 0 | Boot in Ghidra's p-code emulator: find where the firmware waits on hardware | done |
 | 1 | SH-2E core (integer and FPU) and memory map, in Rust | done |
-| 2 | Interrupt controller and on-chip peripherals (ATU-II, CMT, WDT, DMAC, SCI, A/D, HCAN) | in progress: CMT and INTC |
+| 2 | Interrupt controller and on-chip peripherals (ATU-II, CMT, WDT, DMAC, SCI, A/D, HCAN) | in progress: INTC, CMT, DMAC, SCI, A/D and most of the ATU-II done; the rest needs the engine |
 | 3 | The Denso board: EEPROM, external chips, pin-to-sensor map | — |
 | 4 | Diagnostics over the emulated CAN bus | — |
 | 5 | Simulated engine | — |
@@ -49,15 +49,19 @@ second, which makes it a reference oracle rather than an emulator.
   from reset to the background loop.
 - **With the CMT and the interrupt controller**, the firmware takes its 1 ms tick and
   starts its periodic work: A/D conversions, CAN mailboxes, serial traffic.
-- **Speed:** a median of 81.6 M instructions per second on an i7-10870H; the SH7059
-  runs at up to 80 MHz.
+- **With the DMAC, SCI, A/D and ATU-II modelled**, the firmware boots and runs with no
+  status bit forced: it passes its timer self-tests, fills RAM by DMA, and takes compare
+  match interrupts from the ATU-II as it runs.
+- **Speed:** 81.6 M instructions per second for the core alone (median, i7-10870H);
+  with the peripherals, about 65 M. The SH7059 runs at up to 80 MHz, so this is now the
+  next thing to work on.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
 | `crates/sh2e` | SH-2E core: registers, reset, and the `Bus` trait it runs against |
-| `crates/sh7059` | The SH7059: address map, flash, RAM, register area, CMT, INTC, and `Machine`, which runs CPU and chip on one clock |
+| `crates/sh7059` | The SH7059: address map, flash, RAM, register area, peripherals (INTC, CMT, DMAC, SCI, A/D, ATU-II), and `Machine`, which runs CPU and chip on one clock |
 | `crates/board` | The ECU board: EEPROM image now; external chips and pin map later |
 | `crates/engine` | The simulated engine (phase 5, empty) |
 | `crates/bridge` | Virtual CAN bus and diagnostic tool bridges (phase 4, empty) |
