@@ -22,8 +22,8 @@ The first target is a Denso ECU with an SH7059 (Opel Astra J, A17DTJ engine).
 | Phase | What | State |
 |---|---|---|
 | 0 | Boot in Ghidra's p-code emulator: find where the firmware waits on hardware | done |
-| 1 | SH-2E core (integer and FPU) and memory map, in Rust | next |
-| 2 | Interrupt controller and on-chip peripherals (ATU-II, CMT, WDT, DMAC, SCI, A/D, HCAN) | — |
+| 1 | SH-2E core (integer and FPU) and memory map, in Rust | done |
+| 2 | Interrupt controller and on-chip peripherals (ATU-II, CMT, WDT, DMAC, SCI, A/D, HCAN) | in progress: CMT and INTC |
 | 3 | The Denso board: EEPROM, external chips, pin-to-sensor map | — |
 | 4 | Diagnostics over the emulated CAN bus | — |
 | 5 | Simulated engine | — |
@@ -40,12 +40,24 @@ pin, SCI transmit status, DMA end, A/D end and ATU-II compare flags. Beyond that
 nothing happens without timer interrupts. Ghidra executes about 37,000 instructions per
 second, which makes it a reference oracle rather than an emulator.
 
+### Where it stands
+
+- **Core:** every SH-2E instruction, delay slots, exceptions and interrupts, and an FPU
+  that rounds toward zero exactly. Checked against Ghidra's disassembler on all 65,536
+  codes, against an exact rational oracle for the FPU, and by mutation testing.
+- **The Astra's boot** makes the same 196,669 register accesses as Ghidra's emulator,
+  from reset to the background loop.
+- **With the CMT and the interrupt controller**, the firmware takes its 1 ms tick and
+  starts its periodic work: A/D conversions, CAN mailboxes, serial traffic.
+- **Speed:** a median of 81.6 M instructions per second on an i7-10870H; the SH7059
+  runs at up to 80 MHz.
+
 ## Layout
 
 | Path | Contents |
 |---|---|
 | `crates/sh2e` | SH-2E core: registers, reset, and the `Bus` trait it runs against |
-| `crates/sh7059` | The SH7059: address map, flash, RAM and the peripheral register area |
+| `crates/sh7059` | The SH7059: address map, flash, RAM, register area, CMT, INTC, and `Machine`, which runs CPU and chip on one clock |
 | `crates/board` | The ECU board: EEPROM image now; external chips and pin map later |
 | `crates/engine` | The simulated engine (phase 5, empty) |
 | `crates/bridge` | Virtual CAN bus and diagnostic tool bridges (phase 4, empty) |
@@ -61,7 +73,8 @@ cargo run --release -p sh705x -- info --flash <flash.bin> --eeprom <eeprom.bin>
 ```
 
 `info` loads both images, checks their sizes, prints the reset vectors with the region
-each one points into, and the CPU state after a power-on reset.
+each one points into, and the CPU state after a power-on reset. `trace` runs the
+firmware and writes every peripheral register access; see `sh705x help`.
 
 ```sh
 cargo test --all
