@@ -13,6 +13,11 @@
 //! states; the same table reserves everything up to H'FFFE7FFF, and the flash chapter
 //! gives H'FFFE8000–H'FFFFBFFF. That is the range used here.
 
+pub mod cmt;
+pub mod intc;
+mod machine;
+
+pub use machine::Machine;
 use sh2e::Bus;
 use std::fmt;
 
@@ -130,6 +135,14 @@ pub struct Sh7059 {
     /// Writes to the flash ROM since power-on, which are dropped. The firmware only
     /// writes flash through the flash controller's programming sequence.
     pub rom_writes: u64,
+    /// The current CPU cycle, which timers read; the machine sets it before each step.
+    pub now: u64,
+    /// Compare match timer.
+    pub cmt: cmt::Cmt,
+    /// Highest pending interrupt: (level, vector), or (0, 0) for none.
+    pub pending: (u32, u32),
+    /// CPU cycle of the next timer event.
+    pub next_event: u64,
 }
 
 impl Sh7059 {
@@ -149,6 +162,17 @@ impl Sh7059 {
             trace_pc: 0,
             unmapped_accesses: 0,
             rom_writes: 0,
+            now: 0,
+            cmt: cmt::Cmt::default(),
+            pending: (0, 0),
+            next_event: u64::MAX,
+        })
+        .map(|mut chip| {
+            // ICR.NMIL reads the NMI pin; the boot loader waits for it to be high. How the
+            // board drives the pin is not known: it is taken as high [SUP].
+            chip.io_force[(intc::ICR - IO_BASE) as usize] |= 0x80;
+            chip.reset_registers();
+            chip
         })
     }
 
@@ -173,6 +197,10 @@ impl Sh7059 {
             Region::Rom(o) => out.copy_from_slice(&self.rom[o..o + N]),
             Region::Ram(o) => out.copy_from_slice(&self.ram[o..o + N]),
             Region::Io(o) => {
+                if (cmt::BASE..cmt::END).contains(&addr) {
+                    let c = (cmt::BASE - IO_BASE) as usize;
+                    self.cmt.store(self.now, &mut self.io[c..c + 14]);
+                }
                 for (i, b) in out.iter_mut().enumerate() {
                     *b = self.io[o + i] | self.io_force[o + i];
                 }
@@ -188,11 +216,50 @@ impl Sh7059 {
             Region::Rom(_) => self.rom_writes += 1,
             Region::Ram(o) => self.ram[o..o + N].copy_from_slice(&bytes),
             Region::Io(o) => {
-                self.io[o..o + N].copy_from_slice(&bytes);
+                if (cmt::BASE..cmt::END).contains(&addr) {
+                    let c = (cmt::BASE - IO_BASE) as usize;
+                    self.cmt.store(self.now, &mut self.io[c..c + 14]);
+                    let before: [u8; 14] = self.io[c..c + 14].try_into().unwrap();
+                    self.io[o..o + N].copy_from_slice(&bytes);
+                    self.cmt.load(self.now, &before, &self.io[c..c + 14]);
+                    self.update_interrupts();
+                } else {
+                    self.io[o..o + N].copy_from_slice(&bytes);
+                    if (intc::IPR_BASE..intc::IPR_END).contains(&addr) {
+                        self.update_interrupts();
+                    }
+                }
                 self.record(true, addr, &bytes);
             }
             Region::Unmapped => self.unmapped_accesses += 1,
         }
+    }
+
+    /// Initial values of the modelled registers that are not zero after a power-on reset.
+    fn reset_registers(&mut self) {
+        let c = (cmt::BASE - IO_BASE) as usize;
+        self.cmt.ch[0].cor = 0xFFFF;
+        self.cmt.ch[1].cor = 0xFFFF;
+        self.cmt.store(0, &mut self.io[c..c + 14]);
+    }
+
+    /// Takes the timer events due by `now` and refreshes the pending interrupt and the
+    /// next event.
+    pub fn advance(&mut self) {
+        self.cmt.advance(self.now);
+        self.update_interrupts();
+    }
+
+    fn update_interrupts(&mut self) {
+        let i = (intc::IPR_BASE - IO_BASE) as usize;
+        self.pending = intc::highest(
+            &self.io[i..i + 24],
+            &[
+                (intc::CMTI0, self.cmt.ch[0].requesting()),
+                (intc::CMTI1, self.cmt.ch[1].requesting()),
+            ],
+        );
+        self.next_event = self.cmt.next_event();
     }
 
     #[inline(always)]

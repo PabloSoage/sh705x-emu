@@ -3,7 +3,7 @@
 
 use board::Eeprom;
 use sh2e::{Cpu, Vector};
-use sh7059::{Region, Sh7059, region};
+use sh7059::{Machine, Region, Sh7059, region};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -172,32 +172,35 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
     if out.is_some() {
         chip.trace = Some(Vec::new());
     }
-    let mut cpu = Cpu::new();
-    cpu.address_errors = address_errors;
-    cpu.power_on_reset(&mut chip);
+    let mut m = Machine::new(chip, address_errors);
     // The last steps before the first exception, to say where it came from.
     let mut recent = std::collections::VecDeque::with_capacity(32);
     let mut first_exception = None;
     let start = std::time::Instant::now();
-    if !history && out.is_none() {
-        // Nothing to record per step: let the core run on its own.
-        cpu.run(&mut chip, max);
+    if !history {
+        m.run(max);
     }
-    while cpu.instructions < max && !cpu.sleeping {
-        chip.trace_pc = cpu.pc;
-        if history && first_exception.is_none() {
+    while m.cpu.instructions < max {
+        if first_exception.is_none() {
             if recent.len() == 32 {
                 recent.pop_front();
             }
-            recent.push_back((cpu.instructions, cpu.clone()));
+            recent.push_back((m.cpu.instructions, m.cpu.clone()));
         }
-        let before = cpu.exceptions;
-        cpu.step(&mut chip);
-        if cpu.exceptions != before && first_exception.is_none() {
-            first_exception = Some(cpu.last_exception);
+        let before = m.cpu.exceptions;
+        if !m.step() {
+            break;
+        }
+        if m.cpu.exceptions != before && first_exception.is_none() {
+            first_exception = Some(m.cpu.last_exception);
         }
     }
     let secs = start.elapsed().as_secs_f64();
+    let Machine {
+        cpu,
+        mut chip,
+        interrupts,
+    } = m;
 
     let mut o = String::new();
     if let Some(v) = first_exception {
@@ -241,6 +244,24 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
     )
     .unwrap();
     writeln!(o, "unverified paths: {:?}", cpu.unverified).unwrap();
+    let taken: Vec<String> = interrupts
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| **n > 0)
+        .map(|(v, n)| format!("vector {v}: {n}"))
+        .collect();
+    writeln!(
+        o,
+        "interrupts taken: {}; CMT matches {:?}; sleeping {}",
+        if taken.is_empty() {
+            "none".to_string()
+        } else {
+            taken.join(", ")
+        },
+        chip.cmt.matches,
+        cpu.sleeping
+    )
+    .unwrap();
     if let (Some(path), Some(t)) = (out, chip.trace.as_ref()) {
         let mut text = String::with_capacity(t.len() * 28);
         for a in t {
