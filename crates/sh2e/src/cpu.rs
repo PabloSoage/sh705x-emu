@@ -1,10 +1,34 @@
 use crate::Bus;
 
+/// T bit of SR.
+pub const SR_T: u32 = 0x0000_0001;
+/// S bit of SR (saturation for MAC).
+pub const SR_S: u32 = 0x0000_0002;
 /// Interrupt mask bits I3..I0 of SR.
 pub const SR_I_MASK: u32 = 0x0000_00F0;
+/// Q bit of SR (division).
+pub const SR_Q: u32 = 0x0000_0100;
+/// M bit of SR (division).
+pub const SR_M: u32 = 0x0000_0200;
+/// The SR bits that exist on the SH-2: M, Q, I3..I0, S, T. The rest read as 0.
+pub const SR_MASK: u32 = 0x0000_03F3;
 
 /// FPSCR after a reset (manual table 2.1).
 pub const FPSCR_RESET: u32 = 0x0004_0001;
+
+/// Exception vector numbers (manual table 6.3).
+pub mod vector {
+    /// General illegal instruction.
+    pub const GENERAL_ILLEGAL: u32 = 4;
+    /// Illegal instruction in a delay slot.
+    pub const SLOT_ILLEGAL: u32 = 6;
+    /// CPU address error.
+    pub const CPU_ADDRESS_ERROR: u32 = 9;
+    /// NMI.
+    pub const NMI: u32 = 11;
+    /// FPU exception.
+    pub const FPU: u32 = 13;
+}
 
 /// Entries of the exception vector table used at reset (manual section 6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,10 +51,37 @@ impl Vector {
     }
 }
 
-/// Architectural state of an SH-2E.
+/// Behaviour the manual does not pin down, counted every time the firmware runs into it.
 ///
-/// Floating-point registers hold raw IEEE-754 bit patterns, not `f32`: the core does its
-/// own rounding (toward zero) and must not let the host FPU touch the values on the way.
+/// Each counter is a path implemented on the best available reading (noted where it is
+/// implemented). A non-zero count after a run says the result may depend on it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Unverified {
+    /// MAC.L or MAC.W with SR.S = 1 (saturating multiply-and-accumulate).
+    pub mac_saturation: u64,
+    /// MOV Rm,@-Rn with m = n: the value stored is the decremented one.
+    pub store_dec_same_reg: u64,
+    /// A PC-relative load (MOV.W/MOV.L @(disp,PC), MOVA) in a delay slot: PC is taken
+    /// as the slot's own address + 4.
+    pub pc_relative_in_slot: u64,
+    /// FMAC where a fused and a twice-rounded result differ (the fused one is used).
+    pub fmac_fused_differs: u64,
+    /// FNEG or FABS of a NaN (done as a plain sign-bit operation).
+    pub fneg_fabs_nan: u64,
+    /// FTRC of a NaN or of a value outside the 32-bit integer range.
+    pub ftrc_out_of_range: u64,
+    /// An arithmetic FPU instruction with a NaN operand (default qNaN H'7FBFFFFF returned).
+    pub nan_operand: u64,
+    /// One of the two FADD/FSUB cases of manual 3.6 (MAX against an infinity), which the
+    /// manual describes with an inconsistent sign; +INF is used for both.
+    pub inf_max_quirk: u64,
+}
+
+/// Architectural state of an SH-2E, plus counters.
+///
+/// Floating-point registers hold raw IEEE-754 bit patterns, not `f32`: the FPU rounds
+/// toward zero and uses the opposite quiet/signaling NaN convention from the host, so the
+/// host FPU must not touch the values on the way.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cpu {
     /// General registers R0..R15; R15 is the stack pointer.
@@ -47,7 +98,7 @@ pub struct Cpu {
     pub macl: u32,
     /// Procedure register (return address).
     pub pr: u32,
-    /// Program counter.
+    /// Program counter: the address of the next instruction to execute.
     pub pc: u32,
     /// Floating-point registers FR0..FR15, as raw bits.
     pub fr: [u32; 16],
@@ -55,6 +106,27 @@ pub struct Cpu {
     pub fpul: u32,
     /// Floating-point status and control register.
     pub fpscr: u32,
+    /// Asleep after SLEEP, until an interrupt is accepted.
+    pub sleeping: bool,
+    /// Instructions executed, delay slots included.
+    pub instructions: u64,
+    /// Estimated CPU cycles: the minimum counts of manual tables 2.12 to 2.19, with no
+    /// wait states or pipeline contention.
+    pub cycles: u64,
+    /// Exceptions taken (resets excluded).
+    pub exceptions: u64,
+    /// Vector number of the last exception taken.
+    pub last_exception: Option<u32>,
+    /// Paths taken that the manual does not pin down.
+    pub unverified: Unverified,
+    /// Raise CPU address errors on misaligned data accesses (manual 6.3), as the chip
+    /// does. Only for comparing with Ghidra's emulator, which does not model them, is
+    /// this turned off: the access is then made at the misaligned address.
+    pub address_errors: bool,
+    /// The last instruction was one after which interrupts are not accepted.
+    pub(crate) irq_block: bool,
+    /// A data access of the current instruction was misaligned.
+    pub(crate) addr_error: bool,
 }
 
 impl Default for Cpu {
@@ -78,6 +150,15 @@ impl Cpu {
             fr: [0; 16],
             fpul: 0,
             fpscr: 0,
+            sleeping: false,
+            instructions: 0,
+            cycles: 0,
+            exceptions: 0,
+            last_exception: None,
+            unverified: Unverified::default(),
+            address_errors: true,
+            irq_block: false,
+            addr_error: false,
         }
     }
 
@@ -87,49 +168,126 @@ impl Cpu {
     /// The manual leaves every other register undefined. Here they are zero, so that a run
     /// is reproducible; firmware that reads one before writing it is a finding to report.
     pub fn power_on_reset<B: Bus>(&mut self, bus: &mut B) {
+        let address_errors = self.address_errors;
         *self = Self::new();
+        self.address_errors = address_errors;
         self.pc = bus.read32(Vector::PowerOnPc.address());
         self.r[15] = bus.read32(Vector::PowerOnSp.address());
         self.sr = SR_I_MASK;
         self.vbr = 0;
         self.fpscr = FPSCR_RESET;
     }
+
+    /// The T bit as 0 or 1.
+    #[inline(always)]
+    pub fn t(&self) -> u32 {
+        self.sr & SR_T
+    }
+
+    #[inline(always)]
+    pub(crate) fn set_t(&mut self, t: bool) {
+        self.sr = (self.sr & !SR_T) | t as u32;
+    }
+
+    /// Current interrupt mask level, 0 to 15.
+    pub fn interrupt_mask(&self) -> u32 {
+        (self.sr & SR_I_MASK) >> 4
+    }
+
+    /// Exception processing for address errors, interrupts and instructions (manual
+    /// 6.1.2): SR and then `saved_pc` are pushed on the stack pointed to by R15, and
+    /// execution continues at the address in vector `vector` of the table at VBR.
+    pub(crate) fn raise<B: Bus>(&mut self, bus: &mut B, vector: u32, saved_pc: u32) {
+        let sp = self.r[15].wrapping_sub(4);
+        bus.write32(sp, self.sr);
+        let sp = sp.wrapping_sub(4);
+        bus.write32(sp, saved_pc);
+        self.r[15] = sp;
+        self.pc = bus.read32(self.vbr.wrapping_add(vector * 4));
+        self.exceptions += 1;
+        self.last_exception = Some(vector);
+    }
+
+    /// Whether an interrupt of `level` (1 to 15, or 16 for NMI) would be accepted now.
+    ///
+    /// Not after an instruction that blocks interrupts (manual table 6.10), and not at or
+    /// below the SR mask, NMI excepted.
+    pub fn accepts_interrupt(&self, level: u32) -> bool {
+        !self.irq_block && (level >= 16 || level > self.interrupt_mask())
+    }
+
+    /// Takes an interrupt if it can be accepted (see [`Cpu::accepts_interrupt`]): pushes SR
+    /// and PC, sets the SR mask to the interrupt's level (15 for NMI) and jumps through
+    /// `vector`. Wakes the core from SLEEP. Returns whether it was taken.
+    pub fn interrupt<B: Bus>(&mut self, bus: &mut B, level: u32, vector: u32) -> bool {
+        if !self.accepts_interrupt(level) {
+            return false;
+        }
+        let pc = self.pc;
+        self.raise(bus, vector, pc);
+        self.sr = (self.sr & !SR_I_MASK) | (level.min(15) << 4);
+        self.sleeping = false;
+        true
+    }
+
+    // Data accesses. A misaligned word or longword access raises a CPU address error
+    // once the instruction finishes (manual 6.3); the access itself is dropped and a read
+    // returns 0.
+
+    #[inline(always)]
+    pub(crate) fn rd8<B: Bus>(&mut self, bus: &mut B, a: u32) -> u8 {
+        bus.read8(a)
+    }
+
+    #[inline(always)]
+    pub(crate) fn rd16<B: Bus>(&mut self, bus: &mut B, a: u32) -> u16 {
+        if a & 1 != 0 && self.address_errors {
+            self.addr_error = true;
+            return 0;
+        }
+        bus.read16(a)
+    }
+
+    #[inline(always)]
+    pub(crate) fn rd32<B: Bus>(&mut self, bus: &mut B, a: u32) -> u32 {
+        if a & 3 != 0 && self.address_errors {
+            self.addr_error = true;
+            return 0;
+        }
+        bus.read32(a)
+    }
+
+    #[inline(always)]
+    pub(crate) fn wr8<B: Bus>(&mut self, bus: &mut B, a: u32, v: u32) {
+        bus.write8(a, v as u8);
+    }
+
+    #[inline(always)]
+    pub(crate) fn wr16<B: Bus>(&mut self, bus: &mut B, a: u32, v: u32) {
+        if a & 1 != 0 && self.address_errors {
+            self.addr_error = true;
+            return;
+        }
+        bus.write16(a, v as u16);
+    }
+
+    #[inline(always)]
+    pub(crate) fn wr32<B: Bus>(&mut self, bus: &mut B, a: u32, v: u32) {
+        if a & 3 != 0 && self.address_errors {
+            self.addr_error = true;
+            return;
+        }
+        bus.write32(a, v);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A flat big-endian memory starting at address 0.
-    struct Flat(Vec<u8>);
-
-    impl Bus for Flat {
-        fn read8(&mut self, addr: u32) -> u8 {
-            self.0[addr as usize]
-        }
-        fn read16(&mut self, addr: u32) -> u16 {
-            let a = addr as usize;
-            u16::from_be_bytes([self.0[a], self.0[a + 1]])
-        }
-        fn read32(&mut self, addr: u32) -> u32 {
-            let a = addr as usize;
-            u32::from_be_bytes(self.0[a..a + 4].try_into().unwrap())
-        }
-        fn write8(&mut self, addr: u32, value: u8) {
-            self.0[addr as usize] = value;
-        }
-        fn write16(&mut self, addr: u32, value: u16) {
-            let a = addr as usize;
-            self.0[a..a + 2].copy_from_slice(&value.to_be_bytes());
-        }
-        fn write32(&mut self, addr: u32, value: u32) {
-            let a = addr as usize;
-            self.0[a..a + 4].copy_from_slice(&value.to_be_bytes());
-        }
-    }
+    use crate::testing::Flat;
 
     fn table(pc: u32, sp: u32) -> Flat {
-        let mut m = Flat(vec![0; 64]);
+        let mut m = Flat::new(64);
         m.write32(0, pc);
         m.write32(4, sp);
         m.write32(8, 0xDEAD_BEEF);

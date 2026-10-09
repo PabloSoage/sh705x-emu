@@ -19,4 +19,12 @@ pub trait Bus {
     fn write16(&mut self, addr: u32, value: u16);
     /// Writes a 32-bit longword to an address that is a multiple of 4.
     fn write32(&mut self, addr: u32, value: u32);
+
+    /// Fetches an instruction from an even address. Separate from [`Bus::read16`] so an
+    /// implementation can give code fetches a fast path, and so instruction fetches do not
+    /// trigger peripheral read side effects in tracing.
+    #[inline(always)]
+    fn fetch16(&mut self, addr: u32) -> u16 {
+        self.read16(addr)
+    }
 }
