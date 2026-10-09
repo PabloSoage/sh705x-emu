@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Pablo Soage <p.soage@udc.es>"]
+publish = false
+
+[workspace.dependencies]
+sh2e = { path = "crates/sh2e" }
+sh7059 = { path = "crates/sh7059" }
+board = { path = "crates/board" }
+engine = { path = "crates/engine" }
+bridge = { path = "crates/bridge" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

@@ -44,8 +44,35 @@ second, which makes it a reference oracle rather than an emulator.
 
 | Path | Contents |
 |---|---|
+| `crates/sh2e` | SH-2E core: registers, reset, and the `Bus` trait it runs against |
+| `crates/sh7059` | The SH7059: address map, flash, RAM and the peripheral register area |
+| `crates/board` | The ECU board: EEPROM image now; external chips and pin map later |
+| `crates/engine` | The simulated engine (phase 5, empty) |
+| `crates/bridge` | Virtual CAN bus and diagnostic tool bridges (phase 4, empty) |
+| `crates/sh705x` | Command-line front end |
 | `tools/ghidra/EmuBoot.py` | Phase 0: runs a raw flash image from its reset vector in Ghidra's p-code emulator, logs every I/O access and resolves status-bit polls automatically |
 | `tools/ghidra/emu_boot.ps1` | Runs `EmuBoot.py` headless in a throwaway project |
+
+## Building and running
+
+```sh
+cargo build --release
+cargo run --release -p sh705x -- info --flash <flash.bin> --eeprom <eeprom.bin>
+```
+
+`info` loads both images, checks their sizes, prints the reset vectors with the region
+each one points into, and the CPU state after a power-on reset.
+
+```sh
+cargo test --all
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all --check
+```
+
+Tests that need a real dump read it from `SH705X_FLASH` (and `SH705X_EEPROM`) and are
+skipped when those are not set.
+
+The phase 0 tool needs Ghidra 12 (`GHIDRA_INSTALL_DIR` or `-Ghidra`):
 
 ```powershell
 .\tools\ghidra\emu_boot.ps1 -Flash <flash.bin> -Out boot.report.txt -Max 15000000
@@ -55,8 +82,16 @@ second, which makes it a reference oracle rather than an emulator.
 
 - **Own interpreter, in Rust.** No existing emulator models the SH-2E: its single-precision
   FPU rounds toward zero only, which neither the host FPU nor Ghidra does by default.
+- **Real time is the target.** The emulated ECU should run at least as fast as the real
+  one: the SH7059 runs at up to 80 MHz, so up to 80 million instructions per second.
+  The core is built for that from the start: the bus is a generic parameter (no dynamic
+  dispatch per access), flash and RAM sit on a fast path apart from the peripherals,
+  and instructions will be pre-decoded. A phase 8 FPGA port is the route to hard real
+  time.
 - **Virtual time.** Scenarios run on an event queue and are reproducible bit for bit;
   wall-clock pacing is only used when a real tool is attached to a bridge.
+- **Built to be watched.** The core exposes pause, single step and breakpoints, so a
+  graphical front end can show registers, peripherals and the engine live.
 - **Reference:** *SH-2E SH7059 F-ZTAT, SH7058S F-ZTAT Hardware Manual*, Renesas
   REJ09B0177-0500, Rev. 5.00.
 

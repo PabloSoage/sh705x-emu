@@ -1,0 +1,11 @@
+[package]
+name = "bridge"
+description = "Connections from the emulated ECU to the outside: virtual CAN bus and diagnostic tool bridges"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

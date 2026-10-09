@@ -1,0 +1,16 @@
+[package]
+name = "sh705x"
+description = "Command-line front end of the SH705x ECU emulator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+sh2e.workspace = true
+sh7059.workspace = true
+board.workspace = true
+
+[lints]
+workspace = true
