@@ -90,8 +90,8 @@ The phase 0 tool needs Ghidra 12 (`GHIDRA_INSTALL_DIR` or `-Ghidra`):
   time.
 - **Virtual time.** Scenarios run on an event queue and are reproducible bit for bit;
   wall-clock pacing is only used when a real tool is attached to a bridge.
-- **Built to be watched.** The core exposes pause, single step and breakpoints, so a
-  graphical front end can show registers, peripherals and the engine live.
+- **Built to be watched.** The core will expose pause, single step and breakpoints, so
+  a graphical front end can show registers, peripherals and the engine live.
 - **Reference:** *SH-2E SH7059 F-ZTAT, SH7058S F-ZTAT Hardware Manual*, Renesas
   REJ09B0177-0500, Rev. 5.00.
 
