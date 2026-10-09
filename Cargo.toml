@@ -16,6 +16,10 @@ board = { path = "crates/board" }
 engine = { path = "crates/engine" }
 bridge = { path = "crates/bridge" }
 
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
