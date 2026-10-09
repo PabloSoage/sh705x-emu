@@ -1,0 +1,16 @@
+# Firmware never enters this repository: users bring their own dumps.
+*.bin
+*.hex
+*.s19
+*.srec
+*.mot
+*.ori
+*.eep
+dumps/
+
+# Build output
+/target/
+
+# Tool output
+*.log
+*.report.txt
