@@ -77,3 +77,54 @@ fn the_ecu_sees_the_engine_turn() {
     let last = out.lines().map(str::trim).rfind(|l| l.starts_with("41 0C"));
     assert_eq!(last, Some("41 0C 27 10"), "{out}");
 }
+
+#[test]
+fn the_ecu_reads_the_sensors_as_set() {
+    let (Ok(flash), Ok(eeprom)) = (
+        std::env::var("SH705X_FLASH"),
+        std::env::var("SH705X_EEPROM"),
+    ) else {
+        eprintln!("SH705X_FLASH or SH705X_EEPROM not set: skipped");
+        return;
+    };
+    let args: Vec<String> = [
+        "obd",
+        "--flash",
+        &flash,
+        "--eeprom",
+        &eeprom,
+        "--sensor",
+        "coolant=90",
+        "--sensor",
+        "rail=35",
+        "--sensor",
+        "boost=180",
+        "--sensor",
+        "battery=13.8",
+        "0105",
+        "0123",
+        "010B",
+        "0142",
+    ]
+    .map(String::from)
+    .to_vec();
+    let out = run(&parse(&args).unwrap()).unwrap();
+    let lines: Vec<&str> = out.lines().map(str::trim).collect();
+    let bytes = |req: &str| -> Vec<u32> {
+        let l = lines[lines.iter().position(|l| *l == req).unwrap() + 1];
+        l.split_whitespace()
+            .skip(2)
+            .map(|h| u32::from_str_radix(h, 16).unwrap())
+            .collect()
+    };
+    let near = |got: f64, want: f64, tol: f64| {
+        assert!((got - want).abs() <= tol, "{got} vs {want}: {out}")
+    };
+    near(bytes("0105")[0] as f64 - 40.0, 90.0, 1.0);
+    let r = bytes("0123");
+    near((r[0] * 256 + r[1]) as f64 * 0.01, 35.0, 0.2);
+    // The boost sensor is ratiometric: right only with the 5 V references valid.
+    near(bytes("010B")[0] as f64, 180.0, 2.0);
+    let b = bytes("0142");
+    near((b[0] * 256 + b[1]) as f64 / 1000.0, 13.8, 0.05);
+}

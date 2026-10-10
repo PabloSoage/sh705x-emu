@@ -12,7 +12,8 @@ pub const USAGE: &str = "\
 usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
        sh705x disasm --flash <flash.bin> --from <addr> [--count <instructions>]
        sh705x obd   --flash <flash.bin> [--eeprom <eeprom.bin>] [--boot <instructions>]
-                    [--adc <channel:code>]... [--rpm <rpm>] <ELM327 command>...
+                    [--adc <channel:code>]... [--rpm <rpm>] [--sensors on|idle|off]
+                    [--sensor <key=value>]... <ELM327 command>...
        sh705x serve --flash <flash.bin> [--eeprom <eeprom.bin>] [--port <port>]
                     [--adc <channel:code>]... [--flat-out]
        sh705x sm3   --flash <flash.bin> [--eeprom <eeprom.bin>] [--bind <address>]
@@ -28,7 +29,11 @@ commands:
   info    load the images, check them and show the reset vectors and reset state
   disasm  disassemble the flash from an address (hex), with PC-relative literals
   obd     boot the ECU (40 M instructions by default) and send it ELM327 commands;
-          --rpm turns a 60-2 crank wheel (TI0A) and a cam (TI0B) at that speed
+          --rpm turns a 60-2 crank wheel (TI0A) and a cam (TI0B) at that speed;
+          the analog sensors start as a warm engine with the ignition on (--sensors
+          on), idling with --rpm (idle), or all at code 0 (off); --sensor sets one in
+          physical units, as the ECU reports it (coolant=90, rail=30, battery=13.8...;
+          an unknown key lists them all); --adc sets a raw code on top of all that
           ('0100', 'ATSH7E0', '1A90'...) over the emulated CAN bus, in virtual time;
           prints each answer as an ELM327 would
   serve   run the ECU in real time and serve an ELM327 on TCP (port 35000 by
@@ -99,6 +104,11 @@ pub struct EcuOptions {
     pub boot: u64,
     /// Engine speed of the simulated crank and cam wheels, if the engine turns.
     pub rpm: Option<u32>,
+    /// The sensors' starting state: "on" (ignition on, engine still), "idle", or "off"
+    /// (every input at code 0); `None` for "idle" with --rpm and "on" without.
+    pub sensors: Option<String>,
+    /// Sensors set by key, `key=value` in physical units.
+    pub sensor: Vec<String>,
 }
 
 /// AN14 code that wakes the ECU: the firmware reads its ignition input there and stays
@@ -135,6 +145,8 @@ fn parse_ecu(
         adc: vec![(14, IGNITION_ON)],
         boot: 40_000_000,
         rpm: None,
+        sensors: None,
+        sensor: Vec::new(),
     };
     let (mut flash, mut args) = (None, Vec::new());
     let mut it = rest.iter().peekable();
@@ -161,6 +173,16 @@ fn parse_ecu(
             }
             "--boot" => o.boot = value.parse().map_err(|_| format!("bad --boot '{value}'"))?,
             "--rpm" => o.rpm = Some(value.parse().map_err(|_| format!("bad --rpm '{value}'"))?),
+            "--sensors" => {
+                if !["on", "idle", "off"].contains(&value.as_str()) {
+                    return Err(format!("--sensors is on, idle or off, not '{value}'"));
+                }
+                o.sensors = Some(value.clone());
+            }
+            "--sensor" => {
+                engine::sensors::parse(value)?;
+                o.sensor.push(value.clone());
+            }
             other => return Err(format!("unknown option '{other}'")),
         }
     }
@@ -638,6 +660,25 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
     Ok(o)
 }
 
+/// The A/D codes of the sensors `o` describes; `--adc` goes on top of these.
+fn sensor_codes(o: &EcuOptions) -> Result<Vec<(usize, u16)>, String> {
+    use engine::sensors::Sensors;
+    let mode = o
+        .sensors
+        .as_deref()
+        .unwrap_or(if o.rpm.is_some() { "idle" } else { "on" });
+    let mut s = match mode {
+        "off" => Sensors { values: Vec::new() },
+        "idle" => Sensors::idle(),
+        _ => Sensors::ignition_on(),
+    };
+    for kv in &o.sensor {
+        let (k, v) = engine::sensors::parse(kv)?;
+        s.set(k, v)?;
+    }
+    Ok(s.codes())
+}
+
 /// Builds and boots the ECU described by `o`.
 fn boot(o: &EcuOptions) -> Result<Machine, String> {
     let image = read(&o.flash)?;
@@ -652,6 +693,9 @@ fn boot(o: &EcuOptions) -> Result<Machine, String> {
             ));
         }
         board::wire_eeproms(&mut chip, &e, o.layout);
+    }
+    for (c, v) in sensor_codes(o)? {
+        chip.adc.input[c] = v;
     }
     for &(c, v) in &o.adc {
         chip.adc.input[c] = v;
