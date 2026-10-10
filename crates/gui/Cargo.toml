@@ -1,0 +1,22 @@
+[package]
+name = "gui"
+description = "Graphical front end of the SH705x ECU emulator: CPU, code, memory, CAN and sensor inputs, live"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.95"
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "sh705x-gui"
+path = "src/main.rs"
+
+[dependencies]
+sh2e.workspace = true
+sh7059.workspace = true
+board.workspace = true
+bridge.workspace = true
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow"] }
+
+[lints]
+workspace = true

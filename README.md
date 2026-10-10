@@ -74,6 +74,7 @@ second, which makes it a reference oracle rather than an emulator.
 | `crates/engine` | The simulated engine (phase 5, empty) |
 | `crates/bridge` | The CAN bus as a diagnostic tool sees it, in virtual or real time; ISO-TP; an ELM327; a TCP server |
 | `crates/sh705x` | Command-line front end |
+| `crates/gui` | `sh705x-gui`: registers, code with breakpoints, memory, CAN, interrupts, the A/D inputs as sliders and an ELM327 console, live (egui) |
 | `tools/ghidra/EmuBoot.py` | Phase 0: runs a raw flash image from its reset vector in Ghidra's p-code emulator, logs every I/O access and resolves status-bit polls automatically |
 | `tools/ghidra/emu_boot.ps1` | Runs `EmuBoot.py` headless in a throwaway project |
 
@@ -99,7 +100,13 @@ sh705x obd --flash <flash.bin> --eeprom <eeprom.bin> 0100 0902 ATSH7E0 1A92
 sh705x serve --flash <flash.bin> --eeprom <eeprom.bin>
 ```
 
-Both turn the ignition input on (`--adc 14:600`); without it the firmware stays silent
+To watch it run:
+
+```sh
+cargo run --release -p gui -- --flash <flash.bin> --eeprom <eeprom.bin>
+```
+
+All three turn the ignition input on (`--adc 14:600`); without it the firmware stays silent
 on CAN. Frames from the tool reach the ECU after their time on a 500 kbit/s bus, as on
 the car: the firmware drops a flow control that comes back faster than that.
 

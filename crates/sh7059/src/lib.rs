@@ -322,6 +322,18 @@ impl Sh7059 {
         }
     }
 
+    /// The byte at `addr` as stored, for a debugger: no peripheral is brought up to date,
+    /// nothing is traced or watched. Counters read as they were last stored. Unmapped
+    /// space reads 0.
+    pub fn peek(&self, addr: u32) -> u8 {
+        match region(addr) {
+            Region::Rom(o) => self.rom[o],
+            Region::Ram(o) => self.ram[o],
+            Region::Io(o) => self.io[o] | self.io_force[o],
+            Region::Unmapped => 0,
+        }
+    }
+
     /// The flash image as loaded.
     pub fn rom(&self) -> &[u8] {
         &self.rom
