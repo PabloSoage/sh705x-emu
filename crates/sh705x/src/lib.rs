@@ -17,6 +17,8 @@ usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
                     [--adc <channel:code>]... [--flat-out]
        sh705x sm3   --flash <flash.bin> [--eeprom <eeprom.bin>] [--bind <address>]
                     [--port <port>] [--adc <channel:code>]...
+       sh705x bench --flash <flash.bin> [--eeprom <eeprom.bin>] [--rpm <rpm>]
+                    [--seconds <s>] [--adc <channel:code>]...
        sh705x trace --flash <flash.bin> [--max <instructions>] [--force <addr:mask>]...
                     [--adc <channel:code>]... [--eeprom <eeprom.bin>]
                     [--eeprom-layout <blocks>[le]] [--eeprom-out <eeprom.bin>]
@@ -35,6 +37,9 @@ commands:
   sm3     run the ECU in real time behind an emulated Scanmatik SM3, for opendash:
           set opendash's adapter address to this machine (port 777 by default;
           binds 0.0.0.0 unless --bind says otherwise)
+  bench   boot the ECU as obd does, then run --seconds (5 by default) of ECU time as
+          fast as it goes, and print the real-time factor: ECU time over wall time,
+          1.00 being just real time
   trace   run from reset with peripheral registers as plain storage, optionally forcing
           status bits as phase 0 did, and write every register access to --out as
           'pc R|W addr size value' (hex). Prints instructions, cycles and speed.
@@ -66,6 +71,8 @@ pub enum Command {
     Serve(EcuOptions, u16, bool),
     /// Serve an emulated SM3 on TCP, in real time: options, address, port.
     Sm3(EcuOptions, String, u16),
+    /// Measure the real-time factor over this many seconds of ECU time.
+    Bench(EcuOptions, u32),
     /// Disassemble the flash.
     Disasm {
         /// Path to the flash image.
@@ -257,6 +264,21 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Sm3(o, bind, port))
         }
+        "bench" => {
+            let mut seconds = 5u32;
+            let (o, args) = parse_ecu("bench", rest, &mut |opt, value| match opt {
+                "--seconds" => {
+                    let v = value.ok_or("--seconds needs a value")?;
+                    seconds = v.parse().map_err(|_| format!("bad --seconds '{v}'"))?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            })?;
+            if let Some(a) = args.first() {
+                return Err(format!("bench takes no argument '{a}'"));
+            }
+            Ok(Command::Bench(o, seconds))
+        }
         "disasm" => {
             let (mut flash, mut from, mut count) = (None, None, 32);
             let mut it = rest.iter();
@@ -391,6 +413,7 @@ pub fn run(cmd: &Command) -> Result<String, String> {
         Command::Obd(o, args) => obd(o, args),
         Command::Serve(o, port, flat_out) => serve(o, *port, *flat_out),
         Command::Sm3(o, bind, port) => sm3(o, bind, *port),
+        Command::Bench(o, seconds) => bench(o, *seconds),
     }
 }
 
@@ -639,6 +662,30 @@ fn boot(o: &EcuOptions) -> Result<Machine, String> {
     let mut m = Machine::new(chip, true);
     m.run(o.boot);
     Ok(m)
+}
+
+fn bench(o: &EcuOptions, seconds: u32) -> Result<String, String> {
+    let t = std::time::Instant::now();
+    let mut m = boot(o)?;
+    let booted = t.elapsed().as_secs_f64();
+    let (c0, i0) = (m.cpu.cycles, m.cpu.instructions);
+    let target = c0 + seconds as u64 * bridge::link::CYCLES_PER_US * 1_000_000;
+    let t = std::time::Instant::now();
+    while m.cpu.cycles < target {
+        // As RealTimeEcu does: about 100 µs at a time, the bus emptied in between.
+        m.run(8_000);
+        m.chip.hcan.ch[0].outbox.clear();
+    }
+    let wall = t.elapsed().as_secs_f64();
+    let ecu = (m.cpu.cycles - c0) as f64 / (bridge::link::CYCLES_PER_US as f64 * 1e6);
+    let instructions = m.cpu.instructions - i0;
+    Ok(format!(
+        "booted in {booted:.2} s; then {ecu:.3} s of ECU time in {wall:.3} s: real-time \
+         factor {:.3}; {} instructions, {:.1} M instructions/s\n",
+        ecu / wall,
+        instructions,
+        instructions as f64 / wall / 1e6
+    ))
 }
 
 fn obd(o: &EcuOptions, args: &[String]) -> Result<String, String> {
