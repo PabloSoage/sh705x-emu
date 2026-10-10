@@ -1,7 +1,10 @@
 //! `sh705x actuators`: parsing, and a short closed-loop run against a real dump.
 //!
-//! Set SH705X_FLASH (and SH705X_EEPROM) to an Astra J (A17DTJ) dump to run the second
-//! test. Dumps never enter this repository.
+//! Set SH705X_FLASH to an Astra J (A17DTJ) flash dump to run the second test. Dumps never
+//! enter this repository. The test runs without the EEPROM on purpose: with the car's, the
+//! firmware also runs its output stage checks, finds the throttle (P2103) and the EGR
+//! cooler bypass (P245C) without a plant, and parks the SCV at rest after about three
+//! seconds, before its loop can be seen settle (resultados fase 8).
 
 use sh705x::{Command, parse, run};
 
@@ -46,7 +49,7 @@ fn the_two_loops_close_against_the_firmware() {
         eprintln!("SH705X_FLASH not set: skipped");
         return;
     };
-    let mut args: Vec<String> = [
+    let args: Vec<String> = [
         "actuators",
         "--flash",
         &flash,
@@ -57,10 +60,6 @@ fn the_two_loops_close_against_the_firmware() {
     ]
     .map(String::from)
     .to_vec();
-    if let Ok(eeprom) = std::env::var("SH705X_EEPROM") {
-        args.push("--eeprom".into());
-        args.push(eeprom);
-    }
     let out = run(&parse(&args).unwrap()).unwrap();
     let last = out
         .lines()

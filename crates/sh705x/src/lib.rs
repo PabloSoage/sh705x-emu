@@ -3,10 +3,12 @@
 
 mod actuators;
 mod maps;
+mod plant;
 mod touched;
 
 pub use actuators::ActuatorsOptions;
 pub use maps::MapsOptions;
+pub use plant::PlantOptions;
 pub use touched::TouchedOptions;
 
 use board::Eeprom;
@@ -36,6 +38,8 @@ usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
                     [--rpm <rpm>] [--sensor <key=value>]...
        sh705x actuators --flash <flash.bin> [--eeprom <eeprom.bin>] [--rpm <rpm>]
                     [--millis <ms>] [--step <ms>] [--sensor <key=value>]...
+       sh705x plant --flash <flash.bin> [--eeprom <eeprom.bin>] [--rpm <rpm>] [--millis <ms>]
+                    [--step-us <us>] [--load <N·m>] [--sensor <key=value>]...
        sh705x trace --flash <flash.bin> [--max <instructions>] [--force <addr:mask>]...
                     [--adc <channel:code>]... [--eeprom <eeprom.bin>]
                     [--eeprom-layout <blocks>[le]] [--eeprom-out <eeprom.bin>]
@@ -80,6 +84,12 @@ commands:
           and the EGR position loop (7C fed back on AN10). The firmware's duties drive a
           plant model (engine::actuators) whose output is returned to those inputs every
           --step (50) ms over --millis (3000); prints the trace and where each loop settles
+  plant   boot the ECU (at --rpm, 750 by default) and run a simulated engine on the torque
+          the firmware asks for: a crank (engine::crank) turns under it against --load
+          N·m (12, the warm idling car's), the wheels follow its speed tooth by tooth,
+          the MAF reads what it draws, and the SCV and EGR loops close as in actuators;
+          every --step-us (1000) µs over --millis (5000). Prints speed, the idle target,
+          torque, fuel asked for and air flow, and where the speed settles
   trace   run from reset with peripheral registers as plain storage, optionally forcing
           status bits as phase 0 did, and write every register access to --out as
           'pc R|W addr size value' (hex). Prints instructions, cycles and speed.
@@ -92,7 +102,7 @@ commands:
           EEPROM as the run left it";
 
 /// A parsed command line.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum Command {
     /// Print the usage text.
     Help,
@@ -119,6 +129,8 @@ pub enum Command {
     Touched(TouchedOptions),
     /// Close the SCV and EGR loops against the firmware and trace them.
     Actuators(ActuatorsOptions),
+    /// Run the engine on the firmware's torque demand and trace it.
+    Plant(PlantOptions),
     /// Disassemble the flash.
     Disasm {
         /// Path to the flash image.
@@ -483,6 +495,42 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 step,
             }))
         }
+        "plant" => {
+            let (mut millis, mut step_us, mut load) = (5000u64, 1000u64, plant::IDLE_LOAD);
+            let (mut o, args) = parse_ecu("plant", rest, &mut |opt, value| match opt {
+                "--millis" => {
+                    let v = value.ok_or("--millis needs a value")?;
+                    millis = v.parse().map_err(|_| format!("bad --millis '{v}'"))?;
+                    Ok(true)
+                }
+                "--step-us" => {
+                    let v = value.ok_or("--step-us needs a value")?;
+                    step_us = v.parse().map_err(|_| format!("bad --step-us '{v}'"))?;
+                    Ok(true)
+                }
+                "--load" => {
+                    let v = value.ok_or("--load needs a value")?;
+                    load = v.parse().map_err(|_| format!("bad --load '{v}'"))?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            })?;
+            if let Some(a) = args.first() {
+                return Err(format!("plant takes no argument '{a}'"));
+            }
+            if step_us == 0 || millis * 1000 < step_us {
+                return Err("plant needs a --step-us of at least 1, within --millis".into());
+            }
+            if o.rpm.is_none() {
+                o.rpm = Some(750);
+            }
+            Ok(Command::Plant(PlantOptions {
+                ecu: o,
+                millis,
+                step_us,
+                load,
+            }))
+        }
         "disasm" => {
             let (mut flash, mut from, mut count) = (None, None, 32);
             let mut it = rest.iter();
@@ -621,6 +669,7 @@ pub fn run(cmd: &Command) -> Result<String, String> {
         Command::Maps(o) => maps::maps(o),
         Command::Touched(o) => touched::touched(o),
         Command::Actuators(o) => actuators::actuators(o),
+        Command::Plant(o) => plant::plant(o),
     }
 }
 

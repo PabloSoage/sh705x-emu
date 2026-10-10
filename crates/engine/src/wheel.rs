@@ -25,7 +25,7 @@ use std::collections::BinaryHeap;
 /// CPU cycles per second (φ = 80 MHz).
 pub const CYCLES_PER_S: f64 = 80e6;
 
-/// A crank and cam pair turning at a constant speed.
+/// A crank and cam pair turning at a speed that can change from one tooth to the next.
 #[derive(Clone, Debug)]
 pub struct Wheels {
     /// Engine speed, rpm.
@@ -42,12 +42,14 @@ pub struct Wheels {
     pub crank_pins: Vec<Pin>,
     /// Cam pin.
     pub cam_pin: Pin,
-    /// The edges not taken yet, computed a revolution at a time; earliest first.
+    /// The edges not taken yet, computed a tooth pitch at a time; earliest first.
     queue: BinaryHeap<Reverse<(u64, u8, bool)>>,
-    /// Revolutions (of 360°) already turned into edges.
-    revs: u64,
-    /// Cycle at which the next revolution to compute starts.
-    rev_end: f64,
+    /// Pitches already turned into edges since the engine started.
+    pitches: u64,
+    /// The stretch turning at the current speed: the cycle it started at, and how
+    /// many pitches had been turned by then.
+    seg_start: f64,
+    seg_pitches: u64,
 }
 
 fn pin_code(p: Pin) -> u8 {
@@ -86,14 +88,35 @@ impl Wheels {
             crank_pins: vec![Pin::Ti0(0), Pin::Ti10],
             cam_pin: Pin::Ti0(1),
             queue: BinaryHeap::new(),
-            revs: 0,
-            rev_end: start as f64,
+            pitches: 0,
+            seg_start: start as f64,
+            seg_pitches: 0,
         };
         w.top_up();
         w
     }
 
-    /// Computes revolutions until the earliest edge comes before the uncomputed part, so
+    /// Degrees of crank between two tooth positions.
+    fn pitch(&self) -> f64 {
+        360.0 / self.teeth as f64
+    }
+
+    /// Cycles per crank degree at the current speed.
+    fn cycles_per_degree(&self) -> f64 {
+        CYCLES_PER_S * 60.0 / (self.rpm * 360.0)
+    }
+
+    /// The cycle at `deg` degrees into the current stretch.
+    fn at(&self, deg: f64) -> f64 {
+        self.seg_start + deg * self.cycles_per_degree()
+    }
+
+    /// The cycle where the pitches computed so far end.
+    fn computed_end(&self) -> f64 {
+        self.at((self.pitches - self.seg_pitches) as f64 * self.pitch())
+    }
+
+    /// Computes pitches until the earliest edge comes before the uncomputed part, so
     /// nothing computed later can come before it.
     fn top_up(&mut self) {
         if self.rpm == 0.0 {
@@ -102,63 +125,59 @@ impl Wheels {
         while self
             .queue
             .peek()
-            .is_none_or(|Reverse((t, _, _))| *t as f64 >= self.rev_end)
+            .is_none_or(|Reverse((t, _, _))| *t as f64 >= self.computed_end())
         {
             self.refill();
         }
     }
 
-    /// Cycles per crank degree at the current speed.
-    fn cycles_per_degree(&self) -> f64 {
-        CYCLES_PER_S * 60.0 / (self.rpm * 360.0)
-    }
-
-    /// Changes speed at cycle `now`: edges already computed (the current revolution)
-    /// stay, the rest follow the new speed. 0 stops the engine at once, with no more
-    /// edges; from a stop, it starts turning at `now`, tooth 0 first.
+    /// Changes speed at cycle `now`: edges already computed (the current tooth pitch)
+    /// stay, the rest follow the new speed, as a real crank's would. 0 stops the engine
+    /// at once, with no more edges; from a stop, it starts turning at `now`, tooth 0
+    /// first.
     pub fn set_rpm(&mut self, rpm: f64, now: u64) {
         if rpm <= 0.0 {
             self.rpm = 0.0;
             self.queue.clear();
             return;
         }
-        let was_stopped = self.rpm == 0.0;
-        self.rpm = rpm;
-        if was_stopped {
-            self.rev_end = now as f64;
-            self.revs = 0;
-            self.top_up();
+        if self.rpm == 0.0 {
+            self.pitches = 0;
+            self.seg_start = now as f64;
+        } else {
+            self.seg_start = self.computed_end();
         }
+        self.seg_pitches = self.pitches;
+        self.rpm = rpm;
+        self.top_up();
     }
 
-    /// Turns one more revolution into edges.
+    /// Turns one more tooth pitch into edges.
     fn refill(&mut self) {
-        let cpd = self.cycles_per_degree();
-        let rev_start = self.rev_end;
-        let pitch = 360.0 / self.teeth as f64;
+        let pitch = self.pitch();
+        // Where this pitch is in the cam's 720° cycle, and in the current stretch.
+        let k = self.pitches % (2 * self.teeth as u64);
+        let a0 = k as f64 * pitch;
+        let base = (self.pitches - self.seg_pitches) as f64 * pitch;
         let mut edges = Vec::new();
-        for k in 0..self.teeth - self.missing {
-            let a = k as f64 * pitch;
+        if (k % self.teeth as u64) < (self.teeth - self.missing) as u64 {
             for &p in &self.crank_pins {
-                edges.push((rev_start + a * cpd, p, true));
-                edges.push((rev_start + (a + pitch / 2.0) * cpd, p, false));
+                edges.push((base, p, true));
+                edges.push((base + pitch / 2.0, p, false));
             }
         }
-        // The cam turns once per two revolutions: this revolution covers 0..360 or
-        // 360..720 of its cycle.
-        let base = if self.revs % 2 == 0 { 0.0 } else { 360.0 };
         for &c in &self.cam_angles {
-            if (base..base + 360.0).contains(&c) {
-                let a = c - base;
-                edges.push((rev_start + a * cpd, self.cam_pin, true));
-                edges.push((rev_start + (a + self.cam_width) * cpd, self.cam_pin, false));
+            for (e, high) in [(c, true), ((c + self.cam_width) % 720.0, false)] {
+                if (a0..a0 + pitch).contains(&e) {
+                    edges.push((base + e - a0, self.cam_pin, high));
+                }
             }
         }
-        for (t, pin, high) in edges {
-            self.queue.push(Reverse((t as u64, pin_code(pin), high)));
+        for (deg, pin, high) in edges {
+            let t = self.at(deg).round() as u64;
+            self.queue.push(Reverse((t, pin_code(pin), high)));
         }
-        self.rev_end = rev_start + 360.0 * cpd;
-        self.revs += 1;
+        self.pitches += 1;
     }
 }
 
@@ -222,6 +241,22 @@ mod tests {
     }
 
     #[test]
+    fn a_new_speed_takes_from_the_next_tooth() {
+        // 1000 rpm: 80 000 cycles a pitch. Halved after the first tooth: the pitch in
+        // hand keeps its speed, the next ones take twice as long.
+        let mut w = Wheels::new(1000.0, 0);
+        let first = w.take().unwrap();
+        assert_eq!((first.at, first.high), (0, true));
+        w.set("rpm", 500.0, 10);
+        let rising: Vec<u64> = std::iter::from_fn(|| w.take())
+            .filter(|e| e.pin == Pin::Ti0(0) && e.high)
+            .take(3)
+            .map(|e| e.at)
+            .collect();
+        assert_eq!(rising, [80_000, 240_000, 400_000]);
+    }
+
+    #[test]
     fn the_cam_turns_once_per_two_revolutions_and_edges_stay_in_order() {
         let mut w = Wheels::new(3000.0, 1000);
         let all: Vec<Edge> = std::iter::from_fn(|| w.take()).take(1000).collect();
@@ -233,7 +268,7 @@ mod tests {
             .collect();
         // 3000 rpm: 20 ms a revolution, 1.6 M cycles; five cam teeth per two
         // revolutions, the last 30° before the first of the next two.
-        let at = |deg: f64| 1000 + (deg * 1_600_000.0 / 360.0) as u64;
+        let at = |deg: f64| 1000 + (deg * 1_600_000.0 / 360.0).round() as u64;
         assert_eq!(
             &cam[..5],
             &[at(0.0), at(180.0), at(360.0), at(540.0), at(690.0)]

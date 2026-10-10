@@ -60,7 +60,9 @@ const SETPOINTS: &[Setpoint] = &[
     },
     Setpoint {
         did: 0x323E,
-        name: "SCV current command",
+        // Despite its name in the car's profile ("regulator command"), this reads back
+        // whatever current is set on AN1: the measured current [MED].
+        name: "SCV current (measured)",
         unit: "mA",
         bytes: 2,
         scale: 1.0,

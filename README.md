@@ -58,7 +58,7 @@ second, which makes it a reference oracle rather than an emulator.
 - **On CAN,** with the ignition input up, the firmware broadcasts its periodic GMLAN
   frames and answers diagnostic requests: OBD modes 01, 03 and 09 (the VIN, over
   ISO-TP), and GMLAN service 1A. The VIN it returns is the car's.
-- **The engine turns:** a 60-2 crank wheel and a 4+1 cam wheel on the ATU-II's input
+- **The engine turns:** a 60-4 crank wheel and a 4+1 cam wheel on the ATU-II's input
   captures, and the ECU reports the speed it is set to, steadily from idle to 4500 rpm.
   The sync tooth has to come 15 to 45 crank degrees before a main tooth for the
   firmware to keep in sync; where it is on the real engine is not known.
@@ -75,8 +75,13 @@ second, which makes it a reference oracle rather than an emulator.
   1.36 times faster than real time (about 90 M instructions per second, i7-10870H);
   the SH7059 runs at 80 MHz, about 69 M instructions per second of ECU time. Flash is
   decoded once, and flash and RAM accesses take a direct path.
+- **The engine runs on the firmware's torque** (`sh705x plant`): a simulated crank turns
+  with the torque the firmware asks for, and its idle governor settles at 750 rpm, 12 N·m
+  and 7.0 mm³ a stroke, as the car does at warm idle. The SCV and EGR loops close against
+  plant models too (`sh705x actuators`).
 - **Not yet:** the ECU counts the engine as running but injects nothing, and so turns
-  its actuators off after a few seconds; the immobilizer is the likely reason.
+  its actuators off after a few seconds; the immobilizer is the likely reason. What can be
+  modelled without it is, from the firmware's own demands.
 
 ## Layout
 
@@ -156,8 +161,9 @@ off the bus.
 
 ```sh
 # What the ECU asks for over a grid of engine speed and pedal, and where a second image
-# differs: fuel per stroke, torque delivered, desired rail pressure, SCV current and duty
-# command, desired air flow and boost, VGT vane command, desired EGR and throttle, load.
+# differs: fuel per stroke, torque delivered, desired rail pressure, SCV current (measured)
+# and duty command, desired air flow and boost, VGT vane command, desired EGR and
+# throttle, load.
 sh705x maps --flash <original.bin> --compare <modified.bin> --eeprom <eeprom.bin>
 ```
 
@@ -189,6 +195,26 @@ sh705x actuators --flash <flash.bin> --eeprom <eeprom.bin> --millis 4000
 
 The EGR loop settles shut at idle, as the car does; the SCV current loop holds a steady
 current, the pump driven hard because the rail pressure plant is not closed yet.
+
+### The engine on the firmware's own torque
+
+With the immobiliser shut no injector fires, but the firmware still works out the fuel it
+wants and the torque that fuel would give. `plant` turns a simulated crankshaft with that
+torque, the crank wheel following its speed tooth by tooth, so the firmware's idle
+governor and pedal map close their loop through the simulation. Nothing in the firmware
+is changed, and nothing here makes a real engine run.
+
+```sh
+# Idle (the default), or rev it in neutral with --sensor pedal=30; --load in N·m
+sh705x plant --flash <flash.bin> --eeprom <eeprom.bin> --millis 5000
+```
+
+At warm idle it settles at 750 rpm, 12 N·m and 7.0 mm³ a stroke, what the car reports
+standing still. About five seconds after the ignition, a throttle-position fault
+(P060E, the throttle plant is not modelled yet) puts the firmware in a limp mode that
+raises the idle to 1000 rpm; the trace shows the target it aims at.
+
+### Tests
 
 ```sh
 cargo test --all
