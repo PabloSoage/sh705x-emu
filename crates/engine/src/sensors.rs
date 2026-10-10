@@ -10,7 +10,10 @@
 //! idle (scanmatik-bench routes 67, 69 and 72: medians with 700-1000 rpm, standing
 //! still and coolant at 70 degC or more) [MED], except where noted.
 
-use crate::curves::INPUTS;
+use crate::curves::{INPUTS, MAF};
+
+/// The mass air flow meter's key: a frequency input (TI0C), not an A/D one.
+pub const MAF_KEY: &str = "maf";
 
 /// One analog input and its curve.
 #[derive(Debug)]
@@ -39,28 +42,37 @@ impl Input {
     /// A code for which the firmware reports `value`, or the nearest it can. Where the
     /// curve is flat (a clamp), the code nearest the slope is taken.
     pub fn code(&self, value: f64) -> u16 {
-        let c = self.curve;
-        for w in c.windows(2) {
-            let ((x0, y0), (x1, y1)) = (w[0], w[1]);
-            if y0 != y1 && (y0.min(y1)..=y0.max(y1)).contains(&value) {
-                let x = x0 as f64 + (value - y0) / (y1 - y0) * (x1 as f64 - x0 as f64);
-                return x.round() as u16;
-            }
+        let c: Vec<(f64, f64)> = self.curve.iter().map(|&(x, y)| (x as f64, y)).collect();
+        inverse(&c, value).round() as u16
+    }
+}
+
+/// The x for which a sampled curve gives `value`, interpolated; out of range or where
+/// the curve is flat (a clamp), the end of the slope nearest the value.
+fn inverse(c: &[(f64, f64)], value: f64) -> f64 {
+    for w in c.windows(2) {
+        let ((x0, y0), (x1, y1)) = (w[0], w[1]);
+        if y0 != y1 && (y0.min(y1)..=y0.max(y1)).contains(&value) {
+            return x0 + (value - y0) / (y1 - y0) * (x1 - x0);
         }
-        // Out of range: the end of the slope nearest the value.
-        let mut best = (f64::MAX, 0u16);
-        for w in c.windows(2) {
-            if w[0].1 != w[1].1 {
-                for &(x, y) in w {
-                    let d = (y - value).abs();
-                    if d < best.0 {
-                        best = (d, x);
-                    }
+    }
+    let mut best = (f64::MAX, 0.0);
+    for w in c.windows(2) {
+        if w[0].1 != w[1].1 {
+            for &(x, y) in w {
+                let d = (y - value).abs();
+                if d < best.0 {
+                    best = (d, x);
                 }
             }
         }
-        best.1
     }
+    best.1
+}
+
+/// The MAF frequency, Hz, for which the firmware reports `g_per_s` [MED].
+pub fn maf_hz(g_per_s: f64) -> f64 {
+    inverse(MAF, g_per_s)
 }
 
 /// The input called `key`.
@@ -105,6 +117,7 @@ impl Sensors {
                 ("o2-voltage", 2.5), // [SUP]: mid range
                 ("o2-current", 0.0),
                 ("scv-feedback", 0.0),
+                (MAF_KEY, 0.0),
             ],
         }
     }
@@ -121,6 +134,7 @@ impl Sensors {
             ("egt1", 199.5),
             ("egt2", 217.4),
             ("scv-feedback", 1729.0),
+            (MAF_KEY, 5.47),
         ] {
             s.set(k, v).expect("known key");
         }
@@ -129,15 +143,20 @@ impl Sensors {
 
     /// Sets one input. Fails on an unknown key.
     pub fn set(&mut self, key: &str, value: f64) -> Result<(), String> {
-        let i = input(key).ok_or_else(|| {
-            let keys: Vec<&str> = INPUTS.iter().map(|i| i.key).collect();
-            format!("no sensor '{key}'; there are: {}", keys.join(", "))
-        })?;
-        match self.values.iter_mut().find(|(k, _)| *k == i.key) {
+        let key = known(key)?;
+        match self.values.iter_mut().find(|(k, _)| *k == key) {
             Some(slot) => slot.1 = value,
-            None => self.values.push((i.key, value)),
+            None => self.values.push((key, value)),
         }
         Ok(())
+    }
+
+    /// The MAF frequency on TI0C, Hz, if the MAF is set.
+    pub fn maf_hz(&self) -> Option<f64> {
+        self.values
+            .iter()
+            .find(|(k, _)| *k == MAF_KEY)
+            .map(|&(_, v)| maf_hz(v))
     }
 
     /// The A/D codes: (channel, code) for every input set.
@@ -149,14 +168,28 @@ impl Sensors {
     }
 }
 
+/// The static key equal to `key`, or an error listing them all.
+fn known(key: &str) -> Result<&'static str, String> {
+    if key == MAF_KEY {
+        return Ok(MAF_KEY);
+    }
+    input(key).map(|i| i.key).ok_or_else(|| {
+        let keys: Vec<&str> = INPUTS.iter().map(|i| i.key).collect();
+        format!(
+            "no sensor '{key}'; there are: {}, {MAF_KEY}",
+            keys.join(", ")
+        )
+    })
+}
+
 /// Parses `key=value` for a sensor.
 pub fn parse(s: &str) -> Result<(&'static str, f64), String> {
     let (k, v) = s
         .split_once('=')
         .ok_or_else(|| format!("--sensor wants key=value, got '{s}'"))?;
-    let i = input(k).ok_or_else(|| format!("no sensor '{k}'"))?;
+    let k = known(k)?;
     let v: f64 = v.parse().map_err(|_| format!("bad value in '{s}'"))?;
-    Ok((i.key, v))
+    Ok((k, v))
 }
 
 #[cfg(test)]
@@ -166,6 +199,9 @@ mod tests {
     #[test]
     fn codes_read_back_as_the_values() {
         for (k, v) in Sensors::idle().values {
+            if k == MAF_KEY {
+                continue;
+            }
             let i = input(k).unwrap();
             let back = i.value(i.code(v));
             let span = i.curve.iter().map(|p| p.1).fold(f64::MIN, f64::max)
@@ -201,5 +237,16 @@ mod tests {
         assert!(s.set("nonsense", 1.0).is_err());
         assert_eq!(parse("rail=30").unwrap(), ("rail", 30.0));
         assert!(parse("rail").is_err());
+        assert_eq!(parse("maf=5").unwrap(), ("maf", 5.0));
+    }
+
+    #[test]
+    fn maf_frequencies() {
+        // 0 g/s: the end of the flat part, where the slope starts.
+        assert_eq!(maf_hz(0.0), 1750.0);
+        let hz = maf_hz(23.45);
+        assert!((hz - 3000.0).abs() < 1.0, "{hz}");
+        assert!(Sensors::idle().maf_hz().unwrap() > 2000.0);
+        assert!(Sensors { values: vec![] }.maf_hz().is_none());
     }
 }

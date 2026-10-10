@@ -1,11 +1,12 @@
 """Generates crates/engine/src/curves.rs from an A/D curve sweep.
 
-    python tools/gen_curves.py <fase5-curvas-ad.json> crates/engine/src/curves.rs
+    python tools/gen_curves.py <fase5-curvas-ad.json> <fase5-curva-maf.json> crates/engine/src/curves.rs
 
 The sweep (kept in the docs repository) booted the emulated ECU with one analog input
 at a time set to 33 codes from 0 to 1023 and asked for the OBD PID or GMLAN identifier
 that input moves. Each answer is decoded here to the physical value the firmware
-reports, so the table says what code makes the ECU see a given value.
+reports, so the table says what code makes the ECU see a given value. The MAF sweep
+did the same with the frequency of a square wave on TI0C against PID 10.
 """
 
 import json
@@ -83,7 +84,15 @@ def main():
             '    },',
         ]
     out.append('];')
-    open(sys.argv[2], 'w', encoding='utf-8', newline='\n').write('\n'.join(out) + '\n')
+    maf = json.load(open(sys.argv[2], encoding='utf-8'))
+    out += [
+        '',
+        '/// The mass air flow meter on TI0C: (frequency in Hz, g/s the firmware reports).',
+        'pub static MAF: &[(f64, f64)] = &[',
+    ]
+    out += [f'    ({hz}.0, {g}_f64),' for hz, g in maf]
+    out.append('];')
+    open(sys.argv[3], 'w', encoding='utf-8', newline='\n').write('\n'.join(out) + '\n')
 
 
 if __name__ == '__main__':

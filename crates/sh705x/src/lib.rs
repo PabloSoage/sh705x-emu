@@ -13,7 +13,7 @@ usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
        sh705x disasm --flash <flash.bin> --from <addr> [--count <instructions>]
        sh705x obd   --flash <flash.bin> [--eeprom <eeprom.bin>] [--boot <instructions>]
                     [--adc <channel:code>]... [--rpm <rpm>] [--sensors on|idle|off]
-                    [--sensor <key=value>]... <ELM327 command>...
+                    [--sensor <key=value>]... [--maf-hz <hz>] <ELM327 command>...
        sh705x serve --flash <flash.bin> [--eeprom <eeprom.bin>] [--port <port>]
                     [--adc <channel:code>]... [--flat-out]
        sh705x sm3   --flash <flash.bin> [--eeprom <eeprom.bin>] [--bind <address>]
@@ -33,7 +33,8 @@ commands:
           the analog sensors start as a warm engine with the ignition on (--sensors
           on), idling with --rpm (idle), or all at code 0 (off); --sensor sets one in
           physical units, as the ECU reports it (coolant=90, rail=30, battery=13.8...;
-          an unknown key lists them all); --adc sets a raw code on top of all that
+          an unknown key lists them all; maf is g/s, a square wave on TI0C); --adc
+          sets a raw code and --maf-hz the MAF frequency on top of all that
           ('0100', 'ATSH7E0', '1A90'...) over the emulated CAN bus, in virtual time;
           prints each answer as an ELM327 would
   serve   run the ECU in real time and serve an ELM327 on TCP (port 35000 by
@@ -109,6 +110,8 @@ pub struct EcuOptions {
     pub sensors: Option<String>,
     /// Sensors set by key, `key=value` in physical units.
     pub sensor: Vec<String>,
+    /// Frequency of the MAF's square wave on TI0C, over what the sensors give.
+    pub maf_hz: Option<u32>,
 }
 
 /// AN14 code that wakes the ECU: the firmware reads its ignition input there and stays
@@ -147,6 +150,7 @@ fn parse_ecu(
         rpm: None,
         sensors: None,
         sensor: Vec::new(),
+        maf_hz: None,
     };
     let (mut flash, mut args) = (None, Vec::new());
     let mut it = rest.iter().peekable();
@@ -173,6 +177,13 @@ fn parse_ecu(
             }
             "--boot" => o.boot = value.parse().map_err(|_| format!("bad --boot '{value}'"))?,
             "--rpm" => o.rpm = Some(value.parse().map_err(|_| format!("bad --rpm '{value}'"))?),
+            "--maf-hz" => {
+                o.maf_hz = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("bad --maf-hz '{value}'"))?,
+                )
+            }
             "--sensors" => {
                 if !["on", "idle", "off"].contains(&value.as_str()) {
                     return Err(format!("--sensors is on, idle or off, not '{value}'"));
@@ -660,8 +671,8 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
     Ok(o)
 }
 
-/// The A/D codes of the sensors `o` describes; `--adc` goes on top of these.
-fn sensor_codes(o: &EcuOptions) -> Result<Vec<(usize, u16)>, String> {
+/// The sensors `o` describes; `--adc` and `--maf-hz` go on top of these.
+fn sensors(o: &EcuOptions) -> Result<engine::sensors::Sensors, String> {
     use engine::sensors::Sensors;
     let mode = o
         .sensors
@@ -676,7 +687,7 @@ fn sensor_codes(o: &EcuOptions) -> Result<Vec<(usize, u16)>, String> {
         let (k, v) = engine::sensors::parse(kv)?;
         s.set(k, v)?;
     }
-    Ok(s.codes())
+    Ok(s)
 }
 
 /// Builds and boots the ECU described by `o`.
@@ -694,14 +705,28 @@ fn boot(o: &EcuOptions) -> Result<Machine, String> {
         }
         board::wire_eeproms(&mut chip, &e, o.layout);
     }
-    for (c, v) in sensor_codes(o)? {
+    let sensors = sensors(o)?;
+    for (c, v) in sensors.codes() {
         chip.adc.input[c] = v;
     }
     for &(c, v) in &o.adc {
         chip.adc.input[c] = v;
     }
+    let mut pins = sh7059::pins::Merge::default();
     if let Some(rpm) = o.rpm {
-        chip.set_stimulus(Box::new(engine::wheel::Wheels::new(rpm as f64, 0)));
+        pins.0
+            .push(Box::new(engine::wheel::Wheels::new(rpm as f64, 0)));
+    }
+    if let Some(hz) = o.maf_hz.map(f64::from).or(sensors.maf_hz()) {
+        pins.0.push(Box::new(sh7059::pins::SquareWave::new(
+            sh7059::pins::Pin::Ti0(2),
+            hz,
+            engine::wheel::CYCLES_PER_S,
+            0,
+        )));
+    }
+    if !pins.0.is_empty() {
+        chip.set_stimulus(Box::new(pins));
     }
     let mut m = Machine::new(chip, true);
     m.run(o.boot);
