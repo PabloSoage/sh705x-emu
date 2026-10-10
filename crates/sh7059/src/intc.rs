@@ -79,6 +79,31 @@ pub const DEI: [Source; 4] = [
     },
 ];
 
+/// HCAN0 and HCAN1: ERS, OVR, RM and SLE, vectors 220-223 in IPRL bits 11..8 and
+/// 228-231 in IPRL bits 3..0.
+pub const HCAN: [[Source; 4]; 2] = {
+    let mut t = [[Source {
+        vector: 0,
+        ipr: 11,
+        shift: 0,
+    }; 4]; 2];
+    let mut k = 0;
+    while k < 4 {
+        t[0][k] = Source {
+            vector: 220 + k as u32,
+            ipr: 11,
+            shift: 8,
+        };
+        t[1][k] = Source {
+            vector: 228 + k as u32,
+            ipr: 11,
+            shift: 0,
+        };
+        k += 1;
+    }
+    t
+};
+
 /// The priority level of `src` given the 24 IPR bytes.
 pub fn level(ipr: &[u8], src: Source) -> u32 {
     let r = u16::from_be_bytes([ipr[2 * src.ipr], ipr[2 * src.ipr + 1]]);

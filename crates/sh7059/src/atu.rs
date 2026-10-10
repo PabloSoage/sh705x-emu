@@ -3,6 +3,8 @@
 //!
 //! Modelled:
 //! - prescalers PSCR1–4 (φ' = Pφ / (PSCR + 1)) and start registers TSTR1–3;
+//! - channel 0: the 32-bit free-running counter TCNT0 on φ' of PSCR1, its overflow flag
+//!   OVF0 and interrupt OVI0 (the firmware times its diagnostic protocol on TCNT0);
 //! - channel 2B: TCNT2B and its eight output compare registers OCR2A–H (CMF2A–H,
 //!   OVF2B, interrupts CMI2A–H and OVI2B);
 //! - channels 3 to 5: TCNT3–5, general registers used as output compare (IMF, counter
@@ -17,8 +19,9 @@
 //!   counter cleared on a match runs 0..=GR (period GR + 1), a PWM timer runs 1..=CYLR
 //!   (period CYLR), and a counter started on its compare value matches on the first count.
 //!
-//! Not modelled yet: input capture (the GRs set to capture wait for pin edges, which come
-//! with the simulated engine, T-5.1), channels 0, 1, 2A, 8, 9, 10 and 11, the PWM mode of
+//! Not modelled yet: input capture (the GRs and ICR0A–D wait for pin edges, which come
+//! with the simulated engine, T-5.1), the interval interrupts of channel 0 (ITVRR),
+//! channels 1, 2A, 8, 9, 10 and 11, the PWM mode of
 //! channels 3 to 5 (TMDR), the complementary PWM mode of channel 6 (PMDR), and the timing
 //! of flag setting within one count.
 //!
@@ -49,6 +52,9 @@ pub const BASE: u32 = 0xFFFF_F400;
 pub const END: u32 = 0xFFFF_F700;
 
 const TSTR2: u32 = 0xFFFF_F400; // channels 6 and 7
+const TCNT0: u32 = 0xFFFF_F430;
+const TSR0: u32 = 0xFFFF_F42C;
+const TIER0: u32 = 0xFFFF_F42E;
 const TSTR1: u32 = 0xFFFF_F401; // channels 0 to 5 and 10
 const PSCR: [u32; 4] = [0xFFFF_F404, 0xFFFF_F406, 0xFFFF_F408, 0xFFFF_F40A];
 
@@ -69,6 +75,11 @@ fn r8(io: &[u8], a: u32) -> u8 {
 fn r16(io: &[u8], a: u32) -> u16 {
     let o = (a - IO_BASE) as usize;
     u16::from_be_bytes([io[o], io[o + 1]])
+}
+
+#[inline]
+fn r32(io: &[u8], a: u32) -> u32 {
+    ((r16(io, a) as u32) << 16) | r16(io, a + 2) as u32
 }
 
 #[inline]
@@ -101,6 +112,29 @@ impl Counter {
     }
 }
 
+/// Channel 0's 32-bit counter: its value at `base` and CPU cycles per count (0 when
+/// stopped).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Counter32 {
+    /// Value at `base`.
+    pub value: u32,
+    /// CPU cycle of `value`.
+    pub base: u64,
+    /// CPU cycles per count; 0 = not counting.
+    pub cpc: u64,
+}
+
+impl Counter32 {
+    fn elapsed(&self, now: u64) -> u64 {
+        (now - self.base).checked_div(self.cpc).unwrap_or(0)
+    }
+
+    /// The cycle it next leaves H'FFFFFFFF, if counting.
+    fn overflow(&self) -> Option<u64> {
+        (self.cpc != 0).then(|| self.base + ((0xFFFF_FFFF - self.value) as u64 + 1) * self.cpc)
+    }
+}
+
 /// Which counter: 0 = TCNT2B, 1..=3 = TCNT3..5, 4..=7 = TCNT6A..D, 8..=11 = TCNT7A..D.
 const N: usize = 12;
 
@@ -115,8 +149,10 @@ fn tcnt_addr(i: usize) -> u32 {
 /// The modelled ATU-II counters.
 #[derive(Clone, Debug, Default)]
 pub struct Atu {
-    /// The twelve modelled counters.
+    /// The twelve modelled 16-bit counters.
     pub cnt: [Counter; N],
+    /// TCNT0.
+    pub tcnt0: Counter32,
     /// Earliest event, CPU cycle.
     next: u64,
     /// Events taken: compare matches and overflows of channels 2B to 5, and cycle ends of
@@ -181,6 +217,14 @@ impl Atu {
     /// Brings every counter's value up to `now` with its current clock (call before the
     /// registers that set the clock change).
     pub fn resync(&mut self, now: u64) {
+        let c = &mut self.tcnt0;
+        if c.cpc != 0 {
+            let n = c.elapsed(now);
+            c.value = c.value.wrapping_add(n as u32);
+            c.base += n * c.cpc;
+        } else {
+            c.base = now;
+        }
         for c in &mut self.cnt {
             if c.cpc != 0 {
                 let n = c.elapsed(now);
@@ -194,6 +238,12 @@ impl Atu {
 
     /// Writes the current counter values into the register storage, for a read.
     pub fn store(&self, now: u64, io: &mut [u8]) {
+        let v = self
+            .tcnt0
+            .value
+            .wrapping_add(self.tcnt0.elapsed(now) as u32);
+        w16(io, TCNT0, (v >> 16) as u16);
+        w16(io, TCNT0 + 2, v as u16);
         for (i, c) in self.cnt.iter().enumerate() {
             // Events up to `now` have been taken, so this does not cross a match or CYLR.
             w16(
@@ -230,6 +280,16 @@ impl Atu {
         for (i, c) in self.cnt.iter_mut().enumerate() {
             c.cpc = Self::cycles_per_count(io, i);
         }
+        if TCNT0 < addr + n && addr < TCNT0 + 4 {
+            self.tcnt0.value = r32(io, TCNT0);
+            self.tcnt0.base = now;
+        }
+        // TCNT0 counts on the φ' of PSCR1 only, while STR0 is set.
+        self.tcnt0.cpc = if r8(io, TSTR1) & 1 != 0 {
+            4 * ((r8(io, PSCR[0]) & 0x1F) as u64 + 1)
+        } else {
+            0
+        };
         self.schedule(io);
     }
 
@@ -297,7 +357,8 @@ impl Atu {
                     .map(|(d, _)| self.cnt[i].base + d * self.cnt[i].cpc)
             })
             .min()
-            .unwrap_or(u64::MAX);
+            .unwrap_or(u64::MAX)
+            .min(self.tcnt0.overflow().unwrap_or(u64::MAX));
     }
 
     /// The earliest cycle at which a counter reaches a compare value, its cycle end or
@@ -310,6 +371,15 @@ impl Atu {
     pub fn advance(&mut self, now: u64, io: &mut [u8]) {
         if now < self.next {
             return;
+        }
+        while let Some(t) = self.tcnt0.overflow() {
+            if t > now {
+                break;
+            }
+            self.events += 1;
+            self.tcnt0.value = 0;
+            self.tcnt0.base = t;
+            set16(io, TSR0, 0x0010); // OVF0
         }
         for i in 0..N {
             while let Some((d, x)) = self.counts_to_event(io, i) {
@@ -387,7 +457,8 @@ impl Atu {
 }
 
 /// Status and enable register pairs of the modelled channels.
-const FLAG_PAIRS: [(u32, u32); 4] = [
+const FLAG_PAIRS: [(u32, u32); 5] = [
+    (TSR0, TIER0),
     (TSR2B, TIER2B),
     (TSR3, TIER3),
     (CH67[0] + 0x22, CH67[0] + 0x24),
@@ -412,7 +483,7 @@ pub fn for_each_request(io: &[u8], mut f: impl FnMut(u32, usize, u32)) {
 }
 
 /// Interrupt requests of the modelled channels: (vector, IPR index, shift, requesting).
-pub fn requests(io: &[u8]) -> [(u32, usize, u32, bool); 34] {
+pub fn requests(io: &[u8]) -> [(u32, usize, u32, bool); 39] {
     let tsr2b = r16(io, TSR2B);
     let tier2b = r16(io, TIER2B);
     let tsr3 = r16(io, TSR3);
@@ -424,12 +495,19 @@ pub fn requests(io: &[u8]) -> [(u32, usize, u32, bool); 34] {
         r16(io, c + 0x22) & r16(io, c + 0x24) & (1 << k) != 0
     };
     // IPRE = index 4, IPRF = 5, IPRG = 6 (manual table 7.3).
-    let mut out = [(0, 0, 0, false); 34];
+    let mut out = [(0, 0, 0, false); 39];
     let mut n = 0;
     let mut push = |v: u32, ipr: usize, shift: u32, on: bool| {
         out[n] = (v, ipr, shift, on);
         n += 1;
     };
+    let tsr0 = r16(io, TSR0) & r16(io, TIER0);
+    // ICI0A, ICI0B in IPRC 3-0; ICI0C, ICI0D in IPRD 15-12; OVI0 in IPRD 11-8.
+    push(84, 2, 0, tsr0 & 1 != 0);
+    push(86, 2, 0, tsr0 & 2 != 0);
+    push(88, 3, 12, tsr0 & 4 != 0);
+    push(90, 3, 12, tsr0 & 8 != 0);
+    push(92, 3, 8, tsr0 & 0x10 != 0);
     for k in 0..4 {
         push(108 + k, 4, 8, on2(1 << k)); // CMI2A-D
     }
@@ -611,14 +689,51 @@ mod tests {
         let mut got = Vec::new();
         for_each_request(&io, |v, _, _| got.push(v));
         assert_eq!(got, [108, 116, 124, 147, 148]);
+        w16(&mut io, TSR0, 0x0011);
+        w16(&mut io, TIER0, 0x0011);
+        got.clear();
+        for_each_request(&io, |v, _, _| got.push(v));
+        assert_eq!(&got[..2], [84, 92], "ICI0A and OVI0 first");
         w16(&mut io, TIER3, 0);
         got.clear();
         for_each_request(&io, |v, _, _| got.push(v));
         assert_eq!(
             got,
-            [108, 116, 147, 148],
+            [84, 92, 108, 116, 147, 148],
             "a set flag without its enable is not offered"
         );
+    }
+
+    #[test]
+    fn tcnt0_counts_on_pscr1_and_overflows() {
+        let (mut a, mut io) = io();
+        write8(&mut a, &mut io, 0, 0xFFFF_F404, 4); // PSCR1: φ' = Pφ / 5
+        write8(&mut a, &mut io, 0, TSTR1, 0x01); // STR0
+        assert_eq!(a.tcnt0.cpc, 20, "4 MHz at φ = 80 MHz: 4000 counts per ms");
+        a.store(80_000, &mut io);
+        assert_eq!(r32(&io, TCNT0), 4000);
+        // Written by software, it goes on from there.
+        a.resync(80_000);
+        a.store(80_000, &mut io);
+        let o = (TCNT0 - IO_BASE) as usize;
+        let before = io[o..o + 4].to_vec();
+        io[o..o + 4].copy_from_slice(&0xFFFF_FFF0u32.to_be_bytes());
+        a.load(80_000, TCNT0, &before, &mut io);
+        assert_eq!(
+            a.next_event(),
+            80_000 + 16 * 20,
+            "leaves H'FFFFFFFF after 16 counts"
+        );
+        w16(&mut io, TIER0, 0x0010);
+        a.advance(80_000 + 16 * 20, &mut io);
+        assert_eq!(r16(&io, TSR0), 0x0010, "OVF0");
+        assert!(requests(&io).iter().any(|r| r.0 == 92 && r.3), "OVI0");
+        a.store(80_000 + 18 * 20, &mut io);
+        assert_eq!(r32(&io, TCNT0), 2);
+        // Stopping freezes it.
+        write8(&mut a, &mut io, 80_000 + 18 * 20, TSTR1, 0x00);
+        a.store(1_000_000, &mut io);
+        assert_eq!(r32(&io, TCNT0), 2);
     }
 
     #[test]

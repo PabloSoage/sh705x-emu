@@ -307,6 +307,7 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
         cpu,
         mut chip,
         interrupts,
+        ..
     } = m;
 
     let mut o = String::new();
@@ -371,6 +372,41 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
         }
     }
     writeln!(o, "A/D rounds {:?}", chip.adc.rounds).unwrap();
+    for (k, c) in chip.hcan.ch.iter().enumerate() {
+        let mut ids =
+            std::collections::BTreeMap::<(u32, bool), (u64, u64, sh7059::hcan::Frame)>::new();
+        for (t, f) in &c.outbox {
+            let e = ids.entry((f.id, f.extended)).or_insert((0, *t, *f));
+            e.0 += 1;
+        }
+        if ids.is_empty() && c.received == 0 {
+            continue;
+        }
+        let list: Vec<String> = ids
+            .iter()
+            .map(|((id, ext), (n, first, f))| {
+                format!(
+                    "{}{:X} x{n} (first at cycle {first}: {})",
+                    if *ext { "x" } else { "" },
+                    id,
+                    f.data[..f.dlc as usize]
+                        .iter()
+                        .map(|b| format!("{b:02X}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            })
+            .collect();
+        writeln!(
+            o,
+            "HCAN{k}: {} frames sent: {}; received {}, unmatched {}",
+            c.outbox.len(),
+            list.join(", "),
+            c.received,
+            c.unmatched
+        )
+        .unwrap();
+    }
     if eeprom.is_some() {
         let s = board::eeprom_stats(&chip);
         writeln!(

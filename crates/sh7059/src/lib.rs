@@ -16,12 +16,14 @@
 pub mod adc;
 pub mod atu;
 pub mod cmt;
+pub mod debug;
 pub mod dmac;
+pub mod hcan;
 pub mod intc;
 mod machine;
 pub mod sci;
 
-pub use machine::Machine;
+pub use machine::{Machine, Stop};
 use sh2e::Bus;
 use std::fmt;
 
@@ -149,6 +151,7 @@ enum Periph {
     Adc,
     Atu,
     Dmac,
+    Hcan,
 }
 
 impl Periph {
@@ -160,6 +163,7 @@ impl Periph {
             Periph::Adc => (adc::BASE, adc::END),
             Periph::Atu => (atu::BASE, atu::END),
             Periph::Dmac => (dmac::BASE, dmac::END),
+            Periph::Hcan => (hcan::BASE, hcan::END),
         };
         ((b - IO_BASE) as usize, (e - b) as usize)
     }
@@ -177,6 +181,8 @@ fn periph_at(addr: u32) -> Option<Periph> {
         Some(Periph::Atu)
     } else if (dmac::BASE..dmac::END).contains(&addr) {
         Some(Periph::Dmac)
+    } else if (hcan::BASE..hcan::END).contains(&addr) {
+        Some(Periph::Hcan)
     } else {
         None
     }
@@ -195,9 +201,13 @@ pub struct Sh7059 {
     io_force: Box<[u8]>,
     /// Accesses to the register area, when tracing is on.
     pub trace: Option<Vec<IoAccess>>,
-    /// The instruction address recorded with each traced access; the caller sets it
-    /// before every step.
+    /// The instruction address recorded with each traced or watched access; the
+    /// machine sets it before every step while tracing or watching.
     pub trace_pc: u32,
+    /// The CPU's instruction count, recorded with each watched access.
+    pub instruction: u64,
+    /// Memory watchpoints, when set.
+    pub watch: Option<Box<debug::Watch>>,
     /// Accesses to unmapped space since power-on: reads return 0, writes are dropped.
     pub unmapped_accesses: u64,
     /// Writes to the flash ROM since power-on, which are dropped. The firmware only
@@ -215,6 +225,8 @@ pub struct Sh7059 {
     pub atu: atu::Atu,
     /// DMA controller.
     pub dmac: dmac::Dmac,
+    /// CAN controllers.
+    pub hcan: hcan::Hcan,
     /// Set while the DMAC carries out units, so its own accesses do not re-enter it.
     dma_busy: bool,
     /// Port pins wired to SCI peers.
@@ -240,6 +252,8 @@ impl Sh7059 {
             io_force: vec![0; IO_SIZE].into_boxed_slice(),
             trace: None,
             trace_pc: 0,
+            instruction: 0,
+            watch: None,
             unmapped_accesses: 0,
             rom_writes: 0,
             now: 0,
@@ -248,6 +262,7 @@ impl Sh7059 {
             adc: adc::Adc::default(),
             atu: atu::Atu::default(),
             dmac: dmac::Dmac::default(),
+            hcan: hcan::Hcan::default(),
             dma_busy: false,
             wires: Vec::new(),
             pending: (0, 0),
@@ -346,10 +361,16 @@ impl Sh7059 {
             }
             Region::Unmapped => self.unmapped_accesses += 1,
         }
+        if let Some(w) = self.watch.as_mut() {
+            w.check(self.trace_pc, self.instruction, addr, &out, false);
+        }
         out
     }
 
     fn write<const N: usize>(&mut self, addr: u32, bytes: [u8; N]) {
+        if let Some(w) = self.watch.as_mut() {
+            w.check(self.trace_pc, self.instruction, addr, &bytes, true);
+        }
         match fit(region(addr), N) {
             Region::Rom(_) => self.rom_writes += 1,
             Region::Ram(o) => self.ram[o..o + N].copy_from_slice(&bytes),
@@ -361,6 +382,12 @@ impl Sh7059 {
                     before.copy_from_slice(&self.io[o..o + N]);
                     self.io[o..o + N].copy_from_slice(&bytes);
                     self.atu.load(self.now, addr, &before, &mut self.io);
+                    self.update_interrupts();
+                } else if periph_at(addr) == Some(Periph::Hcan) {
+                    let mut before = [0u8; N];
+                    before.copy_from_slice(&self.io[o..o + N]);
+                    self.io[o..o + N].copy_from_slice(&bytes);
+                    self.hcan.load(self.now, addr, &before, &mut self.io);
                     self.update_interrupts();
                 } else if periph_at(addr) == Some(Periph::Dmac) {
                     self.dma_catch_up();
@@ -380,7 +407,9 @@ impl Sh7059 {
                         Periph::Cmt => self.cmt.load(self.now, before, after),
                         Periph::Sci => self.sci.load(self.now, before, after),
                         Periph::Adc => self.adc.load(self.now, before, after),
-                        Periph::Atu | Periph::Dmac => unreachable!("handled above"),
+                        Periph::Atu | Periph::Dmac | Periph::Hcan => {
+                            unreachable!("handled above")
+                        }
                     }
                     self.store_regs(p);
                     self.update_interrupts();
@@ -410,6 +439,7 @@ impl Sh7059 {
             self.store_regs(p);
         }
         self.atu.reset(&mut self.io);
+        self.hcan.reset(&mut self.io);
     }
 
     /// Copies a peripheral model's registers into the register storage before a read.
@@ -418,6 +448,7 @@ impl Sh7059 {
         match p {
             Periph::Atu => return self.atu.store(self.now, &mut self.io),
             Periph::Dmac => return self.dma_catch_up(),
+            Periph::Hcan => return,
             _ => {}
         }
         let regs = &mut self.io[b..b + len];
@@ -425,7 +456,7 @@ impl Sh7059 {
             Periph::Cmt => self.cmt.store(self.now, regs),
             Periph::Sci => self.sci.store(regs),
             Periph::Adc => self.adc.store(regs),
-            Periph::Atu | Periph::Dmac => unreachable!(),
+            Periph::Atu | Periph::Dmac | Periph::Hcan => unreachable!(),
         }
     }
 
@@ -437,7 +468,16 @@ impl Sh7059 {
         self.adc.advance(self.now);
         self.atu.advance(self.now, &mut self.io);
         self.dma_catch_up();
+        self.hcan.advance(self.now, &mut self.io);
         self.update_interrupts();
+    }
+
+    /// A frame arrives from the CAN bus on HCAN channel `ch`. Returns the mailbox that
+    /// took it, if any.
+    pub fn can_deliver(&mut self, ch: usize, frame: &hcan::Frame) -> Option<usize> {
+        let r = self.hcan.deliver(&mut self.io, ch, frame);
+        self.update_interrupts();
+        r
     }
 
     /// Carries out the DMA transfer units due by `now`.
@@ -503,6 +543,13 @@ impl Sh7059 {
                 intc::offer(ipr, src, &mut best);
             }
         }
+        for ch in 0..2 {
+            for (k, on) in hcan::Hcan::requests(io, ch).into_iter().enumerate() {
+                if on {
+                    intc::offer(ipr, intc::HCAN[ch][k], &mut best);
+                }
+            }
+        }
         self.pending = best;
         self.next_event = self
             .cmt
@@ -510,7 +557,8 @@ impl Sh7059 {
             .min(self.sci.next_event())
             .min(self.adc.next_event())
             .min(self.atu.next_event())
-            .min(self.dmac.next_event(&self.io));
+            .min(self.dmac.next_event(&self.io))
+            .min(self.hcan.next_event());
     }
 
     #[inline(always)]
