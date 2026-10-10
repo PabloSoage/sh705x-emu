@@ -74,7 +74,7 @@ pub struct Egr {
 
 impl Egr {
     /// The EGR valve: a 120 ms travel [SUP], fully open at full duty.
-    pub fn egr() -> Self {
+    pub fn new() -> Self {
         Self {
             tau: 0.12,
             gain: 100.0,
@@ -94,6 +94,12 @@ impl Egr {
     /// The position it settles at for `duty`, % open.
     pub fn steady(&self, duty: f64) -> f64 {
         (self.gain * duty.clamp(0.0, 1.0)).clamp(0.0, 100.0)
+    }
+}
+
+impl Default for Egr {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -134,7 +140,7 @@ mod tests {
 
     #[test]
     fn egr_opens_and_the_spring_shuts_it() {
-        let mut e = Egr::egr();
+        let mut e = Egr::new();
         // Half duty settles at half travel.
         for _ in 0..100 {
             e.step(0.5, 1e-2);
@@ -153,10 +159,10 @@ mod tests {
     #[test]
     fn egr_response_is_stable_for_any_step() {
         // The exact first-order form never overshoots, whatever the step.
-        let mut e = Egr::egr();
+        let mut e = Egr::new();
         e.step(1.0, 10.0);
         assert!((e.pos - 100.0).abs() < 1e-6);
-        let mut e = Egr::egr();
+        let mut e = Egr::new();
         for _ in 0..1000 {
             e.step(1.0, 1e-4);
         }

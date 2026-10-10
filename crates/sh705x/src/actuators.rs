@@ -29,6 +29,15 @@ pub struct ActuatorsOptions {
 const SCV_OUT: (usize, usize) = (1, 0); // 7A
 const EGR_OUT: (usize, usize) = (1, 2); // 7C
 
+/// One sample of the trace.
+struct Sample {
+    t: f64,
+    scv_duty: Option<f64>,
+    scv_ma: f64,
+    egr_duty: Option<f64>,
+    egr_pos: f64,
+}
+
 /// Runs `sh705x actuators`.
 pub fn actuators(o: &ActuatorsOptions) -> Result<String, String> {
     let scv_in = input("scv-feedback").expect("scv-feedback curve");
@@ -36,7 +45,7 @@ pub fn actuators(o: &ActuatorsOptions) -> Result<String, String> {
     let mut m = boot(&o.ecu)?;
 
     let mut scv = Solenoid::scv();
-    let mut egr = Egr::egr();
+    let mut egr = Egr::new();
     let dt = o.step as f64 / 1000.0;
     let slice = o.step * bridge::link::CYCLES_PER_US * 1000;
     let samples = o.millis / o.step.max(1);
@@ -55,39 +64,46 @@ pub fn actuators(o: &ActuatorsOptions) -> Result<String, String> {
     )
     .unwrap();
 
-    let mut trace: Vec<(f64, Option<f64>, f64, Option<f64>, f64)> = Vec::new();
+    let mut trace: Vec<Sample> = Vec::new();
     for s in 0..samples {
         m.run(slice);
         m.chip.hcan.ch[0].outbox.clear();
         // Read the duties the firmware is driving, step the plants, feed them back.
         let scv_duty = m.chip.pwm_duty(SCV_OUT.0, SCV_OUT.1);
         let egr_duty = m.chip.pwm_duty(EGR_OUT.0, EGR_OUT.1);
-        let ma = scv.step(scv_duty.unwrap_or(0.0), dt);
-        let _ = ma;
-        let pos = egr.step(egr_duty.unwrap_or(0.0), dt);
+        scv.step(scv_duty.unwrap_or(0.0), dt);
+        let egr_pos = egr.step(egr_duty.unwrap_or(0.0), dt);
         m.chip.adc.input[scv_in.channel] = scv_in.code(scv.milliamps());
-        m.chip.adc.input[egr_in.channel] = egr_in.code(pos);
-        let t = (s + 1) as f64 * o.step as f64;
-        trace.push((t, scv_duty, scv.milliamps(), egr_duty, pos));
+        m.chip.adc.input[egr_in.channel] = egr_in.code(egr_pos);
+        trace.push(Sample {
+            t: (s + 1) as f64 * o.step as f64,
+            scv_duty,
+            scv_ma: scv.milliamps(),
+            egr_duty,
+            egr_pos,
+        });
     }
 
     // Show at most ~30 rows, thinning evenly, but always the last.
     let keep = (trace.len() / 30).max(1);
-    for (i, &(t, sd, ma, ed, pos)) in trace.iter().enumerate() {
+    for (i, r) in trace.iter().enumerate() {
         if i % keep == 0 || i + 1 == trace.len() {
             let d = |x: Option<f64>| x.map_or("-".into(), |v| format!("{v:.3}"));
             writeln!(
                 out,
-                "{t:>7.0} {:>8} {ma:>10.1} {:>8} {pos:>9.2}",
-                d(sd),
-                d(ed)
+                "{:>7.0} {:>8} {:>10.1} {:>8} {:>9.2}",
+                r.t,
+                d(r.scv_duty),
+                r.scv_ma,
+                d(r.egr_duty),
+                r.egr_pos
             )
             .unwrap();
         }
     }
 
     // A loop has settled if its last quarter of samples barely moves.
-    let settle = |pick: fn(&(f64, Option<f64>, f64, Option<f64>, f64)) -> f64| {
+    let settle = |pick: fn(&Sample) -> f64| {
         let tail = &trace[trace.len() - trace.len().div_ceil(4)..];
         let (lo, hi) = tail
             .iter()
@@ -95,8 +111,8 @@ pub fn actuators(o: &ActuatorsOptions) -> Result<String, String> {
             .fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(v), b.max(v)));
         (tail.last().map(pick).unwrap_or(0.0), hi - lo)
     };
-    let (scv_end, scv_span) = settle(|r| r.2);
-    let (egr_end, egr_span) = settle(|r| r.4);
+    let (scv_end, scv_span) = settle(|r| r.scv_ma);
+    let (egr_end, egr_span) = settle(|r| r.egr_pos);
     writeln!(out).unwrap();
     writeln!(
         out,
