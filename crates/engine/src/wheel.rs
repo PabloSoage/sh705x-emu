@@ -1,13 +1,19 @@
 //! Crankshaft and camshaft tooth wheels at a set engine speed, as edges on the ECU's
 //! input pins.
 //!
-//! The crank wheel has `teeth` positions with `missing` of them left out, the usual
-//! 60-2 being the default; each tooth present is a pulse, high for the first half of
+//! The crank wheel has `teeth` positions with `missing` of them left out, 60-4 by
+//! default; each tooth present is a pulse, high for the first half of
 //! its pitch and low for the second. The cam wheel gives `cam_teeth` pulses per two
 //! crank revolutions at the listed crank angles. Both are ideal square waves of a
 //! sensor already conditioned to logic levels: what the ECU's input capture sees.
 //!
-//! Which pins and which wheel the A17DTJ has is not settled [SUP]: the firmware sets
+//! The crank wheel is 60-4 [DER]: the firmware's reference routine (0xE854, run at
+//! the first tooth after the gap, which TCNT10G finds as an interval of over 2.5
+//! pitches) wants 56 teeth counted on TCNT10B from one gap to the next, or drops the
+//! phase; TCCLR10 = 7680 = 120 x 64 makes 60 positions to a revolution. With 60-2 it
+//! counts 58 and never keeps the phase, so it never injects.
+//!
+//! Which pins the A17DTJ uses is not settled [SUP]: the firmware sets
 //! TIOR0 to capture TI0A on falling and TI0B on rising edges, which fits a crank wheel
 //! on TI0A and a cam on TI0B; and its tooth interrupt reads channel 10, whose TI10
 //! input takes the crank signal too.
@@ -60,7 +66,7 @@ fn pin_of(code: u8) -> Pin {
 }
 
 impl Wheels {
-    /// A 60-2 crank on TI0A and TI10, and a cam on TI0B with four teeth 180° apart plus a
+    /// A 60-4 crank on TI0A and TI10, and a cam on TI0B with four teeth 180° apart plus a
     /// sync tooth 30° (crank) before the first, at `rpm`, starting at cycle `start`.
     ///
     /// The firmware's cam routine (0xDD80) keeps the interval between cam edges and
@@ -74,7 +80,7 @@ impl Wheels {
         let mut w = Self {
             rpm: rpm.max(0.0),
             teeth: 60,
-            missing: 2,
+            missing: 4,
             cam_angles: vec![0.0, 180.0, 360.0, 540.0, 690.0],
             cam_width: 10.0,
             crank_pins: vec![Pin::Ti0(0), Pin::Ti10],
@@ -184,7 +190,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_60_2_wheel_at_1000_rpm() {
+    fn a_60_4_wheel_at_1000_rpm() {
         let mut w = Wheels::new(1000.0, 0);
         // 1000 rpm: 60 ms a revolution, 1 ms a tooth, 80 000 cycles.
         let crank: Vec<Edge> = std::iter::from_fn(|| w.take())
@@ -195,9 +201,9 @@ mod tests {
         let rising: Vec<u64> = crank.iter().filter(|e| e.high).map(|e| e.at).collect();
         assert_eq!(rising[0], 0);
         assert_eq!(rising[1] - rising[0], 80_000);
-        // 58 teeth, then a gap of three pitches before tooth 0 of the next revolution.
-        assert_eq!(rising[58] - rising[57], 3 * 80_000);
-        assert_eq!(rising[58], 4_800_000, "one revolution: 60 ms");
+        // 56 teeth, then a gap of five pitches before tooth 0 of the next revolution.
+        assert_eq!(rising[56] - rising[55], 5 * 80_000);
+        assert_eq!(rising[56], 4_800_000, "one revolution: 60 ms");
         let falling = crank.iter().find(|e| !e.high).unwrap();
         assert_eq!(falling.at, 40_000, "half a pitch high");
     }

@@ -12,10 +12,21 @@
 //!   TCNT10B counts the edge (setting CMF10B when it counts on from OCR10B), ICF10A is
 //!   set, and ICR10A shifted by the TIOR10 multiplier goes to RLD10C unless RLDEN;
 //!   OCR10A against TCNT10A (CMF10A); interrupts CMI10A, CMI10B and ICI10A;
+//! - channel 10, the multiplied clock (11.3.12): TCNT10C counts RLD10C down on the
+//!   channel's clock and reloads, giving the multiplied clock AGCK1; each TI10 edge
+//!   reloads it when RLD10C is loaded (RLDEN clear), so AGCK1 divides each tooth
+//!   interval by the TIOR10 multiplier. TCNT10G counts AGCK1 and restarts at 0 on each
+//!   TI10 edge; with IO10G = 001 it is compared with GR10G (CMF10G, interrupt CMI10G).
+//!   With IREG set, CMF10G is set at the match but its interrupt is requested only from
+//!   the next TI10 edge on ([`Atu::held10`]);
 //! - channel 8, one-shot pulses started by software: setting a DSTR bit starts DCNT8x
 //!   counting down on the clock TCR8 selects; TO8x is high until it reaches 0, when the
 //!   DSTR bit clears, OSF8x is set (interrupt OSI8x) and the pulse is logged in
 //!   [`Atu::pulses`];
+//! - offset one-shot pulses started by channel 2 (11.3.6): when TCNT2B leaves OCR2x
+//!   (x = A..H) and TCNR connects DCNT8I..P to it, that down-counter starts as if its
+//!   DSTR bit had been set, after loading RLDR8 if RLDENR enables the reload and RLDR8
+//!   is not 0; a counter at 0 or already running does not start;
 //! - channel 2B: TCNT2B and its eight output compare registers OCR2A–H (CMF2A–H,
 //!   OVF2B, interrupts CMI2A–H and OVI2B);
 //! - channels 3 to 5: TCNT3–5, general registers used as output compare (IMF, counter
@@ -32,9 +43,9 @@
 //!
 //! Not modelled yet: input capture on channels 1 to 5 (their GRs), the capture of
 //! ICR0D on a channel 10 compare match, the interval interrupts of channel 0 (ITVRR),
-//! the multiplied angle clock of channel 10 (TCNT10C–G, GR10G, TCCLR10) and its noise
-//! canceler, one-shot pulses started or ended by channel 1 and 2 compare matches (TCNR,
-//! OTR) and the reload of RLDR8,
+//! the corrected angle clock of channel 10 (TCNT10D–F, TCCLR10, AGCKM) and its noise
+//! canceler, one-shot pulses started by channel 1 or by the GRs of channel 2 (TCNR, TRGMDR),
+//! the termination of one-shot pulses by compare matches (OTR),
 //! channels 1, 2A, 8, 9, 10 and 11, the PWM mode of
 //! channels 3 to 5 (TMDR), the complementary PWM mode of channel 6 (PMDR), and the timing
 //! of flag setting within one count.
@@ -75,6 +86,9 @@ const DSTR: u32 = 0xFFFF_F666;
 const TCR8: u32 = 0xFFFF_F668;
 const TSR8: u32 = 0xFFFF_F66A;
 const TIER8: u32 = 0xFFFF_F66C;
+const RLDR8: u32 = 0xFFFF_F660;
+const TCNR: u32 = 0xFFFF_F662;
+const RLDENR: u32 = 0xFFFF_F66E;
 /// Pulses kept in [`Atu::pulses`].
 const PULSES_KEPT: usize = 4096;
 const TCNT10A: u32 = 0xFFFF_F6C0;
@@ -84,6 +98,9 @@ const OCR10A: u32 = 0xFFFF_F6D4;
 const OCR10B: u32 = 0xFFFF_F6D8;
 const RLD10C: u32 = 0xFFFF_F6DA;
 const TIOR10: u32 = 0xFFFF_F6E2;
+const TCNT10C: u32 = 0xFFFF_F6C6;
+const TCNT10G: u32 = 0xFFFF_F6CE;
+const GR10G: u32 = 0xFFFF_F6DC;
 const TCR10: u32 = 0xFFFF_F6E4;
 const TSR10: u32 = 0xFFFF_F6E8;
 const TIER10: u32 = 0xFFFF_F6EA;
@@ -183,6 +200,51 @@ impl Counter32 {
     }
 }
 
+/// Channel 10's multiplied clock AGCK1 and the counter TCNT10G on it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AngleClock {
+    /// CPU cycles between AGCK1 pulses (RLD10C counts of the channel clock); 0 = none.
+    pub period: u64,
+    /// Cycle of a TCNT10C reload, from which the pulses follow every `period`.
+    pub phase: u64,
+    /// TCNT10G at cycle `from`.
+    pub g: u16,
+    /// Cycle from which TCNT10G counts the pulses.
+    pub from: u64,
+    /// CMF10G was set with IREG: its interrupt waits for the next TI10 edge.
+    held: bool,
+    /// The compare match with the current GR10G has been taken since `from`.
+    matched: bool,
+}
+
+impl AngleClock {
+    /// AGCK1 pulses in (a, b].
+    fn pulses(&self, a: u64, b: u64) -> u64 {
+        if self.period == 0 || b <= a {
+            return 0;
+        }
+        let k = |t: u64| (t.max(self.phase) - self.phase) / self.period;
+        k(b) - k(a)
+    }
+
+    /// TCNT10G at `now`.
+    fn value(&self, now: u64) -> u16 {
+        self.g.wrapping_add(self.pulses(self.from, now) as u16)
+    }
+
+    /// The cycle of the pulse that brings TCNT10G to `target`, if it counts.
+    fn reaches(&self, target: u16) -> Option<u64> {
+        if self.period == 0 {
+            return None;
+        }
+        let n = target.wrapping_sub(self.g) as u64;
+        let n = if n == 0 { 65536 } else { n };
+        let first = self.from.max(self.phase);
+        let k0 = (first - self.phase) / self.period;
+        Some(self.phase + (k0 + n) * self.period)
+    }
+}
+
 /// Which counter: 0 = TCNT2B, 1..=3 = TCNT3..5, 4..=7 = TCNT6A..D, 8..=11 = TCNT7A..D.
 const N: usize = 12;
 
@@ -207,6 +269,8 @@ pub struct Atu {
     cmp10a_done: bool,
     /// TI10 edges counted.
     pub ti10_edges: u64,
+    /// The multiplied clock AGCK1 and TCNT10G.
+    pub agck: AngleClock,
     /// Channel 8 down-counters running: (start cycle, cycles per count, count at start).
     one_shot: [Option<(u64, u64, u16)>; 16],
     /// One-shot pulses that have ended: (output 0 = TO8A .. 15 = TO8P, start, end), the
@@ -318,6 +382,13 @@ impl Atu {
                 w16(io, DCNT8 + 2 * k as u32, n - done);
             }
         }
+        if self.agck.period != 0 {
+            w16(io, TCNT10G, self.agck.value(now));
+            let cpc = self.tcnt10a.cpc.max(1);
+            let into = (now.max(self.agck.phase) - self.agck.phase) % self.agck.period;
+            let left = (self.agck.period - into) / cpc;
+            w16(io, TCNT10C, left.clamp(1, 0xFFFF) as u16);
+        }
         for (c, a) in [(&self.tcnt0, TCNT0), (&self.tcnt10a, TCNT10A)] {
             let v = c.value.wrapping_add(c.elapsed(now) as u32);
             w16(io, a, (v >> 16) as u16);
@@ -377,6 +448,17 @@ impl Atu {
         if OCR10A < addr + n && addr < OCR10A + 4 {
             self.cmp10a_done = false;
         }
+        if TCNT10G < addr + n && addr < TCNT10G + 2 {
+            self.agck.g = r16(io, TCNT10G);
+            self.agck.from = now;
+            self.agck.matched = false;
+        } else if GR10G < addr + n && addr < GR10G + 2 || (addr..addr + n).contains(&TIOR10) {
+            // A new compare value or mode: count from now, so a match already taken is
+            // not taken again.
+            self.agck.g = self.agck.value(now);
+            self.agck.from = now;
+            self.agck.matched = false;
+        }
         if DSTR < addr + n && addr < DSTR + 2 {
             let old = u16::from_be_bytes([
                 if addr <= DSTR {
@@ -395,10 +477,7 @@ impl Atu {
                 let bit = 1u16 << k;
                 if new & bit != 0 && old & bit == 0 {
                     let count = r16(io, DCNT8 + 2 * k as u32);
-                    let tcr = r8(io, TCR8);
-                    let sel = if k < 8 { tcr & 7 } else { (tcr >> 4) & 7 };
-                    let cpc = (4 * ((r8(io, PSCR[0]) & 0x1F) as u64 + 1)) << sel.min(5);
-                    self.one_shot[k] = Some((now, cpc, count));
+                    self.one_shot[k] = Some((now, Self::dcnt_cycles(io, k), count));
                 } else if new & bit == 0 && old & bit != 0 {
                     // Stopped by software: the count stays where it was, no flag.
                     if let Some((start, cpc, c)) = self.one_shot[k].take() {
@@ -415,6 +494,35 @@ impl Atu {
             0
         };
         self.schedule(io);
+    }
+
+    /// CPU cycles per count of down-counter DCNT8x (`k` = 0 for A .. 15 for P): the
+    /// clock TCR8 selects, A-H in its low bits and I-P in its high bits.
+    fn dcnt_cycles(io: &[u8], k: usize) -> u64 {
+        let tcr = r8(io, TCR8);
+        let sel = if k < 8 { tcr & 7 } else { (tcr >> 4) & 7 };
+        (4 * ((r8(io, PSCR[0]) & 0x1F) as u64 + 1)) << sel.min(5)
+    }
+
+    /// Channel 2's down-count start trigger for DCNT8x (`k` = 8..=15) at cycle `at`
+    /// (11.3.6): DST8x is set and DCNT8x starts, after the reload, unless TCNR leaves it
+    /// unconnected, it is running, or its count is 0.
+    fn trigger_one_shot(&mut self, io: &mut [u8], k: usize, at: u64) {
+        let bit = 1u16 << k;
+        if r16(io, TCNR) & bit == 0 || self.one_shot[k].is_some() {
+            return;
+        }
+        let dcnt = DCNT8 + 2 * k as u32;
+        let reload = r16(io, RLDR8);
+        if r8(io, RLDENR) & 0x80 != 0 && reload != 0 {
+            w16(io, dcnt, reload);
+        }
+        let count = r16(io, dcnt);
+        if count == 0 {
+            return;
+        }
+        set16(io, DSTR, bit);
+        self.one_shot[k] = Some((at, Self::dcnt_cycles(io, k), count));
     }
 
     /// The compare values counter `i` is watched for: OCR2A-H, the compare GRs of
@@ -484,6 +592,7 @@ impl Atu {
             .unwrap_or(u64::MAX)
             .min(self.tcnt0.overflow().unwrap_or(u64::MAX))
             .min(self.cmp10a_at(io).unwrap_or(u64::MAX))
+            .min(self.cmp10g_at(io).unwrap_or(u64::MAX))
             .min(
                 self.one_shot
                     .iter()
@@ -492,6 +601,14 @@ impl Atu {
                     .min()
                     .unwrap_or(u64::MAX),
             );
+    }
+
+    /// The cycle TCNT10G reaches GR10G, if it is compared (IO10G = 001) and has not.
+    fn cmp10g_at(&self, io: &[u8]) -> Option<u64> {
+        if r8(io, TIOR10) & 7 != 1 || self.agck.matched {
+            return None;
+        }
+        self.agck.reaches(r16(io, GR10G))
     }
 
     /// The cycle TCNT10A reaches OCR10A, if it is counting towards it.
@@ -530,8 +647,17 @@ impl Atu {
         let tior = r8(io, TIOR10);
         if tior & 0x80 == 0 {
             let shift = 5 + ((tior >> 4) & 3) as u32; // x32, x64, x128, x256
-            w16(io, RLD10C, (v >> shift).min(0xFFFF) as u16);
+            let rld = (v >> shift).min(0xFFFF) as u16;
+            w16(io, RLD10C, rld);
+            // TCNT10C takes the new value too and starts again: AGCK1 restarts here.
+            self.agck.period = rld as u64 * self.tcnt10a.cpc;
+            self.agck.phase = at;
         }
+        // TCNT10G restarts at 0; a CMF10G held for this edge (IREG) may interrupt now.
+        self.agck.held = false;
+        self.agck.g = 0;
+        self.agck.from = at;
+        self.agck.matched = false;
         self.tcnt10a.value = 1;
         self.tcnt10a.base = at;
         self.cmp10a_done = false;
@@ -574,6 +700,14 @@ impl Atu {
             self.cmp10a_done = true;
             set16(io, TSR10, 0x0001); // CMF10A
         }
+        if let Some(t) = self.cmp10g_at(io)
+            && t <= now
+        {
+            self.events += 1;
+            self.agck.matched = true;
+            set16(io, TSR10, 0x0008); // CMF10G
+            self.agck.held = true;
+        }
         while let Some(t) = self.tcnt0.overflow() {
             if t > now {
                 break;
@@ -607,9 +741,11 @@ impl Atu {
                 if overflow {
                     set16(io, TSR2B, 0x0100);
                 }
+                let at = self.cnt[0].base;
                 for k in 0..8 {
                     if r16(io, CH2 + 0x14 + 2 * k) == v {
                         set16(io, TSR2B, 1 << k);
+                        self.trigger_one_shot(io, 8 + k as usize, at);
                     }
                 }
             }
@@ -665,6 +801,16 @@ impl Atu {
         taken
     }
 
+    /// TSR10 flags whose interrupt is held back: CMF10G until the TI10 edge after its
+    /// match when IREG is set (TIER10 bit 4).
+    pub fn held10(&self, io: &[u8]) -> u16 {
+        if self.agck.held && r16(io, TIER10) & 0x10 != 0 {
+            0x0008
+        } else {
+            0
+        }
+    }
+
     /// The PWM output of channel 6 or 7 (`ch` = 0 or 1), timer `k` (0 = A .. 3 = D), as a
     /// duty fraction DTR / CYLR, if that timer is running.
     pub fn duty(&self, io: &[u8], ch: usize, k: usize) -> Option<f64> {
@@ -690,17 +836,18 @@ const FLAG_PAIRS: [(u32, u32); 7] = [
     (CH67[1] + 0x22, CH67[1] + 0x24),
 ];
 
-/// Calls `f` with (vector, IPR index, shift) of every requesting source, in vector order.
-/// Most of the time no flag is both set and enabled, and that is all it checks.
+/// Calls `f` with (vector, IPR index, shift) of every requesting source, in vector order;
+/// `held10` masks TSR10 flags that may not interrupt yet ([`Atu::held10`]). Most of the
+/// time no flag is both set and enabled, and that is all it checks.
 #[inline]
-pub fn for_each_request(io: &[u8], mut f: impl FnMut(u32, usize, u32)) {
+pub fn for_each_request(io: &[u8], held10: u16, mut f: impl FnMut(u32, usize, u32)) {
     if FLAG_PAIRS
         .iter()
         .all(|&(s, e)| r16(io, s) & r16(io, e) == 0)
     {
         return;
     }
-    for (v, ipr, shift, on) in requests(io) {
+    for (v, ipr, shift, on) in requests(io, held10) {
         if on {
             f(v, ipr, shift);
         }
@@ -708,7 +855,7 @@ pub fn for_each_request(io: &[u8], mut f: impl FnMut(u32, usize, u32)) {
 }
 
 /// Interrupt requests of the modelled channels: (vector, IPR index, shift, requesting).
-pub fn requests(io: &[u8]) -> [(u32, usize, u32, bool); 58] {
+pub fn requests(io: &[u8], held10: u16) -> [(u32, usize, u32, bool); 58] {
     let tsr2b = r16(io, TSR2B);
     let tier2b = r16(io, TIER2B);
     let tsr3 = r16(io, TSR3);
@@ -766,7 +913,7 @@ pub fn requests(io: &[u8]) -> [(u32, usize, u32, bool); 58] {
         push(152 + k, 7, 12 - 4 * (k / 4), t8 & (1 << k) != 0);
     }
     // Channel 10: CMI10A, CMI10B in IPRI 7-4; ICI10A and CMI10G share vector 180, IPRI 3-0.
-    let t10 = r16(io, TSR10) & r16(io, TIER10);
+    let t10 = r16(io, TSR10) & r16(io, TIER10) & !held10;
     push(176, 8, 4, t10 & 1 != 0);
     push(178, 8, 4, t10 & 4 != 0);
     push(180, 8, 0, t10 & 0xA != 0);
@@ -860,7 +1007,7 @@ mod tests {
         a.advance(101 * cpc, &mut io);
         assert_eq!(r16(&io, TSR3) & 0x0008, 0x0008, "IMF3D");
         assert!(
-            requests(&io).iter().any(|r| r.0 == 123 && r.3),
+            requests(&io, 0).iter().any(|r| r.0 == 123 && r.3),
             "IMI3D requested"
         );
         assert_eq!(a.cnt[1].value, 0, "cleared on compare match");
@@ -894,7 +1041,7 @@ mod tests {
     #[test]
     fn interrupt_sources_and_their_priority_fields() {
         let (_, io) = io();
-        let r = requests(&io);
+        let r = requests(&io, 0);
         let find = |v: u32| r.iter().find(|x| x.0 == v).map(|x| (x.1, x.2)).unwrap();
         // Table 7.3: CMI2E-H in IPRE 7-4, IMI3 in IPRF 15-12, IMI4 in IPRF 7-4,
         // IMI5 in IPRG 15-12, CMI6 in IPRG 7-4, CMI7 in IPRG 3-0.
@@ -922,16 +1069,16 @@ mod tests {
             w16(&mut io, e, bits);
         }
         let mut got = Vec::new();
-        for_each_request(&io, |v, _, _| got.push(v));
+        for_each_request(&io, 0, |v, _, _| got.push(v));
         assert_eq!(got, [108, 116, 124, 147, 148]);
         w16(&mut io, TSR0, 0x0011);
         w16(&mut io, TIER0, 0x0011);
         got.clear();
-        for_each_request(&io, |v, _, _| got.push(v));
+        for_each_request(&io, 0, |v, _, _| got.push(v));
         assert_eq!(&got[..2], [84, 92], "ICI0A and OVI0 first");
         w16(&mut io, TIER3, 0);
         got.clear();
-        for_each_request(&io, |v, _, _| got.push(v));
+        for_each_request(&io, 0, |v, _, _| got.push(v));
         assert_eq!(
             got,
             [84, 92, 108, 116, 147, 148],
@@ -962,7 +1109,7 @@ mod tests {
         w16(&mut io, TIER0, 0x0010);
         a.advance(80_000 + 16 * 20, &mut io);
         assert_eq!(r16(&io, TSR0), 0x0010, "OVF0");
-        assert!(requests(&io).iter().any(|r| r.0 == 92 && r.3), "OVI0");
+        assert!(requests(&io, 0).iter().any(|r| r.0 == 92 && r.3), "OVI0");
         a.store(80_000 + 18 * 20, &mut io);
         assert_eq!(r32(&io, TCNT0), 2);
         // Stopping freezes it.
@@ -998,7 +1145,7 @@ mod tests {
         assert!(a.pulses.contains(&(9, 100, 220)));
         w16(&mut io, TIER8, 0x0200);
         assert!(
-            requests(&io)
+            requests(&io, 0)
                 .iter()
                 .any(|r| r.0 == 161 && r.1 == 7 && r.2 == 4 && r.3),
             "OSI8J"
@@ -1041,7 +1188,7 @@ mod tests {
         assert!(!a.capture(&mut io, 12_000, 3, true), "D disabled");
         assert_eq!(r16(&io, TSR0), 0x0003, "ICF0A, ICF0B");
         w16(&mut io, TIER0, 0x0001);
-        assert!(requests(&io).iter().any(|r| r.0 == 84 && r.3), "ICI0A");
+        assert!(requests(&io, 0).iter().any(|r| r.0 == 84 && r.3), "ICI0A");
     }
 
     #[test]
@@ -1078,8 +1225,8 @@ mod tests {
         a.advance(30_000 + 4 * 999, &mut io);
         assert_eq!(r16(&io, TSR10) & 1, 1, "CMF10A");
         w16(&mut io, TIER10, 0x0003);
-        assert!(requests(&io).iter().any(|r| r.0 == 176 && r.3));
-        assert!(requests(&io).iter().any(|r| r.0 == 180 && r.3));
+        assert!(requests(&io, 0).iter().any(|r| r.0 == 176 && r.3));
+        assert!(requests(&io, 0).iter().any(|r| r.0 == 180 && r.3));
     }
 
     #[test]
@@ -1092,11 +1239,90 @@ mod tests {
         a.advance(0x11 * 8, &mut io);
         assert_eq!(r16(&io, TSR2B), 0x0040);
         assert!(
-            requests(&io).iter().any(|r| r.0 == 114 && r.3),
+            requests(&io, 0).iter().any(|r| r.0 == 114 && r.3),
             "CMI2G requested"
         );
         // A read sees the count.
         a.store(0x11 * 8 + 5 * 8, &mut io);
         assert_eq!(r16(&io, 0xFFFF_F602), 0x16);
+    }
+
+    #[test]
+    fn a_channel_2_compare_starts_a_connected_one_shot() {
+        let run = |tcnr: u16, dcnt: u16, reload: Option<u16>| {
+            let (mut a, mut io) = io();
+            write16(&mut a, &mut io, 0, 0xFFFF_F614, 10); // OCR2A
+            write16(&mut a, &mut io, 0, 0xFFFF_F650, dcnt); // DCNT8I
+            write16(&mut a, &mut io, 0, TCNR, tcnr);
+            if let Some(r) = reload {
+                write16(&mut a, &mut io, 0, RLDR8, r);
+                write8(&mut a, &mut io, 0, RLDENR, 0x80);
+            }
+            write8(&mut a, &mut io, 0, TSTR1, 0x08); // TCNT2B on Pphi: 4 cycles a count
+            // TCNT2B leaves 10 after 11 counts.
+            a.advance(43, &mut io);
+            assert_eq!(r16(&io, DSTR), 0, "not yet");
+            a.advance(44, &mut io);
+            (a, io)
+        };
+        let (mut a, mut io) = run(0x0100, 5, None);
+        assert_eq!(r16(&io, DSTR), 0x0100, "DST8I set by the compare match");
+        a.advance(44 + 5 * 4, &mut io);
+        assert_eq!(
+            a.pulses.back(),
+            Some(&(8, 44, 64)),
+            "TO8I high for five counts"
+        );
+        assert_eq!(r16(&io, TSR8), 0x0100, "OSF8I");
+        let (_, io) = run(0x0200, 5, None);
+        assert_eq!(r16(&io, DSTR), 0, "DCNT8I not connected");
+        let (_, io) = run(0x0100, 0, None);
+        assert_eq!(r16(&io, DSTR), 0, "a count of 0 does not start");
+        let (mut a, mut io) = run(0x0100, 5, Some(7));
+        a.advance(44 + 7 * 4, &mut io);
+        assert_eq!(a.pulses.back(), Some(&(8, 44, 72)), "RLDR8 reloaded first");
+    }
+
+    #[test]
+    fn tcnt10g_finds_the_gap_and_ireg_holds_the_interrupt() {
+        let gap = |ireg: bool| {
+            let (mut a, mut io) = io();
+            write8(&mut a, &mut io, 0, TCR10, 0x01); // rising edges
+            write8(&mut a, &mut io, 0, TIOR10, 0x11); // x64, GR10G compare
+            write16(&mut a, &mut io, 0, GR10G, 160);
+            write16(&mut a, &mut io, 0, TIER10, if ireg { 0x18 } else { 0x08 });
+            write8(&mut a, &mut io, 0, TSTR1, 0x80); // TCNT10A on Pphi
+            // Teeth every 25 600 cycles (6400 counts): AGCK1 every 6400 / 64 = 100
+            // counts, 400 cycles, 64 to a tooth, so TCNT10G never reaches 160...
+            for t in [0, 25_600, 51_200] {
+                a.ti10_edge(&mut io, t, true);
+                a.advance(t, &mut io);
+            }
+            assert_eq!(r16(&io, TSR10) & 8, 0);
+            // ... until a gap of three pitches: 160 pulses after the last tooth.
+            a.advance(115_199, &mut io);
+            assert_eq!(r16(&io, TSR10) & 8, 0, "159 pulses");
+            a.advance(115_200, &mut io);
+            assert_eq!(r16(&io, TSR10) & 8, 8, "CMF10G at the match");
+            (a, io)
+        };
+        let cmi10g =
+            |a: &Atu, io: &[u8]| requests(io, a.held10(io)).iter().any(|r| r.0 == 180 && r.3);
+        let (a, io) = gap(false);
+        assert!(cmi10g(&a, &io), "without IREG, at once");
+        let (mut a, mut io) = gap(true);
+        assert!(!cmi10g(&a, &io), "with IREG, held");
+        a.ti10_edge(&mut io, 128_000, true);
+        assert!(cmi10g(&a, &io), "until the tooth after the gap");
+        // The gap's interval (three pitches) is the new AGCK1 period: 1200 cycles.
+        a.store(128_000 + 4000, &mut io);
+        assert_eq!(r16(&io, TCNT10G), 3, "restarted at that tooth");
+        // Written by software, it counts on from there until the next tooth.
+        write16(&mut a, &mut io, 133_000, TCNT10G, 50);
+        a.store(133_000 + 1200, &mut io);
+        assert_eq!(r16(&io, TCNT10G), 51);
+        a.ti10_edge(&mut io, 135_000, true);
+        a.store(135_000, &mut io);
+        assert_eq!(r16(&io, TCNT10G), 0);
     }
 }

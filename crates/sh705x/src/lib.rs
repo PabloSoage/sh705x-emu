@@ -41,7 +41,7 @@ commands:
   info    load the images, check them and show the reset vectors and reset state
   disasm  disassemble the flash from an address (hex), with PC-relative literals
   obd     boot the ECU (40 M instructions by default) and send it ELM327 commands;
-          --rpm turns a 60-2 crank wheel (TI0A) and a cam (TI0B) at that speed;
+          --rpm turns a 60-4 crank wheel (TI0A) and a cam (TI0B) at that speed;
           the analog sensors start as a warm engine with the ignition on (--sensors
           on), idling with --rpm (idle), or all at code 0 (off); --sensor sets one in
           physical units, as the ECU reports it (coolant=90, rail=30, battery=13.8...;

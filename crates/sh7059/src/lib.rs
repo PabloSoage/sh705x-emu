@@ -357,6 +357,12 @@ impl Sh7059 {
         }
     }
 
+    /// The PWM output of ATU-II channel 6 or 7 (`ch` = 0 or 1), timer `k` (0 = A .. 3 =
+    /// D), as a duty fraction, if that timer is running.
+    pub fn pwm_duty(&self, ch: usize, k: usize) -> Option<f64> {
+        self.atu.duty(&self.io, ch, k)
+    }
+
     /// The flash image as loaded.
     pub fn rom(&self) -> &[u8] {
         &self.rom
@@ -646,7 +652,7 @@ impl Sh7059 {
                 intc::offer(ipr, dei, &mut best);
             }
         }
-        atu::for_each_request(io, |vector, ipr_index, shift| {
+        atu::for_each_request(io, self.atu.held10(io), |vector, ipr_index, shift| {
             let src = intc::Source {
                 vector,
                 ipr: ipr_index,
