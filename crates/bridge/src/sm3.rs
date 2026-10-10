@@ -17,7 +17,18 @@
 //!   8 bytes` from data offset 3;
 //! - frames from the ECU are pushed unasked, as op 0xFE blocks: a 32-byte block header,
 //!   the frame count in the high nibble of byte 34, then 16-byte records `len u32 | id
-//!   u32 | 8 bytes`.
+//!   u32 | 8 bytes`;
+//! - a channel block (op 0x50) sets which frames are pushed, J2534 style: the speed at
+//!   data offset 134 (0 closes the channel), the filter count at 142 and 59-byte filters
+//!   from 305, each a mask (bit 31 set) at +0, a pattern at +4 and a type at +10 (0 pass,
+//!   1 block, 2 flow control). A frame goes through when a pass or flow-control filter
+//!   matches and no block filter does, so an open channel without filters passes
+//!   nothing. On the car the SM3 pushes the whole bus from the moment the client
+//!   connects, and nothing after a channel block with no filters [MED]; this side does
+//!   the same;
+//! - the adapter keeps only the latest frames when the client reads slower than the bus
+//!   (the car's SM3 delivered about 600 at once on connecting [MED]), so an answer never
+//!   waits behind seconds of old traffic: this side keeps [`QUEUE`] and drops the oldest.
 //!
 //! The client signs its writes with h4 (a CRC) and h8 (a sum); a real SM3 drops the
 //! connection on a wrong one. This side checks neither, and signs its own answers with
@@ -25,6 +36,7 @@
 
 use crate::link::CanLink;
 use sh7059::hcan::Frame;
+use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
@@ -41,6 +53,61 @@ const OP_BUS: u8 = 0x1C;
 const OP_FRAMES: u8 = 0xFE;
 /// Most frames in one pushed block: the count is a nibble.
 const PER_BLOCK: usize = 15;
+const OP_CHANNEL: u8 = 0x50;
+/// Frames waiting for the client, at most; older ones are dropped [EST].
+pub const QUEUE: usize = 512;
+/// Bytes written but not yet taken by the socket above which no more frames are queued.
+const UNSENT: usize = 16 * 1024;
+
+/// A channel filter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Filter {
+    /// 0 pass, 1 block, 2 flow control.
+    pub kind: u8,
+    /// Identifier bits compared.
+    pub mask: u32,
+    /// What they must be.
+    pub pattern: u32,
+}
+
+impl Filter {
+    /// Lets everything through: what the adapter does before any channel block.
+    pub const PASS_ALL: Filter = Filter {
+        kind: 0,
+        mask: 0,
+        pattern: 0,
+    };
+
+    fn matches(&self, id: u32) -> bool {
+        id & self.mask == self.pattern & self.mask
+    }
+}
+
+/// The filters a channel block (op 0x50) sets: `Some(None)` closes the channel, `None`
+/// means the block is too short to read.
+pub fn channel_filters(data: &[u8]) -> Option<Option<Vec<Filter>>> {
+    const SPEED: usize = 134;
+    const COUNT: usize = 142;
+    const FILTERS: usize = 305;
+    const SIZE: usize = 59;
+    if data.len() <= COUNT {
+        return None;
+    }
+    let u32_at = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+    if u32_at(SPEED) == 0 {
+        return Some(None);
+    }
+    let filters = (0..data[COUNT] as usize)
+        .map(|k| FILTERS + k * SIZE)
+        .take_while(|&o| o + SIZE <= data.len())
+        .map(|o| Filter {
+            mask: u32_at(o) & 0x1FFF_FFFF,
+            pattern: u32_at(o + 4) & 0x1FFF_FFFF,
+            kind: data[o + 10],
+        })
+        .collect();
+    Some(Some(filters))
+}
 
 fn checksum(op: u8, len: usize) -> u8 {
     (op as usize + (len & 0xFF) + ((len >> 8) & 0xFF) + 0x55) as u8
@@ -116,6 +183,10 @@ pub struct Sm3 {
     pub written: u64,
     /// Frames pushed to the client.
     pub pushed: u64,
+    /// Frames dropped because the client read slower than the bus.
+    pub dropped: u64,
+    /// The open channel's filters; `None` when the channel is closed.
+    pub filters: Option<Vec<Filter>>,
 }
 
 impl Default for Sm3 {
@@ -124,11 +195,22 @@ impl Default for Sm3 {
             battery_mv: 12_600,
             written: 0,
             pushed: 0,
+            dropped: 0,
+            filters: Some(vec![Filter::PASS_ALL]),
         }
     }
 }
 
 impl Sm3 {
+    /// Whether a frame from the bus reaches the client.
+    pub fn passes(&self, f: &Frame) -> bool {
+        let Some(filters) = &self.filters else {
+            return false;
+        };
+        !filters.iter().any(|x| x.kind == 1 && x.matches(f.id))
+            && filters.iter().any(|x| x.kind != 1 && x.matches(f.id))
+    }
+
     /// The answer to one message; a CAN write goes to `link` first.
     pub fn answer(&mut self, op: u8, data: &[u8], link: &mut dyn CanLink) -> Vec<u8> {
         match op {
@@ -159,6 +241,12 @@ impl Sm3 {
                 message(0, &[0u8; 28])
             }
             OP_BUS => message(0, &[0u8; 28]),
+            OP_CHANNEL => {
+                if let Some(f) = channel_filters(data) {
+                    self.filters = f;
+                }
+                message(0, &[0u8; 4])
+            }
             _ => message(0, &[0u8; 4]),
         }
     }
@@ -183,44 +271,75 @@ pub fn serve(
             Err(e) => log(&format!("{peer}: {e}")),
         }
         log(&format!(
-            "SM3 client gone: {peer}; {} frames written, {} pushed",
-            sm3.written, sm3.pushed
+            "SM3 client gone: {peer}; {} frames written, {} pushed, {} dropped",
+            sm3.written, sm3.pushed, sm3.dropped
         ));
     }
     Ok(())
 }
 
 /// One client: answers its messages and pushes the ECU's frames, until it hangs up.
+///
+/// The socket never blocks this side: answers always go out, frames only while the
+/// client keeps up, and the bus is read all the time into a queue of the latest
+/// [`QUEUE`] frames.
 pub fn session(
     mut stream: TcpStream,
     sm3: &mut Sm3,
     link: &mut dyn CanLink,
 ) -> std::io::Result<()> {
     stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(Duration::from_millis(2)))?;
+    stream.set_nonblocking(true)?;
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
+    let mut out: Vec<u8> = Vec::new();
+    let mut sent = 0usize;
+    let mut queue: VecDeque<Frame> = VecDeque::new();
     loop {
+        let mut busy = false;
         match stream.read(&mut chunk) {
             Ok(0) => return Ok(()),
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                busy = true;
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {}
             Err(e) => return Err(e),
         }
         while let Some((op, data)) = take(&mut buf) {
-            let a = sm3.answer(op, &data, link);
-            stream.write_all(&a)?;
+            out.extend(sm3.answer(op, &data, link));
         }
-        let mut frames = Vec::new();
-        while frames.len() < PER_BLOCK {
-            match link.recv(0) {
-                Some(f) => frames.push(f),
-                None => break,
+        while let Some(f) = link.recv(0) {
+            if sm3.passes(&f) {
+                if queue.len() == QUEUE {
+                    queue.pop_front();
+                    sm3.dropped += 1;
+                }
+                queue.push_back(f);
             }
         }
-        if !frames.is_empty() {
-            sm3.pushed += frames.len() as u64;
-            stream.write_all(&block(&frames))?;
+        while out.len() - sent < UNSENT && !queue.is_empty() {
+            let n = queue.len().min(PER_BLOCK);
+            let frames: Vec<Frame> = queue.drain(..n).collect();
+            sm3.pushed += n as u64;
+            out.extend(block(&frames));
+        }
+        if sent < out.len() {
+            match stream.write(&out[sent..]) {
+                Ok(n) => {
+                    sent += n;
+                    busy |= n > 0;
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e),
+            }
+            if sent == out.len() {
+                out.clear();
+                sent = 0;
+            }
+        }
+        if !busy {
+            std::thread::sleep(Duration::from_micros(500));
         }
     }
 }
@@ -228,7 +347,6 @@ pub fn session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
 
     /// The recorded opendash messages this side has to take.
     fn hex(s: &str) -> Vec<u8> {
@@ -287,6 +405,91 @@ mod tests {
         assert_eq!((f.id, f.dlc, f.extended), (0x7DF, 8, false));
         assert_eq!(&f.data[..3], &[0x02, 0x01, 0x00]);
         assert!(answers.iter().all(|a| a.len() % 4 == 0), "padded to 4");
+    }
+
+    #[test]
+    fn channel_blocks_set_the_filters() {
+        // The layout of a channel block, as `79-filtros-de-canal.mjs` builds it.
+        let mut d = vec![0u8; 305 + 2 * 59];
+        d[134..138].copy_from_slice(&500_000u32.to_le_bytes());
+        d[142] = 2;
+        for (k, (kind, mask, pattern)) in [(0u8, 0x7F8u32, 0x7E8u32), (1, 0x7FF, 0x7EA)]
+            .into_iter()
+            .enumerate()
+        {
+            let o = 305 + 59 * k;
+            d[o..o + 4].copy_from_slice(&(mask | 0x8000_0000).to_le_bytes());
+            d[o + 4..o + 8].copy_from_slice(&pattern.to_le_bytes());
+            d[o + 10] = kind;
+        }
+        let mut sm3 = Sm3::default();
+        assert!(
+            sm3.passes(&Frame::standard(0x0C9, &[0])),
+            "before any channel: everything"
+        );
+        let mut bus = Bus::default();
+        sm3.answer(0x50, &d, &mut bus);
+        let ids: Vec<u32> = [0x0C9, 0x7E8, 0x7E9, 0x7EA, 0x7F0]
+            .into_iter()
+            .filter(|&id| sm3.passes(&Frame::standard(id, &[0])))
+            .collect();
+        assert_eq!(ids, [0x7E8, 0x7E9], "pass 0x7E8-0x7EF but block 0x7EA");
+        // No filters: an open channel that passes nothing; speed 0 closes it.
+        d[142] = 0;
+        sm3.answer(0x50, &d, &mut bus);
+        assert_eq!(sm3.filters, Some(vec![]));
+        assert!(!sm3.passes(&Frame::standard(0x7E8, &[0])));
+        d[134..138].fill(0);
+        sm3.answer(0x50, &d, &mut bus);
+        assert_eq!(sm3.filters, None);
+        assert!(
+            sm3.answer(0x50, &d[..100], &mut bus).len() % 4 == 0,
+            "short: answered"
+        );
+        assert_eq!(sm3.filters, None, "and ignored");
+    }
+
+    #[test]
+    fn a_slow_client_gets_the_latest_frames() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut bus = Bus::default();
+        // Ten seconds of a 1000 frame/s bus waiting before the client comes.
+        for k in 0..10_000u32 {
+            bus.out.push_back(Frame::standard(0x100, &k.to_be_bytes()));
+        }
+        let server = std::thread::spawn(move || {
+            let (s, _) = listener.accept().unwrap();
+            let mut sm3 = Sm3::default();
+            let _ = session(s, &mut sm3, &mut bus); // the client hangs up mid-block
+            sm3
+        });
+        let mut c = TcpStream::connect(addr).unwrap();
+        c.set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let mut got = Vec::new();
+        let mut chunk = [0u8; 65536];
+        let mut frames = Vec::new();
+        while frames.len() < QUEUE {
+            let n = c.read(&mut chunk).unwrap();
+            got.extend_from_slice(&chunk[..n]);
+            while let Some((op, d)) = take(&mut got) {
+                assert_eq!(op, 0xFE);
+                for i in 0..(d[34] >> 4) as usize {
+                    let o = 36 + 16 * i;
+                    frames.push(u32::from_be_bytes(d[o + 8..o + 12].try_into().unwrap()));
+                }
+            }
+        }
+        drop(c);
+        let sm3 = server.join().unwrap();
+        assert_eq!(
+            frames.first(),
+            Some(&(10_000 - QUEUE as u32)),
+            "the oldest are gone"
+        );
+        assert_eq!(frames.last(), Some(&9_999));
+        assert_eq!(sm3.dropped, 10_000 - QUEUE as u64);
     }
 
     #[test]

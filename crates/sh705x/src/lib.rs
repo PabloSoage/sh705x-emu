@@ -667,15 +667,21 @@ fn serve(o: &EcuOptions, port: u16, flat_out: bool) -> Result<String, String> {
         if flat_out { "flat out" } else { "in real time" }
     );
     let mut ecu = bridge::link::RealTimeEcu::spawn(m, 0, !flat_out);
-    let stats = ecu.stats.clone();
+    report_speed(ecu.stats.clone());
+    bridge::server::serve(listener, &mut ecu, &mut |s| eprintln!("{s}"))
+        .map_err(|e| e.to_string())?;
+    Ok(String::new())
+}
+
+/// Prints, every ten seconds, how the emulation keeps up with the wall clock.
+fn report_speed(stats: std::sync::Arc<bridge::link::Stats>) {
+    use std::sync::atomic::Ordering::Relaxed;
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(10));
-            let c = stats.cycles.load(std::sync::atomic::Ordering::Relaxed) as f64;
-            let w = stats.wall_us.load(std::sync::atomic::Ordering::Relaxed) as f64;
-            let lag = stats
-                .worst_lag_us
-                .load(std::sync::atomic::Ordering::Relaxed);
+            let c = stats.cycles.load(Relaxed) as f64;
+            let w = stats.wall_us.load(Relaxed) as f64;
+            let lag = stats.worst_lag_us.load(Relaxed);
             if w > 0.0 {
                 eprintln!(
                     "real-time factor {:.2}, worst lag {:.1} ms",
@@ -685,9 +691,6 @@ fn serve(o: &EcuOptions, port: u16, flat_out: bool) -> Result<String, String> {
             }
         }
     });
-    bridge::server::serve(listener, &mut ecu, &mut |s| eprintln!("{s}"))
-        .map_err(|e| e.to_string())?;
-    Ok(String::new())
 }
 
 fn sm3(o: &EcuOptions, bind: &str, port: u16) -> Result<String, String> {
@@ -696,6 +699,7 @@ fn sm3(o: &EcuOptions, bind: &str, port: u16) -> Result<String, String> {
         std::net::TcpListener::bind((bind, port)).map_err(|e| format!("{bind}:{port}: {e}"))?;
     eprintln!("emulated SM3 on {bind}:{port}; point opendash's adapter address here");
     let mut ecu = bridge::link::RealTimeEcu::spawn(m, 0, true);
+    report_speed(ecu.stats.clone());
     bridge::sm3::serve(listener, &mut ecu, &mut |s| eprintln!("{s}")).map_err(|e| e.to_string())?;
     Ok(String::new())
 }
