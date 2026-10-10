@@ -800,6 +800,7 @@ dependencies = [
  "board",
  "bridge",
  "eframe",
+ "engine",
  "sh2e",
  "sh7059",
 ]
