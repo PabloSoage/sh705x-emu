@@ -25,23 +25,54 @@ struct Setpoint {
     unit: &'static str,
     bytes: usize,
     scale: f64,
+    /// Two's-complement: torque is negative on the overrun.
+    signed: bool,
 }
 
-/// What is read at each point.
+/// What is read at each point. Fuel, rail and air come first (the heart of a remap),
+/// then the actuator commands they drive, then EGR and throttle. The identifiers and
+/// their scales are the ones the car's own route profile polls
+/// (`opendash-plugins/opel-vauxhall/profiles.txt`), so the ECU answers them.
 const SETPOINTS: &[Setpoint] = &[
+    Setpoint {
+        did: 0x3233,
+        name: "fuel per stroke",
+        unit: "mm3",
+        bytes: 2,
+        scale: 0.1,
+        signed: false,
+    },
+    Setpoint {
+        did: 0x1A2D,
+        name: "torque delivered",
+        unit: "N·m",
+        bytes: 2,
+        scale: 0.25,
+        signed: true,
+    },
     Setpoint {
         did: 0x308A,
         name: "desired rail pressure",
         unit: "MPa",
         bytes: 2,
         scale: 0.01,
+        signed: false,
     },
     Setpoint {
-        did: 0x328A,
-        name: "desired boost pressure",
-        unit: "kPa",
+        did: 0x323E,
+        name: "SCV current command",
+        unit: "mA",
         bytes: 2,
-        scale: 0.01,
+        scale: 1.0,
+        signed: false,
+    },
+    Setpoint {
+        did: 0x323D,
+        name: "SCV duty command",
+        unit: "%",
+        bytes: 1,
+        scale: 100.0 / 255.0,
+        signed: false,
     },
     Setpoint {
         did: 0x327B,
@@ -49,13 +80,23 @@ const SETPOINTS: &[Setpoint] = &[
         unit: "g/s",
         bytes: 2,
         scale: 0.01,
+        signed: false,
     },
     Setpoint {
-        did: 0x0004,
-        name: "engine load",
+        did: 0x328A,
+        name: "desired boost pressure",
+        unit: "kPa",
+        bytes: 2,
+        scale: 0.01,
+        signed: false,
+    },
+    Setpoint {
+        did: 0x2041,
+        name: "VGT vane command",
         unit: "%",
         bytes: 1,
         scale: 100.0 / 255.0,
+        signed: false,
     },
     Setpoint {
         did: 0x002C,
@@ -63,6 +104,15 @@ const SETPOINTS: &[Setpoint] = &[
         unit: "%",
         bytes: 1,
         scale: 100.0 / 255.0,
+        signed: false,
+    },
+    Setpoint {
+        did: 0x32A8,
+        name: "EGR command",
+        unit: "%",
+        bytes: 1,
+        scale: 1.0,
+        signed: false,
     },
     Setpoint {
         did: 0x004C,
@@ -70,6 +120,15 @@ const SETPOINTS: &[Setpoint] = &[
         unit: "%",
         bytes: 1,
         scale: 100.0 / 255.0,
+        signed: false,
+    },
+    Setpoint {
+        did: 0x0004,
+        name: "engine load",
+        unit: "%",
+        bytes: 1,
+        scale: 100.0 / 255.0,
+        signed: false,
     },
 ];
 
@@ -104,7 +163,13 @@ fn read_point(o: &EcuOptions) -> Result<Vec<Option<f64>>, String> {
             let at = b.windows(3).position(|w| w == echo)? + 3;
             let raw = b.get(at..at + s.bytes)?;
             let v = raw.iter().fold(0u32, |a, &x| a << 8 | x as u32);
-            Some(v as f64 * s.scale)
+            let v = if s.signed && raw[0] & 0x80 != 0 {
+                // Sign-extend from the field's width (1 or 2 bytes).
+                (v | !((1 << (8 * s.bytes)) - 1)) as i32 as f64
+            } else {
+                v as f64
+            };
+            Some(v * s.scale)
         })
         .collect())
 }
@@ -123,7 +188,7 @@ fn point(o: &EcuOptions, flash: &Path, rpm: u32, pedal: u32, boost: f64) -> EcuO
 }
 
 /// Index of the desired boost in [`SETPOINTS`].
-const DESIRED_BOOST: usize = 1;
+const DESIRED_BOOST: usize = 6;
 
 /// The setpoints at one point once the engine has settled: a first pass at the
 /// barometric pressure gives the desired boost; the next puts the manifold there, as
@@ -245,4 +310,16 @@ pub fn maps(o: &MapsOptions) -> Result<String, String> {
         .unwrap();
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DESIRED_BOOST, SETPOINTS};
+
+    #[test]
+    fn desired_boost_points_at_its_setpoint() {
+        // `settled` feeds this setpoint's value back as the manifold pressure, so the
+        // index must track the table if it is reordered.
+        assert_eq!(SETPOINTS[DESIRED_BOOST].did, 0x328A);
+    }
 }

@@ -25,6 +25,9 @@ pub struct TouchedOptions {
     pub masters: Vec<(u32, u8)>,
     /// Map catalogues (CSV with Struct_Addr, Size_X, [Size_Y,] Data_Addr columns).
     pub catalog: Vec<PathBuf>,
+    /// Label files (the transferred-tags format: `ref dims | struct data ax.. | tags`),
+    /// naming each map by its struct address.
+    pub labels: Vec<PathBuf>,
     /// ECU time to watch, milliseconds.
     pub millis: u64,
     /// A second image: which of the maps looked up have other data there.
@@ -90,6 +93,37 @@ struct Entry {
     bytes: usize,
 }
 
+/// Reads label files in the transferred-tags format: one map per line,
+/// `ref  dims | struct  data  axX axY corrZ | tag; tag; ...  (candidates ...)`. Keyed by
+/// the struct address, which is the descriptor the firmware passes in R4. The readable
+/// name is the tags with the trailing `(candidates ...)` note dropped; the first entry
+/// wins when a struct is listed more than once.
+fn read_labels(paths: &[PathBuf]) -> Result<BTreeMap<u32, String>, String> {
+    let mut out = BTreeMap::new();
+    for p in paths {
+        let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        for line in text.lines() {
+            let mut parts = line.splitn(3, '|');
+            let (Some(_left), Some(mid), Some(tags)) = (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            let Some(struct_addr) = mid
+                .split_whitespace()
+                .next()
+                .and_then(|h| u32::from_str_radix(h, 16).ok())
+            else {
+                continue;
+            };
+            let name = tags.split("(candidates").next().unwrap_or(tags).trim();
+            if !name.is_empty() {
+                out.entry(struct_addr).or_insert_with(|| name.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn read_catalog(paths: &[PathBuf]) -> Result<BTreeMap<u32, Entry>, String> {
     let mut out = BTreeMap::new();
     for p in paths {
@@ -141,6 +175,7 @@ fn read_catalog(paths: &[PathBuf]) -> Result<BTreeMap<u32, Entry>, String> {
 /// Runs `sh705x touched`.
 pub fn touched(o: &TouchedOptions) -> Result<String, String> {
     let catalog = read_catalog(&o.catalog)?;
+    let labels = read_labels(&o.labels)?;
     let images = match &o.compare {
         None => None,
         Some(p) => {
@@ -246,6 +281,15 @@ pub fn touched(o: &TouchedOptions) -> Result<String, String> {
         )
         .unwrap();
     }
+    if !labels.is_empty() {
+        let named = uses.keys().filter(|d| labels.contains_key(d)).count();
+        writeln!(
+            out,
+            "{named} of them are named by the {} labels given",
+            labels.len()
+        )
+        .unwrap();
+    }
     writeln!(
         out,
         "{:>10} {:>3} {:>8} {:>7} {:>10}  x / y inputs  ->  result",
@@ -264,9 +308,12 @@ pub fn touched(o: &TouchedOptions) -> Result<String, String> {
         } else {
             u.x.show()
         };
+        let name = labels
+            .get(desc)
+            .map_or(String::new(), |n| format!("  {n}"));
         writeln!(
             out,
-            "  {desc:08X} {:>3} {:>8} {size:>7} {data:>10}  {inputs}  ->  {}",
+            "  {desc:08X} {:>3} {:>8} {size:>7} {data:>10}  {inputs}  ->  {}{name}",
             format!("{}D", u.dims),
             u.calls,
             u.out.show()
@@ -274,4 +321,31 @@ pub fn touched(o: &TouchedOptions) -> Result<String, String> {
         .unwrap();
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_labels;
+
+    #[test]
+    fn labels_are_keyed_by_the_struct_address() {
+        // The transferred-tags format: `ref dims | struct data ax ax corr | tags (note)`.
+        let text = "\
+000449C4   16x11 | 0009DE14   0011B660    0.000  0.000  1.000 | Turbo; VNT Duty Cycle  (candidates 4, margin 0.48)
+0003C88C   17x35 | 0009BC30   000E8100    0.000  0.000  1.000 | Injection; Fuel Table  (candidates 1, margin inf)
+a comment line without bars is ignored
+0004827A   20x20 | 0009B8E8   000E2B20    0.000  0.000  0.993 | Injection; Airflow Meter 1  (candidates 28)
+000482A8   20x20 | 0009B8E8   000E2B20    0.000  0.000  0.993 | Injection; Airflow Meter 2  (candidates 28)
+";
+        let dir = std::env::temp_dir().join(format!("sh705x-labels-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("tags.txt");
+        std::fs::write(&p, text).unwrap();
+        let labels = read_labels(&[p]).unwrap();
+        assert_eq!(labels.len(), 3, "three distinct structs");
+        assert_eq!(labels[&0x0009_DE14], "Turbo; VNT Duty Cycle");
+        assert_eq!(labels[&0x0009_BC30], "Injection; Fuel Table");
+        // A struct listed twice keeps the first name; the (candidates ...) note is dropped.
+        assert_eq!(labels[&0x0009_B8E8], "Injection; Airflow Meter 1");
+    }
 }

@@ -73,7 +73,8 @@ commands:
           given with --masters (3d=<hex>,2d=<hex>: they take the map's descriptor in R4
           and the inputs in FR4 and FR5, and return FR0): calls, input ranges, results;
           --catalog <csv> (Struct_Addr, Size_X, Size_Y, Data_Addr) names each map's size
-          and data; --compare <other.bin> marks the maps whose data differ there
+          and data; --labels <file> (the transferred-tags format) names each map in
+          words; --compare <other.bin> marks the maps whose data differ there
   actuators boot the ECU (idling at --rpm, 750 by default) and close the two loops that
           run with the immobiliser shut: the SCV current loop (output 7A fed back on AN1)
           and the EGR position loop (7C fed back on AN10). The firmware's duties drive a
@@ -402,6 +403,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         "touched" => {
             let (mut masters, mut catalog, mut millis) = (Vec::new(), Vec::new(), 2000u64);
             let mut compare = None;
+            let mut labels = Vec::new();
             let (o, args) = parse_ecu("touched", rest, &mut |opt, value| match opt {
                 "--masters" => {
                     let v = value.ok_or("--masters needs a list, like 3d=7128,2d=70B4")?;
@@ -419,6 +421,10 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 }
                 "--catalog" => {
                     catalog.push(PathBuf::from(value.ok_or("--catalog needs a path")?));
+                    Ok(true)
+                }
+                "--labels" => {
+                    labels.push(PathBuf::from(value.ok_or("--labels needs a path")?));
                     Ok(true)
                 }
                 "--millis" => {
@@ -442,6 +448,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 ecu: o,
                 masters,
                 catalog,
+                labels,
                 millis,
                 compare,
             }))

@@ -18,6 +18,8 @@ fn touched_options() {
         "m3.csv",
         "--catalog",
         "m2.csv",
+        "--labels",
+        "tags.txt",
         "--millis",
         "300",
         "--compare",
@@ -29,6 +31,7 @@ fn touched_options() {
         Command::Touched(o) => {
             assert_eq!(o.masters, [(0x7128, 3), (0x70B4, 2)]);
             assert_eq!(o.catalog.len(), 2);
+            assert_eq!(o.labels.len(), 1);
             assert_eq!(o.millis, 300);
             assert!(o.compare.is_some());
         }
