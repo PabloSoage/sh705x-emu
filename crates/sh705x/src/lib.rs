@@ -1,9 +1,11 @@
 //! Command-line front end. The binary is a thin wrapper around [`run`], so every
 //! command can be tested without spawning a process.
 
+mod actuators;
 mod maps;
 mod touched;
 
+pub use actuators::ActuatorsOptions;
 pub use maps::MapsOptions;
 pub use touched::TouchedOptions;
 
@@ -32,6 +34,8 @@ usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
        sh705x touched --flash <flash.bin> [--eeprom <eeprom.bin>] --masters 3d=<hex>,2d=<hex>
                     [--catalog <maps.csv>]... [--compare <other.bin>] [--millis <ms>]
                     [--rpm <rpm>] [--sensor <key=value>]...
+       sh705x actuators --flash <flash.bin> [--eeprom <eeprom.bin>] [--rpm <rpm>]
+                    [--millis <ms>] [--step <ms>] [--sensor <key=value>]...
        sh705x trace --flash <flash.bin> [--max <instructions>] [--force <addr:mask>]...
                     [--adc <channel:code>]... [--eeprom <eeprom.bin>]
                     [--eeprom-layout <blocks>[le]] [--eeprom-out <eeprom.bin>]
@@ -70,6 +74,11 @@ commands:
           and the inputs in FR4 and FR5, and return FR0): calls, input ranges, results;
           --catalog <csv> (Struct_Addr, Size_X, Size_Y, Data_Addr) names each map's size
           and data; --compare <other.bin> marks the maps whose data differ there
+  actuators boot the ECU (idling at --rpm, 750 by default) and close the two loops that
+          run with the immobiliser shut: the SCV current loop (output 7A fed back on AN1)
+          and the EGR position loop (7C fed back on AN10). The firmware's duties drive a
+          plant model (engine::actuators) whose output is returned to those inputs every
+          --step (50) ms over --millis (3000); prints the trace and where each loop settles
   trace   run from reset with peripheral registers as plain storage, optionally forcing
           status bits as phase 0 did, and write every register access to --out as
           'pc R|W addr size value' (hex). Prints instructions, cycles and speed.
@@ -107,6 +116,8 @@ pub enum Command {
     Maps(MapsOptions),
     /// List the maps the firmware looks up in a scenario.
     Touched(TouchedOptions),
+    /// Close the SCV and EGR loops against the firmware and trace them.
+    Actuators(ActuatorsOptions),
     /// Disassemble the flash.
     Disasm {
         /// Path to the flash image.
@@ -435,6 +446,36 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 compare,
             }))
         }
+        "actuators" => {
+            let (mut millis, mut step) = (3000u64, 50u64);
+            let (mut o, args) = parse_ecu("actuators", rest, &mut |opt, value| match opt {
+                "--millis" => {
+                    let v = value.ok_or("--millis needs a value")?;
+                    millis = v.parse().map_err(|_| format!("bad --millis '{v}'"))?;
+                    Ok(true)
+                }
+                "--step" => {
+                    let v = value.ok_or("--step needs a value")?;
+                    step = v.parse().map_err(|_| format!("bad --step '{v}'"))?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            })?;
+            if let Some(a) = args.first() {
+                return Err(format!("actuators takes no argument '{a}'"));
+            }
+            if step == 0 {
+                return Err("actuators needs --step of at least 1 ms".into());
+            }
+            if o.rpm.is_none() {
+                o.rpm = Some(750);
+            }
+            Ok(Command::Actuators(ActuatorsOptions {
+                ecu: o,
+                millis,
+                step,
+            }))
+        }
         "disasm" => {
             let (mut flash, mut from, mut count) = (None, None, 32);
             let mut it = rest.iter();
@@ -572,6 +613,7 @@ pub fn run(cmd: &Command) -> Result<String, String> {
         Command::Bench(o, seconds) => bench(o, *seconds),
         Command::Maps(o) => maps::maps(o),
         Command::Touched(o) => touched::touched(o),
+        Command::Actuators(o) => actuators::actuators(o),
     }
 }
 
