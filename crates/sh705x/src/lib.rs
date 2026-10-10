@@ -2,8 +2,10 @@
 //! command can be tested without spawning a process.
 
 mod maps;
+mod touched;
 
 pub use maps::MapsOptions;
+pub use touched::TouchedOptions;
 
 use board::Eeprom;
 use sh2e::{Cpu, Vector};
@@ -27,6 +29,9 @@ usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
                     [--seconds <s>] [--adc <channel:code>]...
        sh705x maps  --flash <flash.bin> [--compare <other.bin>] [--eeprom <eeprom.bin>]
                     [--rpm-list 750,1500,...] [--pedal-list 0,25,...] [--sensor <key=value>]...
+       sh705x touched --flash <flash.bin> [--eeprom <eeprom.bin>] --masters 3d=<hex>,2d=<hex>
+                    [--catalog <maps.csv>]... [--compare <other.bin>] [--millis <ms>]
+                    [--rpm <rpm>] [--sensor <key=value>]...
        sh705x trace --flash <flash.bin> [--max <instructions>] [--force <addr:mask>]...
                     [--adc <channel:code>]... [--eeprom <eeprom.bin>]
                     [--eeprom-layout <blocks>[le]] [--eeprom-out <eeprom.bin>]
@@ -59,6 +64,12 @@ commands:
           boost and air flow, load, desired EGR and throttle; with --compare, the same on
           a second flash image and where they differ, to see what a calibration change
           does
+  touched boot the ECU as obd does, then watch --millis (2000) of ECU time and list every
+          calibration map the firmware looks up through the interpolation routines
+          given with --masters (3d=<hex>,2d=<hex>: they take the map's descriptor in R4
+          and the inputs in FR4 and FR5, and return FR0): calls, input ranges, results;
+          --catalog <csv> (Struct_Addr, Size_X, Size_Y, Data_Addr) names each map's size
+          and data; --compare <other.bin> marks the maps whose data differ there
   trace   run from reset with peripheral registers as plain storage, optionally forcing
           status bits as phase 0 did, and write every register access to --out as
           'pc R|W addr size value' (hex). Prints instructions, cycles and speed.
@@ -94,6 +105,8 @@ pub enum Command {
     Bench(EcuOptions, u32),
     /// Read the setpoints over a grid of speed and pedal, for one image or two.
     Maps(MapsOptions),
+    /// List the maps the firmware looks up in a scenario.
+    Touched(TouchedOptions),
     /// Disassemble the flash.
     Disasm {
         /// Path to the flash image.
@@ -375,6 +388,53 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 pedal,
             }))
         }
+        "touched" => {
+            let (mut masters, mut catalog, mut millis) = (Vec::new(), Vec::new(), 2000u64);
+            let mut compare = None;
+            let (o, args) = parse_ecu("touched", rest, &mut |opt, value| match opt {
+                "--masters" => {
+                    let v = value.ok_or("--masters needs a list, like 3d=7128,2d=70B4")?;
+                    for item in v.split(',') {
+                        let bad = || format!("--masters wants 2d=<hex> or 3d=<hex>, got '{item}'");
+                        let (d, a) = item.trim().split_once('=').ok_or_else(bad)?;
+                        let dims = match d.to_ascii_lowercase().as_str() {
+                            "2d" => 2,
+                            "3d" => 3,
+                            _ => return Err(bad()),
+                        };
+                        masters.push((hex(a).map_err(|_| bad())?, dims));
+                    }
+                    Ok(true)
+                }
+                "--catalog" => {
+                    catalog.push(PathBuf::from(value.ok_or("--catalog needs a path")?));
+                    Ok(true)
+                }
+                "--millis" => {
+                    let v = value.ok_or("--millis needs a value")?;
+                    millis = v.parse().map_err(|_| format!("bad --millis '{v}'"))?;
+                    Ok(true)
+                }
+                "--compare" => {
+                    compare = Some(PathBuf::from(value.ok_or("--compare needs a path")?));
+                    Ok(true)
+                }
+                _ => Ok(false),
+            })?;
+            if let Some(a) = args.first() {
+                return Err(format!("touched takes no argument '{a}'"));
+            }
+            if masters.is_empty() {
+                return Err("touched needs --masters, like 3d=7128,2d=70B4".into());
+            }
+            Ok(Command::Touched(TouchedOptions {
+                ecu: o,
+                masters,
+                catalog,
+                millis,
+                compare,
+            }))
+        }
         "disasm" => {
             let (mut flash, mut from, mut count) = (None, None, 32);
             let mut it = rest.iter();
@@ -511,6 +571,7 @@ pub fn run(cmd: &Command) -> Result<String, String> {
         Command::Sm3(o, bind, port) => sm3(o, bind, *port),
         Command::Bench(o, seconds) => bench(o, *seconds),
         Command::Maps(o) => maps::maps(o),
+        Command::Touched(o) => touched::touched(o),
     }
 }
 
