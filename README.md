@@ -28,7 +28,7 @@ The first target is a Denso ECU with an SH7059 (Opel Astra J, A17DTJ engine).
 | 4 | Diagnostics over the emulated CAN bus | done for reading: OBD and GMLAN through an ELM327 on TCP and an emulated Scanmatik SM3 |
 | 5 | Simulated engine | in progress: crank and cam wheels, sensors in physical units, the ABS on the bus; no injection yet |
 | 6 | Validation against a real ECU, with an FPGA-driven bench | — |
-| 7 | Calibration comparison and map-access tracing | — |
+| 7 | Calibration comparison and map-access tracing | started: setpoints over a speed × pedal grid, two images compared |
 | 8 | The ECU on an FPGA (SH-2 soft core with an SH-2E FPU) | — |
 
 ### Phase 0 in short
@@ -151,6 +151,19 @@ sh705x bench --flash <flash.bin> --eeprom <eeprom.bin> --rpm 800
 
 `--sensors off` leaves every analog input at code 0 and `--peers none` takes the ABS
 off the bus.
+
+### Comparing calibrations
+
+```sh
+# What the ECU asks for (rail pressure, boost, air flow, load, EGR, throttle) over a
+# grid of engine speed and pedal, and where a second image differs:
+sh705x maps --flash <original.bin> --compare <modified.bin> --eeprom <eeprom.bin>
+```
+
+Each point boots the ECU there and lets the boost settle on its target. The setpoints
+come from the calibration's maps, so a changed map shows where the engine is on it; as
+long as the ECU does not inject, setpoints that depend on the fuel it delivers (EGR) do
+not show.
 
 ```sh
 cargo test --all
