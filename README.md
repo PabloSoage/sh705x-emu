@@ -100,6 +100,16 @@ sh705x obd --flash <flash.bin> --eeprom <eeprom.bin> 0100 0902 ATSH7E0 1A92
 sh705x serve --flash <flash.bin> --eeprom <eeprom.bin>
 ```
 
+For [opendash](https://github.com/PabloSoage/opendash), which talks to a Scanmatik SM3
+rather than an ELM327, there is an emulated SM3: run
+
+```sh
+sh705x sm3 --flash <flash.bin> --eeprom <eeprom.bin>
+```
+
+and set opendash's adapter address to this machine's IP (port 777), on the same
+network.
+
 To watch it run:
 
 ```sh

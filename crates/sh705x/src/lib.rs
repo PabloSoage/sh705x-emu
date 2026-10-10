@@ -15,6 +15,8 @@ usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
                     [--adc <channel:code>]... <ELM327 command>...
        sh705x serve --flash <flash.bin> [--eeprom <eeprom.bin>] [--port <port>]
                     [--adc <channel:code>]... [--flat-out]
+       sh705x sm3   --flash <flash.bin> [--eeprom <eeprom.bin>] [--bind <address>]
+                    [--port <port>] [--adc <channel:code>]...
        sh705x trace --flash <flash.bin> [--max <instructions>] [--force <addr:mask>]...
                     [--adc <channel:code>]... [--eeprom <eeprom.bin>]
                     [--eeprom-layout <blocks>[le]] [--eeprom-out <eeprom.bin>]
@@ -29,6 +31,9 @@ commands:
   serve   run the ECU in real time and serve an ELM327 on TCP (port 35000 by
           default) for diagnostic apps; --flat-out runs as fast as it can instead
           of following the wall clock
+  sm3     run the ECU in real time behind an emulated Scanmatik SM3, for opendash:
+          set opendash's adapter address to this machine (port 777 by default;
+          binds 0.0.0.0 unless --bind says otherwise)
   trace   run from reset with peripheral registers as plain storage, optionally forcing
           status bits as phase 0 did, and write every register access to --out as
           'pc R|W addr size value' (hex). Prints instructions, cycles and speed.
@@ -58,6 +63,8 @@ pub enum Command {
     Obd(EcuOptions, Vec<String>),
     /// Serve an ELM327 on TCP, in real time.
     Serve(EcuOptions, u16, bool),
+    /// Serve an emulated SM3 on TCP, in real time: options, address, port.
+    Sm3(EcuOptions, String, u16),
     /// Disassemble the flash.
     Disasm {
         /// Path to the flash image.
@@ -226,6 +233,25 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Serve(o, port, flat_out))
         }
+        "sm3" => {
+            let (mut bind, mut port) = ("0.0.0.0".to_string(), 777u16);
+            let (o, args) = parse_ecu("sm3", rest, &mut |opt, value| match opt {
+                "--port" => {
+                    let v = value.ok_or("--port needs a value")?;
+                    port = v.parse().map_err(|_| format!("bad --port '{v}'"))?;
+                    Ok(true)
+                }
+                "--bind" => {
+                    bind = value.ok_or("--bind needs a value")?.clone();
+                    Ok(true)
+                }
+                _ => Ok(false),
+            })?;
+            if let Some(a) = args.first() {
+                return Err(format!("sm3 takes no argument '{a}'"));
+            }
+            Ok(Command::Sm3(o, bind, port))
+        }
         "disasm" => {
             let (mut flash, mut from, mut count) = (None, None, 32);
             let mut it = rest.iter();
@@ -359,6 +385,7 @@ pub fn run(cmd: &Command) -> Result<String, String> {
         Command::Disasm { flash, from, count } => disasm(flash, *from, *count),
         Command::Obd(o, args) => obd(o, args),
         Command::Serve(o, port, flat_out) => serve(o, *port, *flat_out),
+        Command::Sm3(o, bind, port) => sm3(o, bind, *port),
     }
 }
 
@@ -652,6 +679,16 @@ fn serve(o: &EcuOptions, port: u16, flat_out: bool) -> Result<String, String> {
     });
     bridge::server::serve(listener, &mut ecu, &mut |s| eprintln!("{s}"))
         .map_err(|e| e.to_string())?;
+    Ok(String::new())
+}
+
+fn sm3(o: &EcuOptions, bind: &str, port: u16) -> Result<String, String> {
+    let m = boot(o)?;
+    let listener =
+        std::net::TcpListener::bind((bind, port)).map_err(|e| format!("{bind}:{port}: {e}"))?;
+    eprintln!("emulated SM3 on {bind}:{port}; point opendash's adapter address here");
+    let mut ecu = bridge::link::RealTimeEcu::spawn(m, 0, true);
+    bridge::sm3::serve(listener, &mut ecu, &mut |s| eprintln!("{s}")).map_err(|e| e.to_string())?;
     Ok(String::new())
 }
 
