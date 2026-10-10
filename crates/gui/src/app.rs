@@ -204,6 +204,7 @@ impl App {
         egui::Panel::bottom("tabs")
             .resizable(true)
             .default_size(260.0)
+            .min_size(200.0)
             .show(root, |ui| {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.tab, Tab::Console, "ELM327 console");

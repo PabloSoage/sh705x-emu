@@ -142,6 +142,15 @@ impl Machine {
     /// delay slot count as two).
     pub fn run_until(&mut self, count: u64) -> Stop {
         let end = self.cpu.instructions + count;
+        if self.breakpoints.is_empty() && self.chip.watch.is_none() {
+            // Nothing to stop at: the fast loop, which stops only by count or asleep.
+            self.run(count);
+            return if self.cpu.instructions >= end {
+                Stop::Count
+            } else {
+                Stop::Asleep
+            };
+        }
         let mut idle = 0u32;
         let mut first = true;
         while self.cpu.instructions < end {
