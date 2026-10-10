@@ -720,6 +720,7 @@ fn boot(o: &EcuOptions) -> Result<Machine, String> {
     if let Some(hz) = o.maf_hz.map(f64::from).or(sensors.maf_hz()) {
         pins.0.push(Box::new(sh7059::pins::SquareWave::new(
             sh7059::pins::Pin::Ti0(2),
+            engine::sensors::MAF_KEY,
             hz,
             engine::wheel::CYCLES_PER_S,
             0,

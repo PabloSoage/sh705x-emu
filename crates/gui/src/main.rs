@@ -1,6 +1,7 @@
 //! `sh705x-gui`: watch the emulated ECU run. Registers, the code around the PC with
-//! breakpoints, memory, CAN traffic, interrupts, the A/D inputs as sliders, and an
-//! ELM327 console on the emulated CAN bus.
+//! breakpoints, memory, CAN traffic, interrupts, the engine (speed and sensors in
+//! physical units, and the raw A/D codes) as sliders, and an ELM327 console on the
+//! emulated CAN bus.
 //!
 //! ```text
 //! sh705x-gui --flash <flash.bin> [--eeprom <eeprom.bin>] [--eeprom-layout 0123[le]]
@@ -9,6 +10,7 @@
 mod app;
 mod emu;
 
+use sh7059::pins::{Merge, Pin, SquareWave};
 use sh7059::{Machine, Sh7059};
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -55,11 +57,24 @@ fn main() -> Result<(), String> {
         board::wire_eeproms(&mut chip, &e, layout);
     }
     chip.adc.input[14] = IGNITION_ON;
-    let m = Machine::new(chip, true);
-    let shared = Arc::new(Mutex::new(emu::first_snapshot(&m)));
+    // The crank and cam wheels (stopped) and the MAF, so both can be set while running.
+    chip.set_stimulus(Box::new(Merge(vec![
+        Box::new(engine::wheel::Wheels::new(0.0, 0)),
+        Box::new(SquareWave::new(
+            Pin::Ti0(2),
+            engine::sensors::MAF_KEY,
+            0.0,
+            engine::wheel::CYCLES_PER_S,
+            0,
+        )),
+    ])));
+    let mut m = Machine::new(chip, true);
+    let engine = emu::Engine::ignition_on();
+    engine.apply(&mut m);
+    let shared = Arc::new(Mutex::new(emu::first_snapshot(&m, &engine)));
     let (tx, rx) = mpsc::channel();
     let s2 = shared.clone();
-    let thread = std::thread::spawn(move || emu::run(m, rx, s2));
+    let thread = std::thread::spawn(move || emu::run(m, engine, rx, s2));
     let flash = Arc::new(image);
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()

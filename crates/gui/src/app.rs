@@ -186,18 +186,54 @@ impl App {
         });
 
         egui::Panel::right("sensors").show(root, |ui| {
-            ui.heading("A/D inputs");
-            ui.label("10-bit codes; AN14 is the ignition input (on above 229).");
+            ui.heading("Engine");
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for k in 0..32 {
-                    let mut v = s.adc[k];
+                ui.horizontal(|ui| {
+                    if ui.button("Ignition on").clicked() {
+                        self.send(Cmd::Preset(false));
+                    }
+                    if ui.button("Idle").clicked() {
+                        self.send(Cmd::Preset(true));
+                    }
+                });
+                let mut rpm = s.engine.rpm;
+                ui.horizontal(|ui| {
+                    ui.monospace(format!("{:<13}", "rpm"));
+                    if ui
+                        .add(egui::Slider::new(&mut rpm, 0.0..=5000.0).step_by(10.0))
+                        .changed()
+                    {
+                        self.send(Cmd::Rpm(rpm));
+                    }
+                });
+                ui.label("Sensors as the ECU reports them:");
+                for &(key, value) in &s.engine.sensors.values {
+                    let mut v = value;
+                    let (range, unit) = sensor_range(key);
                     ui.horizontal(|ui| {
-                        ui.monospace(format!("AN{k:<2}"));
-                        if ui.add(egui::Slider::new(&mut v, 0..=1023)).changed() {
-                            self.send(Cmd::Adc(k, v));
+                        ui.monospace(format!("{key:<13}")).on_hover_text(
+                            engine::sensors::input(key).map_or("mass air flow", |i| i.name),
+                        );
+                        if ui
+                            .add(egui::Slider::new(&mut v, range).suffix(format!(" {unit}")))
+                            .changed()
+                        {
+                            self.send(Cmd::Sensor(key, v));
                         }
                     });
                 }
+                egui::CollapsingHeader::new("Raw A/D codes").show(ui, |ui| {
+                    ui.label("10-bit codes; AN14 is the ignition input (on above 229).");
+                    for k in 0..32 {
+                        let mut v = s.adc[k];
+                        ui.horizontal(|ui| {
+                            ui.monospace(format!("AN{k:<2}"));
+                            if ui.add(egui::Slider::new(&mut v, 0..=1023)).changed() {
+                                self.send(Cmd::Adc(k, v));
+                            }
+                        });
+                    }
+                });
             });
         });
 
@@ -373,6 +409,21 @@ impl App {
     }
 }
 
+/// The slider range of a sensor: what its curve can report, and the unit.
+fn sensor_range(key: &str) -> (std::ops::RangeInclusive<f64>, &'static str) {
+    match engine::sensors::input(key) {
+        Some(i) => {
+            let lo = i.curve.iter().map(|p| p.1).fold(f64::MAX, f64::min);
+            let hi = i.curve.iter().map(|p| p.1).fold(f64::MIN, f64::max);
+            (lo..=hi, i.unit)
+        }
+        None => {
+            let hi = engine::curves::MAF.iter().map(|p| p.1).fold(0.0, f64::max);
+            (0.0..=hi, "g/s")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,10 +460,11 @@ mod tests {
     fn the_emulation_thread_steps_runs_and_publishes() {
         let img = flash();
         let m = Machine::new(Sh7059::new(&img).unwrap(), true);
-        let shared = Arc::new(Mutex::new(emu::first_snapshot(&m)));
+        let engine = emu::Engine::ignition_on();
+        let shared = Arc::new(Mutex::new(emu::first_snapshot(&m, &engine)));
         let (tx, rx) = mpsc::channel();
         let s2 = shared.clone();
-        let t = std::thread::spawn(move || emu::run(m, rx, s2));
+        let t = std::thread::spawn(move || emu::run(m, engine, rx, s2));
         tx.send(Cmd::Step(30)).unwrap();
         let s = wait_for(&shared, |s| s.cpu.instructions >= 30);
         assert_eq!(s.cpu.instructions, 30);
@@ -429,6 +481,14 @@ mod tests {
         tx.send(Cmd::Memory(0)).unwrap();
         let s = wait_for(&shared, |s| s.adc[7] == 512 && s.mem_addr == 0);
         assert_eq!(&s.mem[..4], &[0, 0, 0x10, 0], "the reset vector, peeked");
+        // A sensor in physical units lands on its channel as a code.
+        tx.send(Cmd::Sensor("coolant", 20.0)).unwrap();
+        let code = engine::sensors::input("coolant").unwrap().code(20.0);
+        let s = wait_for(&shared, |s| s.adc[7] == code);
+        assert!(s.engine.sensors.values.contains(&("coolant", 20.0)));
+        tx.send(Cmd::Preset(true)).unwrap();
+        let s = wait_for(&shared, |s| s.engine.rpm == 750.0);
+        assert_eq!(s.engine.sensors, engine::sensors::Sensors::idle());
         tx.send(Cmd::Quit).unwrap();
         t.join().unwrap();
     }
@@ -444,7 +504,7 @@ mod tests {
     fn every_tab_draws_without_a_window() {
         let img = flash();
         let m = Machine::new(Sh7059::new(&img).unwrap(), true);
-        let mut snap = emu::first_snapshot(&m);
+        let mut snap = emu::first_snapshot(&m, &emu::Engine::ignition_on());
         snap.console = vec!["> 0100".into(), "    41 00 98 3B 20 13".into()];
         snap.can.push_back(emu::CanEvent {
             us: 12,

@@ -531,6 +531,15 @@ impl Sh7059 {
         self.update_interrupts();
     }
 
+    /// Changes a setting of what drives the input pins (see [`pins::Stimulus::set`])
+    /// from now on.
+    pub fn stimulus_set(&mut self, key: &str, value: f64) {
+        if let Some(s) = self.stimulus.as_mut() {
+            s.set(key, value, self.now);
+            self.update_interrupts();
+        }
+    }
+
     /// Takes the input pin edges due by `now`, each at its own cycle.
     fn take_edges(&mut self) {
         let Some(s) = self.stimulus.as_mut() else {

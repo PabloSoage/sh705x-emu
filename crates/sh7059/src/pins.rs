@@ -28,6 +28,9 @@ pub trait Stimulus: Send {
     fn peek(&self) -> Option<Edge>;
     /// Takes the next edge.
     fn take(&mut self) -> Option<Edge>;
+    /// Changes a setting while running (an engine speed, a frequency), from cycle `now`
+    /// on. Settings a stimulus does not have are ignored.
+    fn set(&mut self, _key: &str, _value: f64, _now: u64) {}
 }
 
 /// Edges given in advance, for tests.
@@ -69,6 +72,12 @@ impl Stimulus for Merge {
         let k = self.first()?;
         self.0[k].take()
     }
+
+    fn set(&mut self, key: &str, value: f64, now: u64) {
+        for s in &mut self.0 {
+            s.set(key, value, now);
+        }
+    }
 }
 
 /// A square wave on one pin, at a frequency that can change while it runs: what a
@@ -77,6 +86,8 @@ impl Stimulus for Merge {
 pub struct SquareWave {
     /// The pin.
     pub pin: Pin,
+    /// The name its frequency is set by, through [`Stimulus::set`].
+    pub key: &'static str,
     /// CPU cycles per second.
     pub clock: f64,
     hz: f64,
@@ -88,9 +99,10 @@ pub struct SquareWave {
 impl SquareWave {
     /// A wave at `hz` starting with a rising edge at cycle `start`. A frequency of 0 or
     /// less gives no edges.
-    pub fn new(pin: Pin, hz: f64, clock: f64, start: u64) -> Self {
+    pub fn new(pin: Pin, key: &'static str, hz: f64, clock: f64, start: u64) -> Self {
         Self {
             pin,
+            key,
             clock,
             hz,
             next: start as f64,
@@ -98,8 +110,14 @@ impl SquareWave {
         }
     }
 
-    /// Changes the frequency from the next edge on.
-    pub fn set_hz(&mut self, hz: f64) {
+    /// Changes the frequency from cycle `now` on: the next edge comes half a new period
+    /// after `now`, or stays where it was if that is sooner.
+    pub fn set_hz(&mut self, hz: f64, now: u64) {
+        if self.hz <= 0.0 {
+            self.next = now as f64;
+        } else if hz > 0.0 {
+            self.next = self.next.min(now as f64 + self.clock / hz / 2.0);
+        }
         self.hz = hz;
     }
 }
@@ -119,6 +137,12 @@ impl Stimulus for SquareWave {
         self.next += self.clock / self.hz / 2.0;
         Some(e)
     }
+
+    fn set(&mut self, key: &str, value: f64, now: u64) {
+        if key == self.key {
+            self.set_hz(value, now);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -127,7 +151,7 @@ mod tests {
 
     #[test]
     fn a_square_wave_merged_with_a_script() {
-        let wave = SquareWave::new(Pin::Ti0(2), 1000.0, 80e6, 0);
+        let wave = SquareWave::new(Pin::Ti0(2), "maf", 1000.0, 80e6, 0);
         let script = Script(
             [Edge {
                 at: 50_000,
@@ -152,6 +176,19 @@ mod tests {
             ]
         );
         assert_eq!(edges[2].pin, Pin::Ti10);
-        assert!(SquareWave::new(Pin::Ti0(2), 0.0, 80e6, 0).peek().is_none());
+        // Stopped, then started at cycle 1000: the first edge there.
+        let mut w = SquareWave::new(Pin::Ti0(2), "maf", 0.0, 80e6, 0);
+        assert!(w.peek().is_none());
+        let mut m = Merge(vec![Box::new(w.clone())]);
+        m.set("maf", 2000.0, 1000);
+        assert_eq!(m.peek().map(|e| e.at), Some(1000));
+        m.set("other", 5.0, 2000);
+        assert_eq!(m.peek().map(|e| e.at), Some(1000), "not its key");
+        // Faster from cycle 1000: the next edge moves in.
+        w.set_hz(1000.0, 0);
+        w.take();
+        assert_eq!(w.peek().map(|e| e.at), Some(40_000));
+        w.set_hz(10_000.0, 1000);
+        assert_eq!(w.peek().map(|e| e.at), Some(5000));
     }
 }

@@ -70,7 +70,7 @@ impl Wheels {
     /// positions are not known [SUP].
     pub fn new(rpm: f64, start: u64) -> Self {
         let mut w = Self {
-            rpm: rpm.max(1.0),
+            rpm: rpm.max(0.0),
             teeth: 60,
             missing: 2,
             cam_angles: vec![0.0, 180.0, 360.0, 540.0, 600.0],
@@ -88,6 +88,9 @@ impl Wheels {
     /// Computes revolutions until the earliest edge comes before the uncomputed part, so
     /// nothing computed later can come before it.
     fn top_up(&mut self) {
+        if self.rpm == 0.0 {
+            return;
+        }
         while self
             .queue
             .peek()
@@ -102,10 +105,22 @@ impl Wheels {
         CYCLES_PER_S * 60.0 / (self.rpm * 360.0)
     }
 
-    /// Changes speed: edges already computed (the current revolution) stay, the rest
-    /// follow the new speed.
-    pub fn set_rpm(&mut self, rpm: f64) {
-        self.rpm = rpm.max(1.0);
+    /// Changes speed at cycle `now`: edges already computed (the current revolution)
+    /// stay, the rest follow the new speed. 0 stops the engine at once, with no more
+    /// edges; from a stop, it starts turning at `now`, tooth 0 first.
+    pub fn set_rpm(&mut self, rpm: f64, now: u64) {
+        if rpm <= 0.0 {
+            self.rpm = 0.0;
+            self.queue.clear();
+            return;
+        }
+        let was_stopped = self.rpm == 0.0;
+        self.rpm = rpm;
+        if was_stopped {
+            self.rev_end = now as f64;
+            self.revs = 0;
+            self.top_up();
+        }
     }
 
     /// Turns one more revolution into edges.
@@ -154,6 +169,12 @@ impl Stimulus for Wheels {
         self.top_up();
         e
     }
+
+    fn set(&mut self, key: &str, value: f64, now: u64) {
+        if key == "rpm" {
+            self.set_rpm(value, now);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -177,6 +198,19 @@ mod tests {
         assert_eq!(rising[58], 4_800_000, "one revolution: 60 ms");
         let falling = crank.iter().find(|e| !e.high).unwrap();
         assert_eq!(falling.at, 40_000, "half a pitch high");
+    }
+
+    #[test]
+    fn stopping_and_starting() {
+        let mut w = Wheels::new(0.0, 0);
+        assert!(w.peek().is_none(), "0 rpm: still");
+        w.set("rpm", 1000.0, 5000);
+        assert_eq!(w.peek().map(|e| e.at), Some(5000), "tooth 0 at the start");
+        w.take();
+        w.set("rpm", 0.0, 6000);
+        assert!(w.take().is_none(), "stopped: nothing more");
+        w.set("other", 1.0, 7000);
+        assert!(w.peek().is_none());
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 use bridge::elm::Elm327;
 use bridge::link::{CYCLES_PER_US, VirtualLink};
+use engine::sensors::{MAF_KEY, Sensors};
 use sh2e::Cpu;
 use sh7059::hcan::Frame;
 use sh7059::{Machine, Stop};
@@ -24,6 +25,12 @@ pub enum Cmd {
     Breakpoints(Vec<u32>),
     /// Set an A/D input (channel, 10-bit code).
     Adc(usize, u16),
+    /// Set a sensor by key, in physical units.
+    Sensor(&'static str, f64),
+    /// Set the engine speed, rpm (0 stops it).
+    Rpm(f64),
+    /// All sensors and the speed at once: ignition on and still (false) or idling.
+    Preset(bool),
     /// Show memory from this address.
     Memory(u32),
     /// Follow the wall clock (true) or run flat out.
@@ -72,6 +79,38 @@ pub struct Snapshot {
     pub console: Vec<String>,
     /// Bytes sent and received on each SCI channel.
     pub sci: [(usize, usize); 5],
+    /// The engine as set: speed and sensors.
+    pub engine: Engine,
+}
+
+/// The simulated engine's settings: what drives the ECU's inputs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Engine {
+    /// Speed, rpm; 0 is stopped.
+    pub rpm: f64,
+    /// Sensors in physical units.
+    pub sensors: Sensors,
+}
+
+impl Engine {
+    /// A warm engine with the ignition on, not turning.
+    pub fn ignition_on() -> Self {
+        Self {
+            rpm: 0.0,
+            sensors: Sensors::ignition_on(),
+        }
+    }
+
+    /// Puts every setting on the machine: A/D codes, the wheels' speed, the MAF.
+    pub fn apply(&self, m: &mut Machine) {
+        for (c, v) in self.sensors.codes() {
+            m.chip.adc.input[c] = v;
+        }
+        m.chip.stimulus_set("rpm", self.rpm);
+        if let Some(hz) = self.sensors.maf_hz() {
+            m.chip.stimulus_set(MAF_KEY, hz);
+        }
+    }
 }
 
 /// Frames kept for the CAN view.
@@ -80,7 +119,7 @@ const CAN_KEPT: usize = 400;
 pub const MEM_WINDOW: u32 = 256;
 
 /// Runs the machine until told to quit.
-pub fn run(mut m: Machine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Snapshot>>) {
+pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Snapshot>>) {
     let mut running = false;
     let mut real_time = true;
     let mut stop = None;
@@ -120,6 +159,26 @@ pub fn run(mut m: Machine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Snapshot>>) {
                 }
                 Cmd::Breakpoints(b) => m.breakpoints = b,
                 Cmd::Adc(c, v) => m.chip.adc.input[c] = v,
+                Cmd::Sensor(k, v) => {
+                    if engine.sensors.set(k, v).is_ok() {
+                        engine.apply(&mut m);
+                    }
+                }
+                Cmd::Rpm(r) => {
+                    engine.rpm = r.max(0.0);
+                    engine.apply(&mut m);
+                }
+                Cmd::Preset(idle) => {
+                    engine = if idle {
+                        Engine {
+                            rpm: 750.0,
+                            sensors: Sensors::idle(),
+                        }
+                    } else {
+                        Engine::ignition_on()
+                    };
+                    engine.apply(&mut m);
+                }
                 Cmd::Memory(a) => mem_addr = a,
                 Cmd::RealTime(r) => {
                     real_time = r;
@@ -204,6 +263,7 @@ pub fn run(mut m: Machine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Snapshot>>) {
                     let c = &m.chip.sci.ch[k];
                     (c.sent.len(), c.received.len())
                 }),
+                engine: engine.clone(),
             };
             *shared.lock().expect("snapshot lock") = snap;
             published = Instant::now();
@@ -244,8 +304,8 @@ impl bridge::link::CanLink for LoggingLink<'_, '_> {
     }
 }
 
-/// A snapshot of a machine that has not run yet.
-pub fn first_snapshot(m: &Machine) -> Snapshot {
+/// A snapshot of a machine that has not run yet, with `engine` on its inputs.
+pub fn first_snapshot(m: &Machine, engine: &Engine) -> Snapshot {
     Snapshot {
         cpu: m.cpu.clone(),
         running: false,
@@ -259,5 +319,6 @@ pub fn first_snapshot(m: &Machine) -> Snapshot {
         real_time: true,
         console: Vec::new(),
         sci: [(0, 0); 5],
+        engine: engine.clone(),
     }
 }
