@@ -107,10 +107,19 @@ impl Machine {
         {
             return;
         }
+        let debugging = self.chip.trace.is_some() || self.chip.watch.is_some();
         while self.cpu.instructions < end {
             let before = self.cpu.instructions;
             let level = self.take_interrupt();
-            if !self.execute(level) {
+            if !debugging && !self.cpu.sleeping {
+                // The common case, without the checks `execute` makes for the rest.
+                self.chip.now = self.cpu.cycles;
+                self.cpu.step(&mut self.chip);
+                if self.cpu.cycles >= self.chip.next_event {
+                    self.chip.now = self.cpu.cycles;
+                    self.chip.advance();
+                }
+            } else if !self.execute(level) {
                 break;
             }
             // Asleep through a million timer events without a wake-up: give up.

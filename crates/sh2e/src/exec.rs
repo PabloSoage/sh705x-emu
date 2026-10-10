@@ -49,9 +49,55 @@ const fn base_cycles(op: Op) -> u64 {
     }
 }
 
+/// Bit of [`INFO`]: the operation blocks interrupts after it.
+const BLOCKS: u8 = 0x20;
+/// Bit of [`INFO`]: the operation is illegal in a delay slot.
+const SLOT_ILLEGAL: u8 = 0x40;
+
+/// What the hot path needs about each operation, indexed by `op as usize`: its base
+/// cycles in bits 4..0, and the [`BLOCKS`] and [`SLOT_ILLEGAL`] bits. One load in place
+/// of three `match`es, the first of which compiles to an indirect jump.
+static INFO: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut code = 0;
+    while code < 0x1_0000 {
+        let op = crate::decode::decode(code as u16);
+        let mut i = base_cycles(op) as u8;
+        if op.blocks_interrupt() {
+            i |= BLOCKS;
+        }
+        if op.illegal_in_slot() {
+            i |= SLOT_ILLEGAL;
+        }
+        t[op as usize] = i;
+        code += 1;
+    }
+    t
+};
+
+/// An instruction decoded ahead of time: what [`Cpu::step`] looks up for each code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Decoded {
+    /// The operation.
+    pub op: Op,
+    /// Its base cycles and flags, as in [`INFO`].
+    info: u8,
+}
+
+/// Decodes `code`, for a [`Bus`] that keeps the decoding of code that never changes.
+#[inline(always)]
+pub fn predecode(code: u16) -> Decoded {
+    let op = DECODE[code as usize];
+    Decoded {
+        op,
+        info: INFO[op as usize],
+    }
+}
+
 impl Cpu {
     /// Executes one instruction, or a delayed branch together with its delay slot, and
     /// takes any exception it raises. Does nothing but count a cycle while asleep.
+    #[inline(always)]
     pub fn step<B: Bus>(&mut self, bus: &mut B) {
         if self.sleeping {
             self.cycles += 1;
@@ -63,12 +109,11 @@ impl Cpu {
             self.raise(bus, vector::CPU_ADDRESS_ERROR, pc);
             return;
         }
-        let code = bus.fetch16(pc);
-        let op = DECODE[code as usize];
+        let (code, Decoded { op, info: i }) = bus.fetch_decoded(pc);
         self.instructions += 1;
-        self.cycles += base_cycles(op);
+        self.cycles += (i & 0x1F) as u64;
         let next = pc.wrapping_add(2);
-        let mut block = op.blocks_interrupt();
+        let mut block = i & BLOCKS != 0;
         match self.exec(bus, op, code, pc, next) {
             Flow::Next => self.pc = next,
             Flow::Jump(t) => self.pc = t,
@@ -96,11 +141,10 @@ impl Cpu {
     /// Executes the instruction in the delay slot at `slot`, then jumps to `target`.
     /// Returns whether the slot instruction blocks interrupts.
     fn delay_slot<B: Bus>(&mut self, bus: &mut B, slot: u32, target: u32) -> bool {
-        let code = bus.fetch16(slot);
-        let op = DECODE[code as usize];
+        let (code, Decoded { op, info: i }) = bus.fetch_decoded(slot);
         self.instructions += 1;
-        self.cycles += base_cycles(op);
-        if op.illegal_in_slot() {
+        self.cycles += (i & 0x1F) as u64;
+        if i & SLOT_ILLEGAL != 0 {
             // Manual 6.5.3: the saved PC is the branch's jump address.
             self.raise(bus, vector::SLOT_ILLEGAL, target);
             return false;
@@ -113,7 +157,7 @@ impl Cpu {
             Flow::Done => {}
             Flow::Jump(_) | Flow::Delayed(_) => unreachable!("branches are illegal in a slot"),
         }
-        op.blocks_interrupt()
+        i & BLOCKS != 0
     }
 
     /// Executes `op` at `addr`. `next` is where execution continues afterwards: `addr + 2`,

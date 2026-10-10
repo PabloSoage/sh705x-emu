@@ -195,6 +195,10 @@ fn periph_at(addr: u32) -> Option<Periph> {
 /// Each peripheral model replaces its part of that area as it is written.
 pub struct Sh7059 {
     rom: Box<[u8]>,
+    /// The flash decoded, one entry per halfword, for instruction fetches. The flash
+    /// never changes while running (writes to it are ignored), so neither does this;
+    /// anything that ever changes `rom` must rebuild it.
+    decoded: Box<[sh2e::Decoded]>,
     ram: Box<[u8]>,
     io: Box<[u8]>,
     /// Bits set in every read of each register byte, as the phase 0 tool forced them to
@@ -250,6 +254,10 @@ impl Sh7059 {
         }
         Ok(Self {
             rom: flash.into(),
+            decoded: flash
+                .chunks_exact(2)
+                .map(|w| sh2e::predecode(u16::from_be_bytes([w[0], w[1]])))
+                .collect(),
             ram: vec![0; RAM_SIZE].into_boxed_slice(),
             io: vec![0; IO_SIZE].into_boxed_slice(),
             io_force: vec![0; IO_SIZE].into_boxed_slice(),
@@ -353,7 +361,23 @@ impl Sh7059 {
         }
     }
 
+    #[inline(always)]
     fn read<const N: usize>(&mut self, addr: u32) -> [u8; N] {
+        // Flash and RAM straight away when nothing watches: most data accesses.
+        if self.watch.is_none() {
+            let rom = addr.wrapping_sub(ROM_BASE) as usize;
+            if rom + N <= ROM_SIZE {
+                return self.rom[rom..rom + N].try_into().expect("N bytes");
+            }
+            let ram = addr.wrapping_sub(RAM_BASE) as usize;
+            if ram + N <= RAM_SIZE {
+                return self.ram[ram..ram + N].try_into().expect("N bytes");
+            }
+        }
+        self.read_any(addr)
+    }
+
+    fn read_any<const N: usize>(&mut self, addr: u32) -> [u8; N] {
         let mut out = [0; N];
         match fit(region(addr), N) {
             Region::Rom(o) => out.copy_from_slice(&self.rom[o..o + N]),
@@ -383,7 +407,19 @@ impl Sh7059 {
         out
     }
 
+    #[inline(always)]
     fn write<const N: usize>(&mut self, addr: u32, bytes: [u8; N]) {
+        if self.watch.is_none() {
+            let ram = addr.wrapping_sub(RAM_BASE) as usize;
+            if ram + N <= RAM_SIZE {
+                self.ram[ram..ram + N].copy_from_slice(&bytes);
+                return;
+            }
+        }
+        self.write_any(addr, bytes)
+    }
+
+    fn write_any<const N: usize>(&mut self, addr: u32, bytes: [u8; N]) {
         if let Some(w) = self.watch.as_mut() {
             w.check(self.trace_pc, self.instruction, addr, &bytes, true);
         }
@@ -652,6 +688,21 @@ impl Bus for Sh7059 {
             u16::from_be_bytes([self.rom[a], self.rom[a + 1]])
         } else {
             self.read16(addr)
+        }
+    }
+
+    /// Instruction fetch with its decoding: from the decoded flash when it is there.
+    #[inline(always)]
+    fn fetch_decoded(&mut self, addr: u32) -> (u16, sh2e::Decoded) {
+        let a = addr as usize;
+        if a + 1 < ROM_SIZE {
+            (
+                u16::from_be_bytes([self.rom[a], self.rom[a + 1]]),
+                self.decoded[a >> 1],
+            )
+        } else {
+            let code = self.read16(addr);
+            (code, sh2e::predecode(code))
         }
     }
 }

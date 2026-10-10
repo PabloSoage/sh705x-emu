@@ -27,4 +27,12 @@ pub trait Bus {
     fn fetch16(&mut self, addr: u32) -> u16 {
         self.read16(addr)
     }
+
+    /// Fetches an instruction and decodes it. An implementation can keep the decoding of
+    /// code that never changes, such as flash, so the core skips the decode tables.
+    #[inline(always)]
+    fn fetch_decoded(&mut self, addr: u32) -> (u16, crate::Decoded) {
+        let code = self.fetch16(addr);
+        (code, crate::predecode(code))
+    }
 }
