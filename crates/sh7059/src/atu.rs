@@ -308,6 +308,9 @@ impl Atu {
 
     /// Takes every event due by `now`, setting flags and moving BFR to DTR in `io`.
     pub fn advance(&mut self, now: u64, io: &mut [u8]) {
+        if now < self.next {
+            return;
+        }
         for i in 0..N {
             while let Some((d, x)) = self.counts_to_event(io, i) {
                 let t = self.cnt[i].base + d * self.cnt[i].cpc;
@@ -380,6 +383,31 @@ impl Atu {
         let cylr = r16(io, c + 8 + 2 * k as u32).max(1) as f64;
         let dtr = r16(io, c + 0x18 + 2 * k as u32) as f64;
         Some((dtr / cylr).min(1.0))
+    }
+}
+
+/// Status and enable register pairs of the modelled channels.
+const FLAG_PAIRS: [(u32, u32); 4] = [
+    (TSR2B, TIER2B),
+    (TSR3, TIER3),
+    (CH67[0] + 0x22, CH67[0] + 0x24),
+    (CH67[1] + 0x22, CH67[1] + 0x24),
+];
+
+/// Calls `f` with (vector, IPR index, shift) of every requesting source, in vector order.
+/// Most of the time no flag is both set and enabled, and that is all it checks.
+#[inline]
+pub fn for_each_request(io: &[u8], mut f: impl FnMut(u32, usize, u32)) {
+    if FLAG_PAIRS
+        .iter()
+        .all(|&(s, e)| r16(io, s) & r16(io, e) == 0)
+    {
+        return;
+    }
+    for (v, ipr, shift, on) in requests(io) {
+        if on {
+            f(v, ipr, shift);
+        }
     }
 }
 
@@ -566,6 +594,31 @@ mod tests {
         assert_eq!(find(137), (6, 12));
         assert_eq!(find(145), (6, 4));
         assert_eq!(find(151), (6, 0));
+    }
+
+    #[test]
+    fn every_set_and_enabled_flag_is_offered_in_vector_order() {
+        let (_, mut io) = io();
+        for (s, e, bits) in [
+            (TSR2B, TIER2B, 0x0101),
+            (TSR3, TIER3, 0x0010),
+            (0xFFFF_F522, 0xFFFF_F524, 0x0008),
+            (0xFFFF_F5A2, 0xFFFF_F5A4, 0x0001),
+        ] {
+            w16(&mut io, s, bits);
+            w16(&mut io, e, bits);
+        }
+        let mut got = Vec::new();
+        for_each_request(&io, |v, _, _| got.push(v));
+        assert_eq!(got, [108, 116, 124, 147, 148]);
+        w16(&mut io, TIER3, 0);
+        got.clear();
+        for_each_request(&io, |v, _, _| got.push(v));
+        assert_eq!(
+            got,
+            [108, 116, 147, 148],
+            "a set flag without its enable is not offered"
+        );
     }
 
     #[test]

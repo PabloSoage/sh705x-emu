@@ -374,7 +374,7 @@ impl Sh7059 {
 
     /// Carries out the DMA transfer units due by `now`.
     fn dma_catch_up(&mut self) {
-        if self.dma_busy {
+        if self.dma_busy || self.dmac.idle() {
             return;
         }
         self.dma_busy = true;
@@ -408,20 +408,34 @@ impl Sh7059 {
 
     fn update_interrupts(&mut self) {
         let i = (intc::IPR_BASE - IO_BASE) as usize;
-        // In vector order, which is the default priority order of table 7.3.
-        let mut sources: [(intc::Source, bool); 43] = [(intc::CMTI0, false); 43];
-        for (k, (s, dei)) in sources.iter_mut().zip(intc::DEI).enumerate() {
-            *s = (dei, dmac::Dmac::requesting(&self.io, k));
+        let (io, ipr) = (&self.io, &self.io[i..i + 24]);
+        // Offered in vector order, which is the default priority order of table 7.3.
+        let mut best = (0, 0);
+        for (k, dei) in intc::DEI.into_iter().enumerate() {
+            if dmac::Dmac::requesting(io, k) {
+                intc::offer(ipr, dei, &mut best);
+            }
         }
-        for (k, (vector, ipr, shift, on)) in atu::requests(&self.io).into_iter().enumerate() {
-            sources[4 + k] = (intc::Source { vector, ipr, shift }, on);
+        atu::for_each_request(io, |vector, ipr_index, shift| {
+            let src = intc::Source {
+                vector,
+                ipr: ipr_index,
+                shift,
+            };
+            intc::offer(ipr, src, &mut best);
+        });
+        for (src, on) in [
+            (intc::CMTI0, self.cmt.ch[0].requesting()),
+            (intc::ADI0, self.adc.requesting(0)),
+            (intc::CMTI1, self.cmt.ch[1].requesting()),
+            (intc::ADI1, self.adc.requesting(1)),
+            (intc::ADI2, self.adc.requesting(2)),
+        ] {
+            if on {
+                intc::offer(ipr, src, &mut best);
+            }
         }
-        sources[38] = (intc::CMTI0, self.cmt.ch[0].requesting());
-        sources[39] = (intc::ADI0, self.adc.requesting(0));
-        sources[40] = (intc::CMTI1, self.cmt.ch[1].requesting());
-        sources[41] = (intc::ADI1, self.adc.requesting(1));
-        sources[42] = (intc::ADI2, self.adc.requesting(2));
-        self.pending = intc::highest(&self.io[i..i + 24], &sources);
+        self.pending = best;
         self.next_event = self
             .cmt
             .next_event()
@@ -581,6 +595,37 @@ mod tests {
                 value: 0x8001
             }
         );
+    }
+
+    #[test]
+    fn atu_requests_reach_the_interrupt_controller_in_priority_order() {
+        let mut c = chip();
+        c.write16(0xFFFF_ED0A, 0x5000); // IPRF: IMI3A-D at level 5
+        c.write16(0xFFFF_ED0C, 0x0050); // IPRG: CMI6A-D at level 5
+        c.write8(0xFFFF_F4AC, 0x01); // TCR3: φ'/2
+        c.write16(0xFFFF_F4A8, 100); // GR3D
+        c.write8(0xFFFF_F4AA, 0x10); // TIOR3B: GR3D compare
+        c.write16(0xFFFF_F482, 0x0008); // TIER3: IME3D
+        c.write8(0xFFFF_F401, 0x10); // TSTR1: STR3
+        assert_eq!(c.pending, (0, 0));
+        c.now = c.next_event;
+        c.advance();
+        assert_eq!(c.pending, (5, 123), "IMI3D");
+        // CMI6A at the same level: the lower vector (IMI3D) stays first.
+        c.write16(0xFFFF_F508, 1); // CYLR6A
+        c.write16(0xFFFF_F524, 0x0001); // TIER6: CME6A
+        c.write8(0xFFFF_F400, 0x01); // TSTR2: 6A
+        c.now = c.next_event;
+        c.advance();
+        assert_eq!(c.read16(0xFFFF_F522) & 1, 1, "CMF6A");
+        assert_eq!(c.pending, (5, 123));
+        // A higher level wins whatever the vector.
+        c.write16(0xFFFF_ED0C, 0x0060);
+        assert_eq!(c.pending, (6, 144), "CMI6A");
+        // Clearing IMF3D and CMF6A leaves nothing.
+        c.write16(0xFFFF_F480, 0x0000);
+        c.write16(0xFFFF_F522, 0x0000);
+        assert_eq!(c.pending, (0, 0));
     }
 
     #[test]

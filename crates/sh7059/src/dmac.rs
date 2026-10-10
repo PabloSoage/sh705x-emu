@@ -185,6 +185,13 @@ impl Dmac {
         }
     }
 
+    /// Whether no channel is transferring.
+    pub fn idle(&self) -> bool {
+        self.run
+            .iter()
+            .all(|r| r.is_none_or(|r| r.start == u64::MAX))
+    }
+
     /// Units channel `k` should have transferred by `now` and has not.
     pub fn due(&self, k: usize, now: u64, io: &[u8]) -> u64 {
         match self.run[k] {

@@ -92,13 +92,20 @@ pub fn highest(ipr: &[u8], requests: &[(Source, bool)]) -> (u32, u32) {
     let mut best = (0, 0);
     for &(src, on) in requests {
         if on {
-            let l = level(ipr, src);
-            if l > best.0 {
-                best = (l, src.vector);
-            }
+            offer(ipr, src, &mut best);
         }
     }
     best
+}
+
+/// Makes `src`, which is requesting, the pending one if its level beats `best`. Offered in
+/// table 7.3 order, ties stay with the earlier source.
+#[inline(always)]
+pub fn offer(ipr: &[u8], src: Source, best: &mut (u32, u32)) {
+    let l = level(ipr, src);
+    if l > best.0 {
+        *best = (l, src.vector);
+    }
 }
 
 #[cfg(test)]
