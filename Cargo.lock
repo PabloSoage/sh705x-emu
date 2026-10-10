@@ -5,6 +5,9 @@ version = 4
 [[package]]
 name = "board"
 version = "0.1.0"
+dependencies = [
+ "sh7059",
+]
 
 [[package]]
 name = "bridge"

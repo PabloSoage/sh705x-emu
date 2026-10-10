@@ -36,6 +36,15 @@ const RE: u8 = 0x10;
 pub trait Peer {
     /// One byte each way: receives `tx` and returns the byte shifted back.
     fn exchange(&mut self, tx: u8, msb_first: bool) -> u8;
+
+    /// A port pin wired to this peer (see [`crate::Wire`]) changed level. `line` is the
+    /// number given in the wiring.
+    fn pin(&mut self, _line: usize, _high: bool) {}
+
+    /// The peer as `Any`, for a board model to get its own type back.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 }
 
 /// Nothing attached: every exchange returns the same byte.

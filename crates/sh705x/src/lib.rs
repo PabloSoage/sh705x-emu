@@ -10,18 +10,25 @@ use std::path::PathBuf;
 /// Usage text.
 pub const USAGE: &str = "\
 usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
+       sh705x disasm --flash <flash.bin> --from <addr> [--count <instructions>]
        sh705x trace --flash <flash.bin> [--max <instructions>] [--force <addr:mask>]...
-                    [--adc <channel:code>]...
+                    [--adc <channel:code>]... [--eeprom <eeprom.bin>]
+                    [--eeprom-layout <blocks>[le]] [--eeprom-out <eeprom.bin>]
                     [--out <io-trace.txt>] [--no-address-errors] [--history]
 
 commands:
   info    load the images, check them and show the reset vectors and reset state
+  disasm  disassemble the flash from an address (hex), with PC-relative literals
   trace   run from reset with peripheral registers as plain storage, optionally forcing
           status bits as phase 0 did, and write every register access to --out as
           'pc R|W addr size value' (hex). Prints instructions, cycles and speed.
           --no-address-errors makes misaligned accesses go through, as in Ghidra's
           emulator; only for comparing with it. --history prints the steps before the
-          first exception. --adc sets an analog input (AN0-31) to a 10-bit code";
+          first exception. --adc sets an analog input (AN0-31) to a 10-bit code.
+          --eeprom serves an 8 KB dump from the four 93C86 on the board; --eeprom-layout
+          says which 2 KB block is each chip (PJ3/SCI3, PJ4/SCI4, PD0/SCI4, PD1/SCI2),
+          default 0123, high byte first unless 'le' follows; --eeprom-out saves the
+          EEPROM as the run left it";
 
 /// A parsed command line.
 #[derive(Debug, PartialEq, Eq)]
@@ -37,6 +44,15 @@ pub enum Command {
     },
     /// Run from reset and trace register accesses.
     Trace(TraceOptions),
+    /// Disassemble the flash.
+    Disasm {
+        /// Path to the flash image.
+        flash: PathBuf,
+        /// First address.
+        from: u32,
+        /// Instructions to show.
+        count: u32,
+    },
 }
 
 /// Options of the `trace` command.
@@ -56,6 +72,12 @@ pub struct TraceOptions {
     pub history: bool,
     /// A/D inputs: channel and 10-bit code.
     pub adc: Vec<(usize, u16)>,
+    /// EEPROM dump to serve.
+    pub eeprom: Option<PathBuf>,
+    /// Where each chip is in the dump.
+    pub layout: board::Layout,
+    /// Where to save the EEPROM at the end.
+    pub eeprom_out: Option<PathBuf>,
 }
 
 fn hex(s: &str) -> Result<u32, String> {
@@ -84,9 +106,32 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             let flash = flash.ok_or("info needs --flash <flash.bin>")?;
             Ok(Command::Info { flash, eeprom })
         }
+        "disasm" => {
+            let (mut flash, mut from, mut count) = (None, None, 32);
+            let mut it = rest.iter();
+            while let Some(opt) = it.next() {
+                let value = it.next().ok_or_else(|| format!("{opt} needs a value"))?;
+                match opt.as_str() {
+                    "--flash" => flash = Some(PathBuf::from(value)),
+                    "--from" => from = Some(hex(value)?),
+                    "--count" => {
+                        count = value
+                            .parse()
+                            .map_err(|_| format!("bad --count '{value}'"))?
+                    }
+                    other => return Err(format!("unknown option '{other}'")),
+                }
+            }
+            Ok(Command::Disasm {
+                flash: flash.ok_or("disasm needs --flash <flash.bin>")?,
+                from: from.ok_or("disasm needs --from <addr>")? & !1,
+                count,
+            })
+        }
         "trace" => {
             let (mut flash, mut out, mut max, mut force) = (None, None, 3_000_000, Vec::new());
             let (mut address_errors, mut history, mut adc) = (true, false, Vec::new());
+            let (mut eeprom, mut eeprom_out, mut layout) = (None, None, board::DEFAULT_LAYOUT);
             let mut it = rest.iter();
             while let Some(opt) = it.next() {
                 match opt.as_str() {
@@ -104,6 +149,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 match opt.as_str() {
                     "--flash" => flash = Some(PathBuf::from(value)),
                     "--out" => out = Some(PathBuf::from(value)),
+                    "--eeprom" => eeprom = Some(PathBuf::from(value)),
+                    "--eeprom-out" => eeprom_out = Some(PathBuf::from(value)),
+                    "--eeprom-layout" => layout = parse_layout(value)?,
                     "--max" => max = value.parse().map_err(|_| format!("bad --max '{value}'"))?,
                     "--adc" => {
                         let bad =
@@ -138,10 +186,35 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 address_errors,
                 history,
                 adc,
+                eeprom,
+                layout,
+                eeprom_out,
             }))
         }
         other => Err(format!("unknown command '{other}'")),
     }
+}
+
+/// `0123`, `2301le`...: the dump block of each chip, then `le` for low byte first.
+fn parse_layout(v: &str) -> Result<board::Layout, String> {
+    let bad = || format!("--eeprom-layout wants four distinct digits 0-3, maybe then 'le': '{v}'");
+    let (digits, le) = match v.strip_suffix("le") {
+        Some(d) => (d, true),
+        None => (v, false),
+    };
+    let b: Vec<usize> = digits
+        .chars()
+        .map(|c| c.to_digit(4).map(|d| d as usize))
+        .collect::<Option<_>>()
+        .ok_or_else(bad)?;
+    let mut seen = [false; 4];
+    if b.len() != 4 || b.iter().any(|&d| std::mem::replace(&mut seen[d], true)) {
+        return Err(bad());
+    }
+    Ok(board::Layout {
+        blocks: [b[0], b[1], b[2], b[3]],
+        big_endian: !le,
+    })
 }
 
 fn read(path: &PathBuf) -> Result<Vec<u8>, String> {
@@ -163,6 +236,7 @@ pub fn run(cmd: &Command) -> Result<String, String> {
         Command::Help => Ok(USAGE.to_string()),
         Command::Info { flash, eeprom } => info(flash, eeprom.as_ref()),
         Command::Trace(opts) => trace(opts),
+        Command::Disasm { flash, from, count } => disasm(flash, *from, *count),
     }
 }
 
@@ -175,6 +249,9 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
         address_errors,
         history,
         adc,
+        eeprom,
+        layout,
+        eeprom_out,
     } = opts;
     let (max, address_errors, history, out) = (*max, *address_errors, *history, out.as_ref());
     let image = read(flash)?;
@@ -190,6 +267,17 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
     }
     for &(c, v) in adc {
         chip.adc.input[c] = v;
+    }
+    if let Some(path) = eeprom {
+        let e = Eeprom::new(&read(path)?).map_err(|e| format!("{}: {e}", path.display()))?;
+        if e.len() != 4 * board::CHIP_BYTES {
+            return Err(format!(
+                "{}: {} bytes; the board has four 93C86, 8192 bytes",
+                path.display(),
+                e.len()
+            ));
+        }
+        board::wire_eeproms(&mut chip, &e, *layout);
     }
     let mut m = Machine::new(chip, address_errors);
     // The last steps before the first exception, to say where it came from.
@@ -283,6 +371,22 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
         }
     }
     writeln!(o, "A/D rounds {:?}", chip.adc.rounds).unwrap();
+    if eeprom.is_some() {
+        let s = board::eeprom_stats(&chip);
+        writeln!(
+            o,
+            "EEPROM words read {:?}, programmed {:?}, refused {:?} (PJ3, PJ4, PD0, PD1)",
+            s.iter().map(|x| x.0).collect::<Vec<_>>(),
+            s.iter().map(|x| x.1).collect::<Vec<_>>(),
+            s.iter().map(|x| x.2).collect::<Vec<_>>()
+        )
+        .unwrap();
+        if let Some(path) = eeprom_out {
+            let img = board::eeprom_image(&chip, *layout).expect("EEPROMs wired");
+            std::fs::write(path, img).map_err(|e| format!("{}: {e}", path.display()))?;
+            writeln!(o, "EEPROM saved to {}", path.display()).unwrap();
+        }
+    }
     writeln!(
         o,
         "DMA units {}; channels left on a peripheral request (not modelled) {}",
@@ -317,6 +421,27 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
         }
         std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))?;
         writeln!(o, "register accesses {} -> {}", t.len(), path.display()).unwrap();
+    }
+    Ok(o)
+}
+
+fn disasm(flash: &PathBuf, from: u32, count: u32) -> Result<String, String> {
+    let image = read(flash)?;
+    let mut chip = Sh7059::new(&image).map_err(|e| format!("{}: {e}", flash.display()))?;
+    let mut o = String::new();
+    for k in 0..count {
+        let pc = from.wrapping_add(2 * k);
+        if !matches!(region(pc), Region::Rom(_)) {
+            break;
+        }
+        let code = sh2e::Bus::read16(&mut chip, pc);
+        let text = sh2e::disasm::disassemble(code, pc);
+        let note = match sh2e::disasm::literal(code, pc) {
+            Some((a, 4)) => format!("  ; = H'{:08X}", sh2e::Bus::read32(&mut chip, a)),
+            Some((a, _)) => format!("  ; = H'{:04X}", sh2e::Bus::read16(&mut chip, a)),
+            None => String::new(),
+        };
+        writeln!(o, "{pc:08X}  {code:04X}  {text}{note}").unwrap();
     }
     Ok(o)
 }

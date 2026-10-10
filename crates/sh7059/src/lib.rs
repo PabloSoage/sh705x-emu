@@ -108,6 +108,26 @@ pub struct IoAccess {
     pub value: u32,
 }
 
+/// A port pin wired to the peer on an SCI channel: a chip select, or a serial clock
+/// inversion bit. The peer hears every change of level through [`sci::Peer::pin`].
+///
+/// The level is the bit as written in the register; whether the pin is set as an output
+/// with that function is not checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Wire {
+    /// The 16-bit port register holding the pin: a data register (PxDR) or PLIR.
+    pub reg: u32,
+    /// Bit of the pin in that register.
+    pub bit: u8,
+    /// SCI channel whose peer hears it.
+    pub sci: usize,
+    /// Line number passed to the peer.
+    pub line: usize,
+}
+
+/// Most wires a chip takes.
+pub const MAX_WIRES: usize = 16;
+
 /// An access of `n` bytes that would run past the end of its region is unmapped. Only a
 /// misaligned access can do that, and the CPU raises an address error before making one
 /// unless that is turned off.
@@ -197,6 +217,8 @@ pub struct Sh7059 {
     pub dmac: dmac::Dmac,
     /// Set while the DMAC carries out units, so its own accesses do not re-enter it.
     dma_busy: bool,
+    /// Port pins wired to SCI peers.
+    wires: Vec<Wire>,
     /// Highest pending interrupt: (level, vector), or (0, 0) for none.
     pub pending: (u32, u32),
     /// CPU cycle of the next timer event.
@@ -227,6 +249,7 @@ impl Sh7059 {
             atu: atu::Atu::default(),
             dmac: dmac::Dmac::default(),
             dma_busy: false,
+            wires: Vec::new(),
             pending: (0, 0),
             next_event: u64::MAX,
         })
@@ -237,6 +260,51 @@ impl Sh7059 {
             chip.reset_registers();
             chip
         })
+    }
+
+    /// Wires a port pin to the peer of an SCI channel, which hears its current level at
+    /// once and every change after. Panics past [`MAX_WIRES`] or if the register is not a
+    /// peripheral register.
+    pub fn wire(&mut self, w: Wire) {
+        assert!(self.wires.len() < MAX_WIRES, "at most {MAX_WIRES} wires");
+        assert!(
+            matches!(region(w.reg), Region::Io(o) if o + 2 <= IO_SIZE) && w.bit < 16,
+            "wire: {:#010X} bit {} is not a 16-bit peripheral register bit",
+            w.reg,
+            w.bit
+        );
+        self.wires.push(w);
+        let level = self.pin_level(&w);
+        self.sci.ch[w.sci].peer.pin(w.line, level);
+    }
+
+    fn pin_level(&self, w: &Wire) -> bool {
+        let o = (w.reg - IO_BASE) as usize;
+        (u16::from_be_bytes([self.io[o], self.io[o + 1]]) >> w.bit) & 1 != 0
+    }
+
+    /// Stores a write to a plain register, telling SCI peers about wired pins it changes.
+    fn write_plain<const N: usize>(&mut self, addr: u32, o: usize, bytes: [u8; N]) {
+        let touched = self
+            .wires
+            .iter()
+            .any(|w| w.reg < addr + N as u32 && addr < w.reg + 2);
+        if !touched {
+            self.io[o..o + N].copy_from_slice(&bytes);
+            return;
+        }
+        let mut old = [false; MAX_WIRES];
+        for (l, w) in old.iter_mut().zip(&self.wires) {
+            *l = self.pin_level(w);
+        }
+        self.io[o..o + N].copy_from_slice(&bytes);
+        for (i, was) in old.into_iter().enumerate().take(self.wires.len()) {
+            let w = self.wires[i];
+            let level = self.pin_level(&w);
+            if level != was {
+                self.sci.ch[w.sci].peer.pin(w.line, level);
+            }
+        }
     }
 
     /// The flash image as loaded.
@@ -317,7 +385,7 @@ impl Sh7059 {
                     self.store_regs(p);
                     self.update_interrupts();
                 } else {
-                    self.io[o..o + N].copy_from_slice(&bytes);
+                    self.write_plain(addr, o, bytes);
                     if (intc::IPR_BASE..intc::IPR_END).contains(&addr) {
                         self.update_interrupts();
                     }
@@ -626,6 +694,40 @@ mod tests {
         c.write16(0xFFFF_F480, 0x0000);
         c.write16(0xFFFF_F522, 0x0000);
         assert_eq!(c.pending, (0, 0));
+    }
+
+    /// Records pin changes, shared with the test through an `Rc`.
+    struct Pins(std::rc::Rc<std::cell::RefCell<Vec<(usize, bool)>>>);
+    impl sci::Peer for Pins {
+        fn exchange(&mut self, _: u8, _: bool) -> u8 {
+            0
+        }
+        fn pin(&mut self, line: usize, high: bool) {
+            self.0.borrow_mut().push((line, high));
+        }
+    }
+
+    #[test]
+    fn wired_pins_reach_the_sci_peer_on_every_change() {
+        let mut c = chip();
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        c.sci.ch[3].peer = Box::new(Pins(log.clone()));
+        c.write16(0xFFFF_F76C, 0x0008); // PJDR: PJ3 high before wiring
+        let w = |bit, line| Wire {
+            reg: 0xFFFF_F76C,
+            bit,
+            sci: 3,
+            line,
+        };
+        c.wire(w(3, 1));
+        c.wire(w(4, 2));
+        assert_eq!(*log.borrow(), [(1, true), (2, false)], "levels at wiring");
+        log.borrow_mut().clear();
+        c.write16(0xFFFF_F76C, 0x0018); // PJ4 up
+        c.write8(0xFFFF_F76D, 0x10); // byte write: PJ3 down
+        c.write8(0xFFFF_F76C, 0x00); // high byte: no wired pin changes
+        c.write16(0xFFFF_F76C, 0x0010); // same levels: nothing
+        assert_eq!(*log.borrow(), [(2, true), (1, false)]);
     }
 
     #[test]

@@ -10,6 +10,7 @@
 mod bus;
 mod cpu;
 pub mod decode;
+pub mod disasm;
 mod exec;
 mod fpu;
 #[cfg(test)]
