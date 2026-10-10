@@ -12,6 +12,10 @@
 //!   TCNT10B counts the edge (setting CMF10B when it counts on from OCR10B), ICF10A is
 //!   set, and ICR10A shifted by the TIOR10 multiplier goes to RLD10C unless RLDEN;
 //!   OCR10A against TCNT10A (CMF10A); interrupts CMI10A, CMI10B and ICI10A;
+//! - channel 8, one-shot pulses started by software: setting a DSTR bit starts DCNT8x
+//!   counting down on the clock TCR8 selects; TO8x is high until it reaches 0, when the
+//!   DSTR bit clears, OSF8x is set (interrupt OSI8x) and the pulse is logged in
+//!   [`Atu::pulses`];
 //! - channel 2B: TCNT2B and its eight output compare registers OCR2A–H (CMF2A–H,
 //!   OVF2B, interrupts CMI2A–H and OVI2B);
 //! - channels 3 to 5: TCNT3–5, general registers used as output compare (IMF, counter
@@ -29,7 +33,8 @@
 //! Not modelled yet: input capture on channels 1 to 5 (their GRs), the capture of
 //! ICR0D on a channel 10 compare match, the interval interrupts of channel 0 (ITVRR),
 //! the multiplied angle clock of channel 10 (TCNT10C–G, GR10G, TCCLR10) and its noise
-//! canceler,
+//! canceler, one-shot pulses started or ended by channel 1 and 2 compare matches (TCNR,
+//! OTR) and the reload of RLDR8,
 //! channels 1, 2A, 8, 9, 10 and 11, the PWM mode of
 //! channels 3 to 5 (TMDR), the complementary PWM mode of channel 6 (PMDR), and the timing
 //! of flag setting within one count.
@@ -65,6 +70,13 @@ const TCNT0: u32 = 0xFFFF_F430;
 const TSR0: u32 = 0xFFFF_F42C;
 const TIER0: u32 = 0xFFFF_F42E;
 const TIOR0: u32 = 0xFFFF_F42A;
+const DCNT8: u32 = 0xFFFF_F640;
+const DSTR: u32 = 0xFFFF_F666;
+const TCR8: u32 = 0xFFFF_F668;
+const TSR8: u32 = 0xFFFF_F66A;
+const TIER8: u32 = 0xFFFF_F66C;
+/// Pulses kept in [`Atu::pulses`].
+const PULSES_KEPT: usize = 4096;
 const TCNT10A: u32 = 0xFFFF_F6C0;
 const TCNT10B: u32 = 0xFFFF_F6C4;
 const ICR10A: u32 = 0xFFFF_F6D0;
@@ -195,6 +207,13 @@ pub struct Atu {
     cmp10a_done: bool,
     /// TI10 edges counted.
     pub ti10_edges: u64,
+    /// Channel 8 down-counters running: (start cycle, cycles per count, count at start).
+    one_shot: [Option<(u64, u64, u16)>; 16],
+    /// One-shot pulses that have ended: (output 0 = TO8A .. 15 = TO8P, start, end), the
+    /// latest [`PULSES_KEPT`].
+    pub pulses: std::collections::VecDeque<(u8, u64, u64)>,
+    /// One-shot pulses ended since power-on.
+    pub pulse_count: u64,
     /// Earliest event, CPU cycle.
     next: u64,
     /// Events taken: compare matches and overflows of channels 2B to 5, and cycle ends of
@@ -293,6 +312,12 @@ impl Atu {
 
     /// Writes the current counter values into the register storage, for a read.
     pub fn store(&self, now: u64, io: &mut [u8]) {
+        for (k, run) in self.one_shot.iter().enumerate() {
+            if let Some((start, cpc, n)) = *run {
+                let done = ((now - start) / cpc).min(n as u64) as u16;
+                w16(io, DCNT8 + 2 * k as u32, n - done);
+            }
+        }
         for (c, a) in [(&self.tcnt0, TCNT0), (&self.tcnt10a, TCNT10A)] {
             let v = c.value.wrapping_add(c.elapsed(now) as u32);
             w16(io, a, (v >> 16) as u16);
@@ -351,6 +376,37 @@ impl Atu {
         }
         if OCR10A < addr + n && addr < OCR10A + 4 {
             self.cmp10a_done = false;
+        }
+        if DSTR < addr + n && addr < DSTR + 2 {
+            let old = u16::from_be_bytes([
+                if addr <= DSTR {
+                    before[(DSTR - addr) as usize]
+                } else {
+                    io[(DSTR - IO_BASE) as usize]
+                },
+                if addr <= DSTR + 1 && DSTR + 1 < addr + n {
+                    before[(DSTR + 1 - addr) as usize]
+                } else {
+                    io[(DSTR + 1 - IO_BASE) as usize]
+                },
+            ]);
+            let new = r16(io, DSTR);
+            for k in 0..16 {
+                let bit = 1u16 << k;
+                if new & bit != 0 && old & bit == 0 {
+                    let count = r16(io, DCNT8 + 2 * k as u32);
+                    let tcr = r8(io, TCR8);
+                    let sel = if k < 8 { tcr & 7 } else { (tcr >> 4) & 7 };
+                    let cpc = (4 * ((r8(io, PSCR[0]) & 0x1F) as u64 + 1)) << sel.min(5);
+                    self.one_shot[k] = Some((now, cpc, count));
+                } else if new & bit == 0 && old & bit != 0 {
+                    // Stopped by software: the count stays where it was, no flag.
+                    if let Some((start, cpc, c)) = self.one_shot[k].take() {
+                        let done = ((now - start) / cpc).min(c as u64) as u16;
+                        w16(io, DCNT8 + 2 * k as u32, c - done);
+                    }
+                }
+            }
         }
         // TCNT10A counts on the φ' of PSCR4 while STR10 is set.
         self.tcnt10a.cpc = if r8(io, TSTR1) & 0x80 != 0 {
@@ -427,7 +483,15 @@ impl Atu {
             .min()
             .unwrap_or(u64::MAX)
             .min(self.tcnt0.overflow().unwrap_or(u64::MAX))
-            .min(self.cmp10a_at(io).unwrap_or(u64::MAX));
+            .min(self.cmp10a_at(io).unwrap_or(u64::MAX))
+            .min(
+                self.one_shot
+                    .iter()
+                    .flatten()
+                    .map(|&(s, cpc, n)| s + n as u64 * cpc)
+                    .min()
+                    .unwrap_or(u64::MAX),
+            );
     }
 
     /// The cycle TCNT10A reaches OCR10A, if it is counting towards it.
@@ -484,6 +548,24 @@ impl Atu {
     pub fn advance(&mut self, now: u64, io: &mut [u8]) {
         if now < self.next {
             return;
+        }
+        for k in 0..16 {
+            if let Some((start, cpc, n)) = self.one_shot[k] {
+                let end = start + n as u64 * cpc;
+                if end <= now {
+                    self.one_shot[k] = None;
+                    w16(io, DCNT8 + 2 * k as u32, 0);
+                    let dstr = r16(io, DSTR) & !(1 << k);
+                    w16(io, DSTR, dstr);
+                    set16(io, TSR8, 1 << k);
+                    self.events += 1;
+                    self.pulse_count += 1;
+                    if self.pulses.len() == PULSES_KEPT {
+                        self.pulses.pop_front();
+                    }
+                    self.pulses.push_back((k as u8, start, end));
+                }
+            }
         }
         if let Some(t) = self.cmp10a_at(io)
             && t <= now
@@ -598,7 +680,8 @@ impl Atu {
 }
 
 /// Status and enable register pairs of the modelled channels.
-const FLAG_PAIRS: [(u32, u32); 6] = [
+const FLAG_PAIRS: [(u32, u32); 7] = [
+    (TSR8, TIER8),
     (TSR0, TIER0),
     (TSR10, TIER10),
     (TSR2B, TIER2B),
@@ -625,7 +708,7 @@ pub fn for_each_request(io: &[u8], mut f: impl FnMut(u32, usize, u32)) {
 }
 
 /// Interrupt requests of the modelled channels: (vector, IPR index, shift, requesting).
-pub fn requests(io: &[u8]) -> [(u32, usize, u32, bool); 42] {
+pub fn requests(io: &[u8]) -> [(u32, usize, u32, bool); 58] {
     let tsr2b = r16(io, TSR2B);
     let tier2b = r16(io, TIER2B);
     let tsr3 = r16(io, TSR3);
@@ -637,7 +720,7 @@ pub fn requests(io: &[u8]) -> [(u32, usize, u32, bool); 42] {
         r16(io, c + 0x22) & r16(io, c + 0x24) & (1 << k) != 0
     };
     // IPRE = index 4, IPRF = 5, IPRG = 6 (manual table 7.3).
-    let mut out = [(0, 0, 0, false); 42];
+    let mut out = [(0, 0, 0, false); 58];
     let mut n = 0;
     let mut push = |v: u32, ipr: usize, shift: u32, on: bool| {
         out[n] = (v, ipr, shift, on);
@@ -676,6 +759,11 @@ pub fn requests(io: &[u8]) -> [(u32, usize, u32, bool); 42] {
     }
     for k in 0..4 {
         push(148 + k as u32, 6, 0, pwm(1, k)); // CMI7A-D
+    }
+    // Channel 8: OSI8A-P, vectors 152-167, four to a field of IPRH.
+    let t8 = r16(io, TSR8) & r16(io, TIER8);
+    for k in 0..16u32 {
+        push(152 + k, 7, 12 - 4 * (k / 4), t8 & (1 << k) != 0);
     }
     // Channel 10: CMI10A, CMI10B in IPRI 7-4; ICI10A and CMI10G share vector 180, IPRI 3-0.
     let t10 = r16(io, TSR10) & r16(io, TIER10);
@@ -881,6 +969,49 @@ mod tests {
         write8(&mut a, &mut io, 80_000 + 18 * 20, TSTR1, 0x00);
         a.store(1_000_000, &mut io);
         assert_eq!(r32(&io, TCNT0), 2);
+    }
+
+    #[test]
+    fn channel_8_one_shot_pulses() {
+        let (mut a, mut io) = io();
+        write8(&mut a, &mut io, 0, 0xFFFF_F404, 4); // PSCR1: 20 cycles a count
+        write8(&mut a, &mut io, 0, TCR8, 0x10); // A-H on phi', I-P on phi'/2
+        write16(&mut a, &mut io, 0, DCNT8, 5); // DCNT8A
+        write16(&mut a, &mut io, 0, DCNT8 + 2 * 9, 3); // DCNT8J
+        write16(&mut a, &mut io, 100, DSTR, 0x0201);
+        assert_eq!(
+            a.next_event(),
+            100 + 5 * 20,
+            "8A ends first: 5 counts of 20"
+        );
+        a.store(140, &mut io);
+        assert_eq!(r16(&io, DCNT8 + 2 * 9), 2, "counting down");
+        a.advance(100 + 5 * 20, &mut io);
+        assert_eq!(r16(&io, TSR8), 0x0001, "OSF8A");
+        assert_eq!(a.next_event(), 100 + 3 * 40, "then 8J: 3 counts of 40");
+        a.advance(100 + 3 * 40, &mut io);
+        assert_eq!(r16(&io, TSR8), 0x0201, "OSF8A and OSF8J");
+        assert_eq!(r16(&io, DSTR), 0, "DSTR clears itself");
+        assert_eq!(r16(&io, DCNT8), 0);
+        assert_eq!(a.pulse_count, 2);
+        assert!(a.pulses.contains(&(0, 100, 200)));
+        assert!(a.pulses.contains(&(9, 100, 220)));
+        w16(&mut io, TIER8, 0x0200);
+        assert!(
+            requests(&io)
+                .iter()
+                .any(|r| r.0 == 161 && r.1 == 7 && r.2 == 4 && r.3),
+            "OSI8J"
+        );
+        // A count stopped by software stays where it was and sets no flag.
+        write16(&mut a, &mut io, 300, TSR8, 0);
+        write16(&mut a, &mut io, 300, DCNT8, 10);
+        write16(&mut a, &mut io, 300, DSTR, 0x0001);
+        write16(&mut a, &mut io, 300 + 4 * 20, DSTR, 0x0000);
+        assert_eq!(r16(&io, DCNT8), 6);
+        a.advance(10_000, &mut io);
+        assert_eq!(r16(&io, TSR8), 0);
+        assert_eq!(a.pulse_count, 2);
     }
 
     #[test]
