@@ -79,6 +79,34 @@ fn the_ecu_sees_the_engine_turn() {
 }
 
 #[test]
+fn the_engine_speed_holds_steady() {
+    let (Ok(flash), Ok(eeprom)) = (
+        std::env::var("SH705X_FLASH"),
+        std::env::var("SH705X_EEPROM"),
+    ) else {
+        eprintln!("SH705X_FLASH or SH705X_EEPROM not set: skipped");
+        return;
+    };
+    // Twenty readings in a row at 1000 rpm: with a cam wheel the firmware does not keep
+    // in sync, they come and go between 750, 1000 and 1500.
+    let mut args: Vec<String> = [
+        "obd", "--flash", &flash, "--eeprom", &eeprom, "--rpm", "1000", "--boot", "40000000",
+    ]
+    .map(String::from)
+    .to_vec();
+    args.extend(std::iter::repeat_n("010C".to_string(), 20));
+    let out = run(&parse(&args).unwrap()).unwrap();
+    let readings: Vec<&str> = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("41 0C"))
+        .collect();
+    assert_eq!(readings.len(), 20, "{out}");
+    // 1000 rpm × 4 = 0x0FA0; the first reading may still be settling.
+    assert!(readings[1..].iter().all(|r| *r == "41 0C 0F A0"), "{out}");
+}
+
+#[test]
 fn the_ecu_reads_the_sensors_as_set() {
     let (Ok(flash), Ok(eeprom)) = (
         std::env::var("SH705X_FLASH"),
