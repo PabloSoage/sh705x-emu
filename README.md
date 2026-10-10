@@ -24,9 +24,9 @@ The first target is a Denso ECU with an SH7059 (Opel Astra J, A17DTJ engine).
 | 0 | Boot in Ghidra's p-code emulator: find where the firmware waits on hardware | done |
 | 1 | SH-2E core (integer and FPU) and memory map, in Rust | done |
 | 2 | Interrupt controller and on-chip peripherals (ATU-II, CMT, WDT, DMAC, SCI, A/D, HCAN) | in progress: INTC, CMT, DMAC, SCI, A/D, HCAN and most of the ATU-II done; the rest needs the engine |
-| 3 | The Denso board: EEPROM, external chips, pin-to-sensor map | in progress: the four EEPROMs served; ignition input found |
-| 4 | Diagnostics over the emulated CAN bus | in progress: OBD and GMLAN requests answered through an ELM327 on TCP |
-| 5 | Simulated engine | — |
+| 3 | The Denso board: EEPROM, external chips, pin-to-sensor map | in progress: the four EEPROMs served; 25 of the 32 analog inputs named, the MAF found on a timer input |
+| 4 | Diagnostics over the emulated CAN bus | done for reading: OBD and GMLAN through an ELM327 on TCP and an emulated Scanmatik SM3 |
+| 5 | Simulated engine | in progress: crank and cam wheels, sensors in physical units, the ABS on the bus; no injection yet |
 | 6 | Validation against a real ECU, with an FPGA-driven bench | — |
 | 7 | Calibration comparison and map-access tracing | — |
 | 8 | The ECU on an FPGA (SH-2 soft core with an SH-2E FPU) | — |
@@ -58,11 +58,25 @@ second, which makes it a reference oracle rather than an emulator.
 - **On CAN,** with the ignition input up, the firmware broadcasts its periodic GMLAN
   frames and answers diagnostic requests: OBD modes 01, 03 and 09 (the VIN, over
   ISO-TP), and GMLAN service 1A. The VIN it returns is the car's.
+- **The engine turns:** a 60-2 crank wheel and a 4+1 cam wheel on the ATU-II's input
+  captures, and the ECU reports the speed it is set to, steadily from idle to 4500 rpm.
+  The sync tooth has to come 15 to 45 crank degrees before a main tooth for the
+  firmware to keep in sync; where it is on the real engine is not known.
+- **Sensors in physical units:** for each analog input, the curve the firmware itself
+  applies, measured on the emulated ECU, turns a value (coolant 90 degC, rail 35 MPa,
+  boost 180 kPa) into the code that makes the ECU report it. The boost sensor is
+  ratiometric to one of the two 5 V references, which the firmware checks. The MAF is
+  a frequency on TI0C. The defaults are the car's own values at warm idle.
+- **Other nodes on the bus:** of the 20 identifiers the firmware listens to, the ABS
+  frame is the one whose absence it reports (U0121); it is sent by default.
 - **Debugging:** memory watchpoints, PC breakpoints and single stepping in the core,
   and a disassembler.
-- **Speed:** 81.6 M instructions per second for the core alone (median, i7-10870H);
-  with the peripherals, about 65 M before the last round of work on the interrupt path,
-  which gained 15 % in relative terms. The SH7059 runs at 80 MHz.
+- **Speed:** with the EEPROM, CAN and the engine turning, the emulated ECU runs 1.26 to
+  1.36 times faster than real time (about 90 M instructions per second, i7-10870H);
+  the SH7059 runs at 80 MHz, about 69 M instructions per second of ECU time. Flash is
+  decoded once, and flash and RAM accesses take a direct path.
+- **Not yet:** the ECU counts the engine as running but injects nothing, and so turns
+  its actuators off after a few seconds; the immobilizer is the likely reason.
 
 ## Layout
 
@@ -71,10 +85,12 @@ second, which makes it a reference oracle rather than an emulator.
 | `crates/sh2e` | SH-2E core: registers, reset, and the `Bus` trait it runs against |
 | `crates/sh7059` | The SH7059: address map, flash, RAM, register area, peripherals (INTC, CMT, DMAC, SCI, A/D, ATU-II, HCAN-II), debugging aids, and `Machine`, which runs CPU and chip on one clock |
 | `crates/board` | The ECU board: the four 93C86 EEPROMs and how they are wired |
-| `crates/engine` | The simulated engine (phase 5, empty) |
-| `crates/bridge` | The CAN bus as a diagnostic tool sees it, in virtual or real time; ISO-TP; an ELM327; a TCP server |
+| `crates/engine` | The simulated engine: crank and cam wheels, sensors with the firmware's A/D curves, the MAF, periodic frames of other CAN nodes |
+| `crates/bridge` | The CAN bus as a diagnostic tool sees it, in virtual or real time; ISO-TP; an ELM327; a TCP server; an emulated Scanmatik SM3 |
 | `crates/sh705x` | Command-line front end |
-| `crates/gui` | `sh705x-gui`: registers, code with breakpoints, memory, CAN, interrupts, the A/D inputs as sliders and an ELM327 console, live (egui) |
+| `crates/gui` | `sh705x-gui`: registers, code with breakpoints, memory, CAN, interrupts, the engine (speed and sensors in physical units) and an ELM327 console, live (egui) |
+| `tools/bench.py` | Interleaved speed comparison of builds |
+| `tools/gen_curves.py` | Generates `crates/engine/src/curves.rs` from a sweep of the A/D inputs |
 | `tools/ghidra/EmuBoot.py` | Phase 0: runs a raw flash image from its reset vector in Ghidra's p-code emulator, logs every I/O access and resolves status-bit polls automatically |
 | `tools/ghidra/emu_boot.ps1` | Runs `EmuBoot.py` headless in a throwaway project |
 
@@ -116,9 +132,25 @@ To watch it run:
 cargo run --release -p gui -- --flash <flash.bin> --eeprom <eeprom.bin>
 ```
 
-All three turn the ignition input on (`--adc 14:600`); without it the firmware stays silent
-on CAN. Frames from the tool reach the ECU after their time on a 500 kbit/s bus, as on
-the car: the firmware drops a flow control that comes back faster than that.
+All of them turn the ignition input on (`--adc 14:600`); without it the firmware stays
+silent on CAN. Frames from the tool reach the ECU after their time on a 500 kbit/s bus,
+as on the car: the firmware drops a flow control that comes back faster than that.
+
+The engine and its sensors:
+
+```sh
+# Idling at 750 rpm, sensors at the car's warm idle values, the ABS on the bus:
+sh705x obd --flash <flash.bin> --eeprom <eeprom.bin> --rpm 750 010C 0105 07
+
+# Any sensor in physical units (an unknown key lists them), or a raw A/D code:
+sh705x serve --flash <flash.bin> --eeprom <eeprom.bin> --rpm 2000 --sensor coolant=90 --sensor maf=40
+
+# How fast it runs against real time, with the engine turning:
+sh705x bench --flash <flash.bin> --eeprom <eeprom.bin> --rpm 800
+```
+
+`--sensors off` leaves every analog input at code 0 and `--peers none` takes the ABS
+off the bus.
 
 ```sh
 cargo test --all
