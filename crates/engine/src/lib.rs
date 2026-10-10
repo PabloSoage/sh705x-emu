@@ -6,6 +6,7 @@
 //! ([`bus`]). Planned: a mean-value engine model driven by the injection, EGR,
 //! boost and rail-pressure actuators.
 
+pub mod air;
 pub mod bus;
 pub mod curves;
 pub mod sensors;

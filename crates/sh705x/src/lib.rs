@@ -1,6 +1,10 @@
 //! Command-line front end. The binary is a thin wrapper around [`run`], so every
 //! command can be tested without spawning a process.
 
+mod maps;
+
+pub use maps::MapsOptions;
+
 use board::Eeprom;
 use sh2e::{Cpu, Vector};
 use sh7059::{Machine, Region, Sh7059, region};
@@ -21,6 +25,8 @@ usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
                     [--port <port>] [--adc <channel:code>]...
        sh705x bench --flash <flash.bin> [--eeprom <eeprom.bin>] [--rpm <rpm>]
                     [--seconds <s>] [--adc <channel:code>]...
+       sh705x maps  --flash <flash.bin> [--compare <other.bin>] [--eeprom <eeprom.bin>]
+                    [--rpm-list 750,1500,...] [--pedal-list 0,25,...] [--sensor <key=value>]...
        sh705x trace --flash <flash.bin> [--max <instructions>] [--force <addr:mask>]...
                     [--adc <channel:code>]... [--eeprom <eeprom.bin>]
                     [--eeprom-layout <blocks>[le]] [--eeprom-out <eeprom.bin>]
@@ -48,6 +54,11 @@ commands:
   bench   boot the ECU as obd does, then run --seconds (5 by default) of ECU time as
           fast as it goes, and print the real-time factor: ECU time over wall time,
           1.00 being just real time
+  maps    boot the ECU at each engine speed and pedal position of a grid (--rpm-list,
+          --pedal-list) and read its setpoints over diagnostics: desired rail pressure,
+          boost and air flow, load, desired EGR and throttle; with --compare, the same on
+          a second flash image and where they differ, to see what a calibration change
+          does
   trace   run from reset with peripheral registers as plain storage, optionally forcing
           status bits as phase 0 did, and write every register access to --out as
           'pc R|W addr size value' (hex). Prints instructions, cycles and speed.
@@ -81,6 +92,8 @@ pub enum Command {
     Sm3(EcuOptions, String, u16),
     /// Measure the real-time factor over this many seconds of ECU time.
     Bench(EcuOptions, u32),
+    /// Read the setpoints over a grid of speed and pedal, for one image or two.
+    Maps(MapsOptions),
     /// Disassemble the flash.
     Disasm {
         /// Path to the flash image.
@@ -93,7 +106,7 @@ pub enum Command {
 }
 
 /// The ECU to run for `obd` and `serve`.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EcuOptions {
     /// Path to the flash image.
     pub flash: PathBuf,
@@ -323,6 +336,45 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Bench(o, seconds))
         }
+        "maps" => {
+            let mut compare = None;
+            let mut rpm = vec![750, 1500, 2000, 2500, 3000, 4000];
+            let mut pedal = vec![0, 25, 50, 75, 100];
+            let list = |v: Option<&String>, what: &str| -> Result<Vec<u32>, String> {
+                let v = v.ok_or_else(|| format!("{what} needs a list, like 1000,2000"))?;
+                v.split(',')
+                    .map(|x| x.trim().parse().map_err(|_| format!("bad {what} '{v}'")))
+                    .collect()
+            };
+            let (mut o, args) = parse_ecu("maps", rest, &mut |opt, value| match opt {
+                "--compare" => {
+                    compare = Some(PathBuf::from(value.ok_or("--compare needs a path")?));
+                    Ok(true)
+                }
+                "--rpm-list" => {
+                    rpm = list(value, "--rpm-list")?;
+                    Ok(true)
+                }
+                "--pedal-list" => {
+                    pedal = list(value, "--pedal-list")?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            })?;
+            if let Some(a) = args.first() {
+                return Err(format!("maps takes no argument '{a}'"));
+            }
+            if o.boot == 40_000_000 {
+                // A second and a half: long enough for the setpoints to settle.
+                o.boot = 120_000_000;
+            }
+            Ok(Command::Maps(MapsOptions {
+                ecu: o,
+                compare,
+                rpm,
+                pedal,
+            }))
+        }
         "disasm" => {
             let (mut flash, mut from, mut count) = (None, None, 32);
             let mut it = rest.iter();
@@ -458,6 +510,7 @@ pub fn run(cmd: &Command) -> Result<String, String> {
         Command::Serve(o, port, flat_out) => serve(o, *port, *flat_out),
         Command::Sm3(o, bind, port) => sm3(o, bind, *port),
         Command::Bench(o, seconds) => bench(o, *seconds),
+        Command::Maps(o) => maps::maps(o),
     }
 }
 

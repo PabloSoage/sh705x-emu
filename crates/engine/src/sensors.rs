@@ -15,6 +15,17 @@ use crate::curves::{INPUTS, MAF};
 /// The mass air flow meter's key: a frequency input (TI0C), not an A/D one.
 pub const MAF_KEY: &str = "maf";
 
+/// The accelerator pedal's key, in % of its travel: it sets both pedal sensors.
+pub const PEDAL_KEY: &str = "pedal";
+
+/// The two pedal sensors (% of their supply) for a pedal position (% of travel). The
+/// firmware reads 0 % travel at sensor 1 = 19.6 % (the car at rest) and 100 % at 70 %,
+/// linearly, with sensor 2 at half of sensor 1 [MED].
+pub fn pedal_sensors(travel: f64) -> (f64, f64) {
+    let s1 = 19.6 + 0.504 * travel.clamp(0.0, 100.0);
+    (s1, s1 / 2.0)
+}
+
 /// One analog input and its curve.
 #[derive(Debug)]
 pub struct Input {
@@ -143,6 +154,11 @@ impl Sensors {
 
     /// Sets one input. Fails on an unknown key.
     pub fn set(&mut self, key: &str, value: f64) -> Result<(), String> {
+        if key == PEDAL_KEY {
+            let (s1, s2) = pedal_sensors(value);
+            self.set("pedal1", s1)?;
+            return self.set("pedal2", s2);
+        }
         let key = known(key)?;
         match self.values.iter_mut().find(|(k, _)| *k == key) {
             Some(slot) => slot.1 = value,
@@ -173,10 +189,13 @@ fn known(key: &str) -> Result<&'static str, String> {
     if key == MAF_KEY {
         return Ok(MAF_KEY);
     }
+    if key == PEDAL_KEY {
+        return Ok(PEDAL_KEY);
+    }
     input(key).map(|i| i.key).ok_or_else(|| {
         let keys: Vec<&str> = INPUTS.iter().map(|i| i.key).collect();
         format!(
-            "no sensor '{key}'; there are: {}, {MAF_KEY}",
+            "no sensor '{key}'; there are: {}, {MAF_KEY}, {PEDAL_KEY}",
             keys.join(", ")
         )
     })
@@ -238,6 +257,11 @@ mod tests {
         assert_eq!(parse("rail=30").unwrap(), ("rail", 30.0));
         assert!(parse("rail").is_err());
         assert_eq!(parse("maf=5").unwrap(), ("maf", 5.0));
+        // The pedal sets both of its sensors.
+        s.set("pedal", 100.0).unwrap();
+        assert!(s.values.contains(&("pedal1", 70.0)));
+        assert!(s.values.contains(&("pedal2", 35.0)));
+        assert!(!s.values.iter().any(|(k, _)| *k == "pedal"));
     }
 
     #[test]
