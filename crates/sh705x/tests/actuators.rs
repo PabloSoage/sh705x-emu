@@ -46,26 +46,67 @@ fn the_two_loops_close_against_the_firmware() {
         eprintln!("SH705X_FLASH not set: skipped");
         return;
     };
-    let mut args: Vec<String> = ["actuators", "--flash", &flash, "--millis", "4000", "--step", "50"]
-        .map(String::from)
-        .to_vec();
+    let mut args: Vec<String> = [
+        "actuators",
+        "--flash",
+        &flash,
+        "--millis",
+        "4000",
+        "--step",
+        "50",
+    ]
+    .map(String::from)
+    .to_vec();
     if let Ok(eeprom) = std::env::var("SH705X_EEPROM") {
         args.push("--eeprom".into());
         args.push(eeprom);
     }
     let out = run(&parse(&args).unwrap()).unwrap();
-    let last = out.lines().find(|l| l.starts_with("SCV settled")).expect("summary");
+    let last = out
+        .lines()
+        .find(|l| l.starts_with("SCV settled"))
+        .expect("summary");
     // The EGR loop closes onto a shut valve at idle, as the car does (fase 5 §6): it
     // settles near 0 % and stops moving.
     let egr = last.split("EGR at ").nth(1).unwrap();
     let egr_pct: f64 = egr.split_whitespace().next().unwrap().parse().unwrap();
-    let egr_span: f64 = egr.split("spans ").nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap();
-    assert!(egr_pct < 2.0 && egr_span < 1.0, "EGR did not settle shut: {last}");
+    let egr_span: f64 = egr
+        .split("spans ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        egr_pct < 2.0 && egr_span < 1.0,
+        "EGR did not settle shut: {last}"
+    );
     // The SCV current loop regulates: it holds a steady current well inside the sensor's
     // range (0..3570 mA), not pinned at either rail.
-    let scv_ma: f64 = last.split("settled at ").nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap();
-    let scv_span: f64 = last.split("spans ").nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap();
-    assert!(scv_ma > 500.0 && scv_ma < 3400.0, "SCV not regulated: {last}");
+    let scv_ma: f64 = last
+        .split("settled at ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let scv_span: f64 = last
+        .split("spans ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        scv_ma > 500.0 && scv_ma < 3400.0,
+        "SCV not regulated: {last}"
+    );
     assert!(scv_span < 50.0, "SCV did not settle: {last}");
     // And the firmware was actually driving the duty, not leaving it at a rail.
     let moved = out

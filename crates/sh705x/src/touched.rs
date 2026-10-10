@@ -308,9 +308,7 @@ pub fn touched(o: &TouchedOptions) -> Result<String, String> {
         } else {
             u.x.show()
         };
-        let name = labels
-            .get(desc)
-            .map_or(String::new(), |n| format!("  {n}"));
+        let name = labels.get(desc).map_or(String::new(), |n| format!("  {n}"));
         writeln!(
             out,
             "  {desc:08X} {:>3} {:>8} {size:>7} {data:>10}  {inputs}  ->  {}{name}",
