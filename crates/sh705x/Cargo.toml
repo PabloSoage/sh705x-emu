@@ -11,6 +11,7 @@ publish.workspace = true
 sh2e.workspace = true
 sh7059.workspace = true
 board.workspace = true
+bridge.workspace = true
 
 [lints]
 workspace = true

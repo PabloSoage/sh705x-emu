@@ -23,9 +23,9 @@ The first target is a Denso ECU with an SH7059 (Opel Astra J, A17DTJ engine).
 |---|---|---|
 | 0 | Boot in Ghidra's p-code emulator: find where the firmware waits on hardware | done |
 | 1 | SH-2E core (integer and FPU) and memory map, in Rust | done |
-| 2 | Interrupt controller and on-chip peripherals (ATU-II, CMT, WDT, DMAC, SCI, A/D, HCAN) | in progress: INTC, CMT, DMAC, SCI, A/D and most of the ATU-II done; the rest needs the engine |
-| 3 | The Denso board: EEPROM, external chips, pin-to-sensor map | — |
-| 4 | Diagnostics over the emulated CAN bus | — |
+| 2 | Interrupt controller and on-chip peripherals (ATU-II, CMT, WDT, DMAC, SCI, A/D, HCAN) | in progress: INTC, CMT, DMAC, SCI, A/D, HCAN and most of the ATU-II done; the rest needs the engine |
+| 3 | The Denso board: EEPROM, external chips, pin-to-sensor map | in progress: the four EEPROMs served; ignition input found |
+| 4 | Diagnostics over the emulated CAN bus | in progress: OBD and GMLAN requests answered through an ELM327 on TCP |
 | 5 | Simulated engine | — |
 | 6 | Validation against a real ECU, with an FPGA-driven bench | — |
 | 7 | Calibration comparison and map-access tracing | — |
@@ -52,19 +52,27 @@ second, which makes it a reference oracle rather than an emulator.
 - **With the DMAC, SCI, A/D and ATU-II modelled**, the firmware boots and runs with no
   status bit forced: it passes its timer self-tests, fills RAM by DMA, and takes compare
   match interrupts from the ATU-II as it runs.
+- **The board's EEPROM** is four 93C86 Microwire chips on the synchronous serial ports,
+  each with its own chip select; the firmware reads all four at boot. A PCMflash dump
+  can be served as it is.
+- **On CAN,** with the ignition input up, the firmware broadcasts its periodic GMLAN
+  frames and answers diagnostic requests: OBD modes 01, 03 and 09 (the VIN, over
+  ISO-TP), and GMLAN service 1A. The VIN it returns is the car's.
+- **Debugging:** memory watchpoints, PC breakpoints and single stepping in the core,
+  and a disassembler.
 - **Speed:** 81.6 M instructions per second for the core alone (median, i7-10870H);
-  with the peripherals, about 65 M. The SH7059 runs at up to 80 MHz, so this is now the
-  next thing to work on.
+  with the peripherals, about 65 M before the last round of work on the interrupt path,
+  which gained 15 % in relative terms. The SH7059 runs at 80 MHz.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
 | `crates/sh2e` | SH-2E core: registers, reset, and the `Bus` trait it runs against |
-| `crates/sh7059` | The SH7059: address map, flash, RAM, register area, peripherals (INTC, CMT, DMAC, SCI, A/D, ATU-II), and `Machine`, which runs CPU and chip on one clock |
-| `crates/board` | The ECU board: EEPROM image now; external chips and pin map later |
+| `crates/sh7059` | The SH7059: address map, flash, RAM, register area, peripherals (INTC, CMT, DMAC, SCI, A/D, ATU-II, HCAN-II), debugging aids, and `Machine`, which runs CPU and chip on one clock |
+| `crates/board` | The ECU board: the four 93C86 EEPROMs and how they are wired |
 | `crates/engine` | The simulated engine (phase 5, empty) |
-| `crates/bridge` | Virtual CAN bus and diagnostic tool bridges (phase 4, empty) |
+| `crates/bridge` | The CAN bus as a diagnostic tool sees it, in virtual or real time; ISO-TP; an ELM327; a TCP server |
 | `crates/sh705x` | Command-line front end |
 | `tools/ghidra/EmuBoot.py` | Phase 0: runs a raw flash image from its reset vector in Ghidra's p-code emulator, logs every I/O access and resolves status-bit polls automatically |
 | `tools/ghidra/emu_boot.ps1` | Runs `EmuBoot.py` headless in a throwaway project |
@@ -78,7 +86,22 @@ cargo run --release -p sh705x -- info --flash <flash.bin> --eeprom <eeprom.bin>
 
 `info` loads both images, checks their sizes, prints the reset vectors with the region
 each one points into, and the CPU state after a power-on reset. `trace` runs the
-firmware and writes every peripheral register access; see `sh705x help`.
+firmware and writes every peripheral register access; `disasm` disassembles the flash;
+see `sh705x help`.
+
+### Talking to the emulated ECU
+
+```sh
+# Boot it and send ELM327 commands, in virtual time (deterministic, no wall clock):
+sh705x obd --flash <flash.bin> --eeprom <eeprom.bin> 0100 0902 ATSH7E0 1A92
+
+# Run it in real time and serve an ELM327 on 127.0.0.1:35000 for diagnostic apps:
+sh705x serve --flash <flash.bin> --eeprom <eeprom.bin>
+```
+
+Both turn the ignition input on (`--adc 14:600`); without it the firmware stays silent
+on CAN. Frames from the tool reach the ECU after their time on a 500 kbit/s bus, as on
+the car: the firmware drops a flow control that comes back faster than that.
 
 ```sh
 cargo test --all

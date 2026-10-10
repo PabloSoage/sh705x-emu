@@ -11,6 +11,10 @@ use std::path::PathBuf;
 pub const USAGE: &str = "\
 usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
        sh705x disasm --flash <flash.bin> --from <addr> [--count <instructions>]
+       sh705x obd   --flash <flash.bin> [--eeprom <eeprom.bin>] [--boot <instructions>]
+                    [--adc <channel:code>]... <ELM327 command>...
+       sh705x serve --flash <flash.bin> [--eeprom <eeprom.bin>] [--port <port>]
+                    [--adc <channel:code>]... [--flat-out]
        sh705x trace --flash <flash.bin> [--max <instructions>] [--force <addr:mask>]...
                     [--adc <channel:code>]... [--eeprom <eeprom.bin>]
                     [--eeprom-layout <blocks>[le]] [--eeprom-out <eeprom.bin>]
@@ -19,6 +23,12 @@ usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
 commands:
   info    load the images, check them and show the reset vectors and reset state
   disasm  disassemble the flash from an address (hex), with PC-relative literals
+  obd     boot the ECU (40 M instructions by default) and send it ELM327 commands
+          ('0100', 'ATSH7E0', '1A90'...) over the emulated CAN bus, in virtual time;
+          prints each answer as an ELM327 would
+  serve   run the ECU in real time and serve an ELM327 on TCP (port 35000 by
+          default) for diagnostic apps; --flat-out runs as fast as it can instead
+          of following the wall clock
   trace   run from reset with peripheral registers as plain storage, optionally forcing
           status bits as phase 0 did, and write every register access to --out as
           'pc R|W addr size value' (hex). Prints instructions, cycles and speed.
@@ -44,6 +54,10 @@ pub enum Command {
     },
     /// Run from reset and trace register accesses.
     Trace(TraceOptions),
+    /// Talk to the ECU as an ELM327, in virtual time.
+    Obd(EcuOptions, Vec<String>),
+    /// Serve an ELM327 on TCP, in real time.
+    Serve(EcuOptions, u16, bool),
     /// Disassemble the flash.
     Disasm {
         /// Path to the flash image.
@@ -53,6 +67,86 @@ pub enum Command {
         /// Instructions to show.
         count: u32,
     },
+}
+
+/// The ECU to run for `obd` and `serve`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct EcuOptions {
+    /// Path to the flash image.
+    pub flash: PathBuf,
+    /// EEPROM dump to serve.
+    pub eeprom: Option<PathBuf>,
+    /// Where each chip is in the dump.
+    pub layout: board::Layout,
+    /// A/D inputs: channel and 10-bit code.
+    pub adc: Vec<(usize, u16)>,
+    /// Instructions to run before talking to it.
+    pub boot: u64,
+}
+
+/// AN14 code that wakes the ECU: the firmware reads its ignition input there and stays
+/// silent on CAN below code 230 (measured). The board's divider is not known, so this
+/// is not a voltage [SUP].
+pub const IGNITION_ON: u16 = 600;
+
+/// Parses `--adc channel:code`.
+fn parse_adc(value: &str) -> Result<(usize, u16), String> {
+    let bad = || format!("--adc wants channel:code (0-31:0-1023), got '{value}'");
+    let (c, v) = value.split_once(':').ok_or_else(bad)?;
+    let c: usize = c.parse().map_err(|_| bad())?;
+    let v: u16 = v.parse().map_err(|_| bad())?;
+    if c > 31 || v > 1023 {
+        return Err(bad());
+    }
+    Ok((c, v))
+}
+
+/// A command's own options: takes the option and the word after it, and says whether
+/// it was one (and so took its value, if it has one).
+type ExtraOption<'a> = dyn FnMut(&str, Option<&String>) -> Result<bool, String> + 'a;
+
+/// Parses the options shared by `obd` and `serve`; the rest go back as arguments.
+fn parse_ecu(
+    cmd: &str,
+    rest: &[String],
+    extra: &mut ExtraOption,
+) -> Result<(EcuOptions, Vec<String>), String> {
+    let mut o = EcuOptions {
+        flash: PathBuf::new(),
+        eeprom: None,
+        layout: board::DEFAULT_LAYOUT,
+        adc: vec![(14, IGNITION_ON)],
+        boot: 40_000_000,
+    };
+    let (mut flash, mut args) = (None, Vec::new());
+    let mut it = rest.iter().peekable();
+    while let Some(opt) = it.next() {
+        if !opt.starts_with("--") {
+            args.push(opt.clone());
+            continue;
+        }
+        if extra(opt, it.peek().copied())? {
+            if it.peek().is_some_and(|v| !v.starts_with("--")) {
+                it.next();
+            }
+            continue;
+        }
+        let value = it.next().ok_or_else(|| format!("{opt} needs a value"))?;
+        match opt.as_str() {
+            "--flash" => flash = Some(PathBuf::from(value)),
+            "--eeprom" => o.eeprom = Some(PathBuf::from(value)),
+            "--eeprom-layout" => o.layout = parse_layout(value)?,
+            "--adc" => {
+                let (c, v) = parse_adc(value)?;
+                o.adc.retain(|&(k, _)| k != c);
+                o.adc.push((c, v));
+            }
+            "--boot" => o.boot = value.parse().map_err(|_| format!("bad --boot '{value}'"))?,
+            other => return Err(format!("unknown option '{other}'")),
+        }
+    }
+    o.flash = flash.ok_or_else(|| format!("{cmd} needs --flash <flash.bin>"))?;
+    Ok((o, args))
 }
 
 /// Options of the `trace` command.
@@ -105,6 +199,32 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             let flash = flash.ok_or("info needs --flash <flash.bin>")?;
             Ok(Command::Info { flash, eeprom })
+        }
+        "obd" => {
+            let (o, args) = parse_ecu("obd", rest, &mut |_, _| Ok(false))?;
+            if args.is_empty() {
+                return Err("obd needs at least one ELM327 command, like 0100".into());
+            }
+            Ok(Command::Obd(o, args))
+        }
+        "serve" => {
+            let (mut port, mut flat_out) = (35000u16, false);
+            let (o, args) = parse_ecu("serve", rest, &mut |opt, value| match opt {
+                "--port" => {
+                    let v = value.ok_or("--port needs a value")?;
+                    port = v.parse().map_err(|_| format!("bad --port '{v}'"))?;
+                    Ok(true)
+                }
+                "--flat-out" => {
+                    flat_out = true;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            })?;
+            if let Some(a) = args.first() {
+                return Err(format!("serve takes no argument '{a}'"));
+            }
+            Ok(Command::Serve(o, port, flat_out))
         }
         "disasm" => {
             let (mut flash, mut from, mut count) = (None, None, 32);
@@ -237,6 +357,8 @@ pub fn run(cmd: &Command) -> Result<String, String> {
         Command::Info { flash, eeprom } => info(flash, eeprom.as_ref()),
         Command::Trace(opts) => trace(opts),
         Command::Disasm { flash, from, count } => disasm(flash, *from, *count),
+        Command::Obd(o, args) => obd(o, args),
+        Command::Serve(o, port, flat_out) => serve(o, *port, *flat_out),
     }
 }
 
@@ -459,6 +581,78 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
         writeln!(o, "register accesses {} -> {}", t.len(), path.display()).unwrap();
     }
     Ok(o)
+}
+
+/// Builds and boots the ECU described by `o`.
+fn boot(o: &EcuOptions) -> Result<Machine, String> {
+    let image = read(&o.flash)?;
+    let mut chip = Sh7059::new(&image).map_err(|e| format!("{}: {e}", o.flash.display()))?;
+    if let Some(path) = &o.eeprom {
+        let e = Eeprom::new(&read(path)?).map_err(|e| format!("{}: {e}", path.display()))?;
+        if e.len() != 4 * board::CHIP_BYTES {
+            return Err(format!(
+                "{}: {} bytes; the board has four 93C86, 8192 bytes",
+                path.display(),
+                e.len()
+            ));
+        }
+        board::wire_eeproms(&mut chip, &e, o.layout);
+    }
+    for &(c, v) in &o.adc {
+        chip.adc.input[c] = v;
+    }
+    let mut m = Machine::new(chip, true);
+    m.run(o.boot);
+    Ok(m)
+}
+
+fn obd(o: &EcuOptions, args: &[String]) -> Result<String, String> {
+    let mut m = boot(o)?;
+    let mut link = bridge::link::VirtualLink::new(&mut m, 0);
+    let mut elm = bridge::elm::Elm327::new();
+    elm.echo = false;
+    let mut out = String::new();
+    for a in args {
+        let answer = elm.line(a, &mut link);
+        let text = answer
+            .trim_end_matches('>')
+            .trim_end()
+            .replace('\r', "\n    ");
+        writeln!(out, "{a}\n    {text}").unwrap();
+    }
+    Ok(out)
+}
+
+fn serve(o: &EcuOptions, port: u16, flat_out: bool) -> Result<String, String> {
+    let m = boot(o)?;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port))
+        .map_err(|e| format!("port {port}: {e}"))?;
+    eprintln!(
+        "ELM327 on 127.0.0.1:{port}; ECU running {}",
+        if flat_out { "flat out" } else { "in real time" }
+    );
+    let mut ecu = bridge::link::RealTimeEcu::spawn(m, 0, !flat_out);
+    let stats = ecu.stats.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(10));
+            let c = stats.cycles.load(std::sync::atomic::Ordering::Relaxed) as f64;
+            let w = stats.wall_us.load(std::sync::atomic::Ordering::Relaxed) as f64;
+            let lag = stats
+                .worst_lag_us
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if w > 0.0 {
+                eprintln!(
+                    "real-time factor {:.2}, worst lag {:.1} ms",
+                    c / bridge::link::CYCLES_PER_US as f64 / w,
+                    lag as f64 / 1000.0
+                );
+            }
+        }
+    });
+    bridge::server::serve(listener, &mut ecu, &mut |s| eprintln!("{s}"))
+        .map_err(|e| e.to_string())?;
+    Ok(String::new())
 }
 
 fn disasm(flash: &PathBuf, from: u32, count: u32) -> Result<String, String> {

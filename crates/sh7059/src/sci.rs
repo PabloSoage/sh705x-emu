@@ -33,7 +33,7 @@ const TE: u8 = 0x20;
 const RE: u8 = 0x10;
 
 /// The chip at the other end of a channel.
-pub trait Peer {
+pub trait Peer: Send {
     /// One byte each way: receives `tx` and returns the byte shifted back.
     fn exchange(&mut self, tx: u8, msb_first: bool) -> u8;
 

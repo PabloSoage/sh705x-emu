@@ -12,6 +12,9 @@ dependencies = [
 [[package]]
 name = "bridge"
 version = "0.1.0"
+dependencies = [
+ "sh7059",
+]
 
 [[package]]
 name = "engine"
@@ -33,6 +36,7 @@ name = "sh705x"
 version = "0.1.0"
 dependencies = [
  "board",
+ "bridge",
  "sh2e",
  "sh7059",
 ]

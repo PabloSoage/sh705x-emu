@@ -744,21 +744,21 @@ mod tests {
         assert_eq!(c.pending, (0, 0));
     }
 
-    /// Records pin changes, shared with the test through an `Rc`.
-    struct Pins(std::rc::Rc<std::cell::RefCell<Vec<(usize, bool)>>>);
+    /// Records pin changes, shared with the test.
+    struct Pins(std::sync::Arc<std::sync::Mutex<Vec<(usize, bool)>>>);
     impl sci::Peer for Pins {
         fn exchange(&mut self, _: u8, _: bool) -> u8 {
             0
         }
         fn pin(&mut self, line: usize, high: bool) {
-            self.0.borrow_mut().push((line, high));
+            self.0.lock().unwrap().push((line, high));
         }
     }
 
     #[test]
     fn wired_pins_reach_the_sci_peer_on_every_change() {
         let mut c = chip();
-        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         c.sci.ch[3].peer = Box::new(Pins(log.clone()));
         c.write16(0xFFFF_F76C, 0x0008); // PJDR: PJ3 high before wiring
         let w = |bit, line| Wire {
@@ -769,13 +769,17 @@ mod tests {
         };
         c.wire(w(3, 1));
         c.wire(w(4, 2));
-        assert_eq!(*log.borrow(), [(1, true), (2, false)], "levels at wiring");
-        log.borrow_mut().clear();
+        assert_eq!(
+            *log.lock().unwrap(),
+            [(1, true), (2, false)],
+            "levels at wiring"
+        );
+        log.lock().unwrap().clear();
         c.write16(0xFFFF_F76C, 0x0018); // PJ4 up
         c.write8(0xFFFF_F76D, 0x10); // byte write: PJ3 down
         c.write8(0xFFFF_F76C, 0x00); // high byte: no wired pin changes
         c.write16(0xFFFF_F76C, 0x0010); // same levels: nothing
-        assert_eq!(*log.borrow(), [(2, true), (1, false)]);
+        assert_eq!(*log.lock().unwrap(), [(2, true), (1, false)]);
     }
 
     #[test]
