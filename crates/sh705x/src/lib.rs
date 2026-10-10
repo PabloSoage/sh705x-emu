@@ -12,7 +12,7 @@ pub const USAGE: &str = "\
 usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
        sh705x disasm --flash <flash.bin> --from <addr> [--count <instructions>]
        sh705x obd   --flash <flash.bin> [--eeprom <eeprom.bin>] [--boot <instructions>]
-                    [--adc <channel:code>]... <ELM327 command>...
+                    [--adc <channel:code>]... [--rpm <rpm>] <ELM327 command>...
        sh705x serve --flash <flash.bin> [--eeprom <eeprom.bin>] [--port <port>]
                     [--adc <channel:code>]... [--flat-out]
        sh705x sm3   --flash <flash.bin> [--eeprom <eeprom.bin>] [--bind <address>]
@@ -25,7 +25,8 @@ usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
 commands:
   info    load the images, check them and show the reset vectors and reset state
   disasm  disassemble the flash from an address (hex), with PC-relative literals
-  obd     boot the ECU (40 M instructions by default) and send it ELM327 commands
+  obd     boot the ECU (40 M instructions by default) and send it ELM327 commands;
+          --rpm turns a 60-2 crank wheel (TI0A) and a cam (TI0B) at that speed
           ('0100', 'ATSH7E0', '1A90'...) over the emulated CAN bus, in virtual time;
           prints each answer as an ELM327 would
   serve   run the ECU in real time and serve an ELM327 on TCP (port 35000 by
@@ -89,6 +90,8 @@ pub struct EcuOptions {
     pub adc: Vec<(usize, u16)>,
     /// Instructions to run before talking to it.
     pub boot: u64,
+    /// Engine speed of the simulated crank and cam wheels, if the engine turns.
+    pub rpm: Option<u32>,
 }
 
 /// AN14 code that wakes the ECU: the firmware reads its ignition input there and stays
@@ -124,6 +127,7 @@ fn parse_ecu(
         layout: board::DEFAULT_LAYOUT,
         adc: vec![(14, IGNITION_ON)],
         boot: 40_000_000,
+        rpm: None,
     };
     let (mut flash, mut args) = (None, Vec::new());
     let mut it = rest.iter().peekable();
@@ -149,6 +153,7 @@ fn parse_ecu(
                 o.adc.push((c, v));
             }
             "--boot" => o.boot = value.parse().map_err(|_| format!("bad --boot '{value}'"))?,
+            "--rpm" => o.rpm = Some(value.parse().map_err(|_| format!("bad --rpm '{value}'"))?),
             other => return Err(format!("unknown option '{other}'")),
         }
     }
@@ -627,6 +632,9 @@ fn boot(o: &EcuOptions) -> Result<Machine, String> {
     }
     for &(c, v) in &o.adc {
         chip.adc.input[c] = v;
+    }
+    if let Some(rpm) = o.rpm {
+        chip.set_stimulus(Box::new(engine::wheel::Wheels::new(rpm as f64, 0)));
     }
     let mut m = Machine::new(chip, true);
     m.run(o.boot);

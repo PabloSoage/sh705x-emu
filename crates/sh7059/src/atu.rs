@@ -4,7 +4,14 @@
 //! Modelled:
 //! - prescalers PSCR1–4 (φ' = Pφ / (PSCR + 1)) and start registers TSTR1–3;
 //! - channel 0: the 32-bit free-running counter TCNT0 on φ' of PSCR1, its overflow flag
-//!   OVF0 and interrupt OVI0 (the firmware times its diagnostic protocol on TCNT0);
+//!   OVF0 and interrupt OVI0 (the firmware times its diagnostic protocol on TCNT0); and
+//!   its input captures: an edge on TI0A–TI0D that TIOR0 selects copies TCNT0 into
+//!   ICR0A–ICR0D and sets ICF0A–ICF0D, at the edge's own cycle;
+//! - channel 10, the tooth part: TCNT10A, 32 bits on the φ' of PSCR4 while STR10 is set;
+//!   on each TI10 edge that TCR10 selects, TCNT10A goes to ICR10A and restarts at 1,
+//!   TCNT10B counts the edge (setting CMF10B when it counts on from OCR10B), ICF10A is
+//!   set, and ICR10A shifted by the TIOR10 multiplier goes to RLD10C unless RLDEN;
+//!   OCR10A against TCNT10A (CMF10A); interrupts CMI10A, CMI10B and ICI10A;
 //! - channel 2B: TCNT2B and its eight output compare registers OCR2A–H (CMF2A–H,
 //!   OVF2B, interrupts CMI2A–H and OVI2B);
 //! - channels 3 to 5: TCNT3–5, general registers used as output compare (IMF, counter
@@ -19,8 +26,10 @@
 //!   counter cleared on a match runs 0..=GR (period GR + 1), a PWM timer runs 1..=CYLR
 //!   (period CYLR), and a counter started on its compare value matches on the first count.
 //!
-//! Not modelled yet: input capture (the GRs and ICR0A–D wait for pin edges, which come
-//! with the simulated engine, T-5.1), the interval interrupts of channel 0 (ITVRR),
+//! Not modelled yet: input capture on channels 1 to 5 (their GRs), the capture of
+//! ICR0D on a channel 10 compare match, the interval interrupts of channel 0 (ITVRR),
+//! the multiplied angle clock of channel 10 (TCNT10C–G, GR10G, TCCLR10) and its noise
+//! canceler,
 //! channels 1, 2A, 8, 9, 10 and 11, the PWM mode of
 //! channels 3 to 5 (TMDR), the complementary PWM mode of channel 6 (PMDR), and the timing
 //! of flag setting within one count.
@@ -55,6 +64,19 @@ const TSTR2: u32 = 0xFFFF_F400; // channels 6 and 7
 const TCNT0: u32 = 0xFFFF_F430;
 const TSR0: u32 = 0xFFFF_F42C;
 const TIER0: u32 = 0xFFFF_F42E;
+const TIOR0: u32 = 0xFFFF_F42A;
+const TCNT10A: u32 = 0xFFFF_F6C0;
+const TCNT10B: u32 = 0xFFFF_F6C4;
+const ICR10A: u32 = 0xFFFF_F6D0;
+const OCR10A: u32 = 0xFFFF_F6D4;
+const OCR10B: u32 = 0xFFFF_F6D8;
+const RLD10C: u32 = 0xFFFF_F6DA;
+const TIOR10: u32 = 0xFFFF_F6E2;
+const TCR10: u32 = 0xFFFF_F6E4;
+const TSR10: u32 = 0xFFFF_F6E8;
+const TIER10: u32 = 0xFFFF_F6EA;
+/// ICR0A, ICR0B, ICR0C, ICR0D (manual table 11.3: D sits below TCNT0).
+const ICR0: [u32; 4] = [0xFFFF_F434, 0xFFFF_F438, 0xFFFF_F43C, 0xFFFF_F420];
 const TSTR1: u32 = 0xFFFF_F401; // channels 0 to 5 and 10
 const PSCR: [u32; 4] = [0xFFFF_F404, 0xFFFF_F406, 0xFFFF_F408, 0xFFFF_F40A];
 
@@ -129,6 +151,20 @@ impl Counter32 {
         (now - self.base).checked_div(self.cpc).unwrap_or(0)
     }
 
+    /// The value at cycle `at`, which may be before `base` (counting wraps).
+    fn value_at(&self, at: u64) -> u32 {
+        if self.cpc == 0 {
+            return self.value;
+        }
+        if at >= self.base {
+            self.value
+                .wrapping_add(((at - self.base) / self.cpc) as u32)
+        } else {
+            self.value
+                .wrapping_sub((self.base - at).div_ceil(self.cpc) as u32)
+        }
+    }
+
     /// The cycle it next leaves H'FFFFFFFF, if counting.
     fn overflow(&self) -> Option<u64> {
         (self.cpc != 0).then(|| self.base + ((0xFFFF_FFFF - self.value) as u64 + 1) * self.cpc)
@@ -153,11 +189,19 @@ pub struct Atu {
     pub cnt: [Counter; N],
     /// TCNT0.
     pub tcnt0: Counter32,
+    /// TCNT10A.
+    pub tcnt10a: Counter32,
+    /// CMF10A has been set since TCNT10A last restarted or OCR10A changed.
+    cmp10a_done: bool,
+    /// TI10 edges counted.
+    pub ti10_edges: u64,
     /// Earliest event, CPU cycle.
     next: u64,
     /// Events taken: compare matches and overflows of channels 2B to 5, and cycle ends of
     /// channels 6 and 7.
     pub events: u64,
+    /// Input captures taken.
+    pub captures: u64,
 }
 
 impl Atu {
@@ -182,6 +226,16 @@ impl Atu {
         for (i, c) in self.cnt.iter_mut().enumerate() {
             c.value = r16(io, tcnt_addr(i));
         }
+        // Channel 10 (11.2.26).
+        w16(io, TCNT10A + 2, 1);
+        self.tcnt10a.value = 1;
+        w16(io, 0xFFFF_F6C6, 1); // TCNT10C
+        w16(io, 0xFFFF_F6CC, 1); // TCNT10F
+        w16(io, OCR10A, 0xFFFF);
+        w16(io, OCR10A + 2, 0xFFFF);
+        io[(OCR10B - IO_BASE) as usize] = 0xFF;
+        w16(io, 0xFFFF_F6DC, 0xFFFF); // GR10G
+        io[(0xFFFF_F6E0 - IO_BASE) as usize] = 0xFF; // NCR10
         self.next = u64::MAX;
     }
 
@@ -217,13 +271,14 @@ impl Atu {
     /// Brings every counter's value up to `now` with its current clock (call before the
     /// registers that set the clock change).
     pub fn resync(&mut self, now: u64) {
-        let c = &mut self.tcnt0;
-        if c.cpc != 0 {
-            let n = c.elapsed(now);
-            c.value = c.value.wrapping_add(n as u32);
-            c.base += n * c.cpc;
-        } else {
-            c.base = now;
+        for c in [&mut self.tcnt0, &mut self.tcnt10a] {
+            if c.cpc != 0 {
+                let n = c.elapsed(now);
+                c.value = c.value.wrapping_add(n as u32);
+                c.base += n * c.cpc;
+            } else {
+                c.base = now;
+            }
         }
         for c in &mut self.cnt {
             if c.cpc != 0 {
@@ -238,12 +293,11 @@ impl Atu {
 
     /// Writes the current counter values into the register storage, for a read.
     pub fn store(&self, now: u64, io: &mut [u8]) {
-        let v = self
-            .tcnt0
-            .value
-            .wrapping_add(self.tcnt0.elapsed(now) as u32);
-        w16(io, TCNT0, (v >> 16) as u16);
-        w16(io, TCNT0 + 2, v as u16);
+        for (c, a) in [(&self.tcnt0, TCNT0), (&self.tcnt10a, TCNT10A)] {
+            let v = c.value.wrapping_add(c.elapsed(now) as u32);
+            w16(io, a, (v >> 16) as u16);
+            w16(io, a + 2, v as u16);
+        }
         for (i, c) in self.cnt.iter().enumerate() {
             // Events up to `now` have been taken, so this does not cross a match or CYLR.
             w16(
@@ -287,6 +341,20 @@ impl Atu {
         // TCNT0 counts on the φ' of PSCR1 only, while STR0 is set.
         self.tcnt0.cpc = if r8(io, TSTR1) & 1 != 0 {
             4 * ((r8(io, PSCR[0]) & 0x1F) as u64 + 1)
+        } else {
+            0
+        };
+        if TCNT10A < addr + n && addr < TCNT10A + 4 {
+            self.tcnt10a.value = r32(io, TCNT10A);
+            self.tcnt10a.base = now;
+            self.cmp10a_done = false;
+        }
+        if OCR10A < addr + n && addr < OCR10A + 4 {
+            self.cmp10a_done = false;
+        }
+        // TCNT10A counts on the φ' of PSCR4 while STR10 is set.
+        self.tcnt10a.cpc = if r8(io, TSTR1) & 0x80 != 0 {
+            4 * ((r8(io, PSCR[3]) & 0x1F) as u64 + 1)
         } else {
             0
         };
@@ -358,7 +426,52 @@ impl Atu {
             })
             .min()
             .unwrap_or(u64::MAX)
-            .min(self.tcnt0.overflow().unwrap_or(u64::MAX));
+            .min(self.tcnt0.overflow().unwrap_or(u64::MAX))
+            .min(self.cmp10a_at(io).unwrap_or(u64::MAX));
+    }
+
+    /// The cycle TCNT10A reaches OCR10A, if it is counting towards it.
+    fn cmp10a_at(&self, io: &[u8]) -> Option<u64> {
+        let c = &self.tcnt10a;
+        let target = r32(io, OCR10A);
+        (c.cpc != 0 && !self.cmp10a_done && target >= c.value)
+            .then(|| c.base + (target - c.value) as u64 * c.cpc)
+    }
+
+    /// An edge on TI10 at cycle `at` (TCR10 says which edges count).
+    pub fn ti10_edge(&mut self, io: &mut [u8], at: u64, rising: bool) {
+        let taken = match r8(io, TCR10) & 3 {
+            1 => rising,
+            2 => !rising,
+            3 => true,
+            _ => false,
+        };
+        if !taken {
+            return;
+        }
+        self.ti10_edges += 1;
+        // TCNT10B counts even with STR10 clear.
+        let b = (TCNT10B - IO_BASE) as usize;
+        if io[b] == r8(io, OCR10B) {
+            set16(io, TSR10, 0x0004); // CMF10B
+        }
+        io[b] = io[b].wrapping_add(1);
+        if self.tcnt10a.cpc == 0 {
+            return;
+        }
+        let v = self.tcnt10a.value_at(at);
+        w16(io, ICR10A, (v >> 16) as u16);
+        w16(io, ICR10A + 2, v as u16);
+        set16(io, TSR10, 0x0002); // ICF10A
+        let tior = r8(io, TIOR10);
+        if tior & 0x80 == 0 {
+            let shift = 5 + ((tior >> 4) & 3) as u32; // x32, x64, x128, x256
+            w16(io, RLD10C, (v >> shift).min(0xFFFF) as u16);
+        }
+        self.tcnt10a.value = 1;
+        self.tcnt10a.base = at;
+        self.cmp10a_done = false;
+        self.schedule(io);
     }
 
     /// The earliest cycle at which a counter reaches a compare value, its cycle end or
@@ -371,6 +484,13 @@ impl Atu {
     pub fn advance(&mut self, now: u64, io: &mut [u8]) {
         if now < self.next {
             return;
+        }
+        if let Some(t) = self.cmp10a_at(io)
+            && t <= now
+        {
+            self.events += 1;
+            self.cmp10a_done = true;
+            set16(io, TSR10, 0x0001); // CMF10A
         }
         while let Some(t) = self.tcnt0.overflow() {
             if t > now {
@@ -442,6 +562,27 @@ impl Atu {
         }
     }
 
+    /// An edge on TI0A–TI0D (`input` 0..=3) at cycle `at`: if TIOR0 selects that edge,
+    /// TCNT0 at that cycle goes to the ICR0 register and its ICF0 flag is set. Returns
+    /// whether it was captured.
+    pub fn capture(&mut self, io: &mut [u8], at: u64, input: usize, rising: bool) -> bool {
+        let sel = (r8(io, TIOR0) >> (2 * input)) & 3;
+        let taken = match sel {
+            1 => rising,
+            2 => !rising,
+            3 => true,
+            _ => false,
+        };
+        if taken {
+            let v = self.tcnt0.value_at(at);
+            w16(io, ICR0[input], (v >> 16) as u16);
+            w16(io, ICR0[input] + 2, v as u16);
+            set16(io, TSR0, 1 << input);
+            self.captures += 1;
+        }
+        taken
+    }
+
     /// The PWM output of channel 6 or 7 (`ch` = 0 or 1), timer `k` (0 = A .. 3 = D), as a
     /// duty fraction DTR / CYLR, if that timer is running.
     pub fn duty(&self, io: &[u8], ch: usize, k: usize) -> Option<f64> {
@@ -457,8 +598,9 @@ impl Atu {
 }
 
 /// Status and enable register pairs of the modelled channels.
-const FLAG_PAIRS: [(u32, u32); 5] = [
+const FLAG_PAIRS: [(u32, u32); 6] = [
     (TSR0, TIER0),
+    (TSR10, TIER10),
     (TSR2B, TIER2B),
     (TSR3, TIER3),
     (CH67[0] + 0x22, CH67[0] + 0x24),
@@ -483,7 +625,7 @@ pub fn for_each_request(io: &[u8], mut f: impl FnMut(u32, usize, u32)) {
 }
 
 /// Interrupt requests of the modelled channels: (vector, IPR index, shift, requesting).
-pub fn requests(io: &[u8]) -> [(u32, usize, u32, bool); 39] {
+pub fn requests(io: &[u8]) -> [(u32, usize, u32, bool); 42] {
     let tsr2b = r16(io, TSR2B);
     let tier2b = r16(io, TIER2B);
     let tsr3 = r16(io, TSR3);
@@ -495,7 +637,7 @@ pub fn requests(io: &[u8]) -> [(u32, usize, u32, bool); 39] {
         r16(io, c + 0x22) & r16(io, c + 0x24) & (1 << k) != 0
     };
     // IPRE = index 4, IPRF = 5, IPRG = 6 (manual table 7.3).
-    let mut out = [(0, 0, 0, false); 39];
+    let mut out = [(0, 0, 0, false); 42];
     let mut n = 0;
     let mut push = |v: u32, ipr: usize, shift: u32, on: bool| {
         out[n] = (v, ipr, shift, on);
@@ -535,6 +677,11 @@ pub fn requests(io: &[u8]) -> [(u32, usize, u32, bool); 39] {
     for k in 0..4 {
         push(148 + k as u32, 6, 0, pwm(1, k)); // CMI7A-D
     }
+    // Channel 10: CMI10A, CMI10B in IPRI 7-4; ICI10A and CMI10G share vector 180, IPRI 3-0.
+    let t10 = r16(io, TSR10) & r16(io, TIER10);
+    push(176, 8, 4, t10 & 1 != 0);
+    push(178, 8, 4, t10 & 4 != 0);
+    push(180, 8, 0, t10 & 0xA != 0);
     out
 }
 
@@ -734,6 +881,74 @@ mod tests {
         write8(&mut a, &mut io, 80_000 + 18 * 20, TSTR1, 0x00);
         a.store(1_000_000, &mut io);
         assert_eq!(r32(&io, TCNT0), 2);
+    }
+
+    #[test]
+    fn ti10_rising_edges_when_selected() {
+        let (mut a, mut io) = io();
+        write8(&mut a, &mut io, 0, 0xFFFF_F6E4, 0x01); // TCR10: rising edges
+        a.ti10_edge(&mut io, 10, false);
+        assert_eq!(a.ti10_edges, 0);
+        a.ti10_edge(&mut io, 20, true);
+        assert_eq!(a.ti10_edges, 1);
+    }
+
+    #[test]
+    fn channel_0_captures_tcnt0_at_the_edge() {
+        let (mut a, mut io) = io();
+        write8(&mut a, &mut io, 0, 0xFFFF_F404, 4); // PSCR1: 20 cycles a count
+        write8(&mut a, &mut io, 0, TSTR1, 0x01);
+        write8(&mut a, &mut io, 0, TIOR0, 0x16); // A falling, B rising, C rising
+        // The counter is brought up to date at 10 000; an edge from before that still
+        // captures the count it had then.
+        a.resync(10_000);
+        assert!(!a.capture(&mut io, 2_000, 0, true), "A wants falling edges");
+        assert!(a.capture(&mut io, 2_000, 0, false));
+        assert_eq!(r32(&io, ICR0[0]), 100);
+        assert!(a.capture(&mut io, 12_000, 1, true));
+        assert_eq!(r32(&io, ICR0[1]), 600);
+        assert!(!a.capture(&mut io, 12_000, 3, true), "D disabled");
+        assert_eq!(r16(&io, TSR0), 0x0003, "ICF0A, ICF0B");
+        w16(&mut io, TIER0, 0x0001);
+        assert!(requests(&io).iter().any(|r| r.0 == 84 && r.3), "ICI0A");
+    }
+
+    #[test]
+    fn channel_10_measures_tooth_periods() {
+        let (mut a, mut io) = io();
+        write8(&mut a, &mut io, 0, 0xFFFF_F6E4, 0x02); // TCR10: falling edges
+        write8(&mut a, &mut io, 0, 0xFFFF_F6E2, 0x10); // TIOR10: x64
+        write8(&mut a, &mut io, 0, TSTR1, 0x80); // STR10; PSCR4 = 0: one count per Pphi
+        assert_eq!(a.tcnt10a.cpc, 4);
+        a.ti10_edge(&mut io, 400, true);
+        assert_eq!(a.ti10_edges, 0, "rising edge not selected");
+        a.ti10_edge(&mut io, 400, false);
+        assert_eq!(r32(&io, ICR10A), 101, "from 1, 100 counts");
+        assert_eq!(io[(TCNT10B - IO_BASE) as usize], 1);
+        assert_eq!(r16(&io, TSR10), 0x0002, "ICF10A");
+        a.resync(20_000);
+        a.ti10_edge(&mut io, 400 + 4 * 6400, false);
+        assert_eq!(
+            r32(&io, ICR10A),
+            6401,
+            "counted from 1 again at the last edge"
+        );
+        assert_eq!(r16(&io, RLD10C), 6401 >> 6, "reload: period over 64");
+        // OCR10B = 1: counting on from 1 sets CMF10B.
+        io[(OCR10B - IO_BASE) as usize] = 2;
+        a.ti10_edge(&mut io, 30_000, false);
+        assert_eq!(r16(&io, TSR10) & 4, 4, "CMF10B");
+        // OCR10A as a timeout on the next tooth.
+        w16(&mut io, OCR10A, 0);
+        w16(&mut io, OCR10A + 2, 1000);
+        a.cmp10a_done = false;
+        a.schedule(&io);
+        assert_eq!(a.next_event(), 30_000 + 4 * 999);
+        a.advance(30_000 + 4 * 999, &mut io);
+        assert_eq!(r16(&io, TSR10) & 1, 1, "CMF10A");
+        w16(&mut io, TIER10, 0x0003);
+        assert!(requests(&io).iter().any(|r| r.0 == 176 && r.3));
+        assert!(requests(&io).iter().any(|r| r.0 == 180 && r.3));
     }
 
     #[test]

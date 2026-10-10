@@ -21,6 +21,7 @@ pub mod dmac;
 pub mod hcan;
 pub mod intc;
 mod machine;
+pub mod pins;
 pub mod sci;
 
 pub use machine::{Machine, Stop};
@@ -231,6 +232,8 @@ pub struct Sh7059 {
     dma_busy: bool,
     /// Port pins wired to SCI peers.
     wires: Vec<Wire>,
+    /// What drives the input pins from outside, if anything.
+    pub stimulus: Option<Box<dyn pins::Stimulus>>,
     /// Highest pending interrupt: (level, vector), or (0, 0) for none.
     pub pending: (u32, u32),
     /// CPU cycle of the next timer event.
@@ -265,6 +268,7 @@ impl Sh7059 {
             hcan: hcan::Hcan::default(),
             dma_busy: false,
             wires: Vec::new(),
+            stimulus: None,
             pending: (0, 0),
             next_event: u64::MAX,
         })
@@ -475,6 +479,7 @@ impl Sh7059 {
     /// Takes the peripheral events due by `now` and refreshes the pending interrupt and
     /// the next event.
     pub fn advance(&mut self) {
+        self.take_edges();
         self.cmt.advance(self.now);
         self.sci.advance(self.now);
         self.adc.advance(self.now);
@@ -482,6 +487,31 @@ impl Sh7059 {
         self.dma_catch_up();
         self.hcan.advance(self.now, &mut self.io);
         self.update_interrupts();
+    }
+
+    /// Connects what drives the input pins, replacing what did before.
+    pub fn set_stimulus(&mut self, s: Box<dyn pins::Stimulus>) {
+        self.stimulus = Some(s);
+        self.update_interrupts();
+    }
+
+    /// Takes the input pin edges due by `now`, each at its own cycle.
+    fn take_edges(&mut self) {
+        let Some(s) = self.stimulus.as_mut() else {
+            return;
+        };
+        while let Some(e) = s.peek() {
+            if e.at > self.now {
+                break;
+            }
+            let e = s.take().expect("peeked");
+            match e.pin {
+                pins::Pin::Ti0(k) => {
+                    self.atu.capture(&mut self.io, e.at, k as usize & 3, e.high);
+                }
+                pins::Pin::Ti10 => self.atu.ti10_edge(&mut self.io, e.at, e.high),
+            }
+        }
     }
 
     /// A frame arrives from the CAN bus on HCAN channel `ch`. Returns the mailbox that
@@ -570,7 +600,13 @@ impl Sh7059 {
             .min(self.adc.next_event())
             .min(self.atu.next_event())
             .min(self.dmac.next_event(&self.io))
-            .min(self.hcan.next_event());
+            .min(self.hcan.next_event())
+            .min(
+                self.stimulus
+                    .as_ref()
+                    .and_then(|s| s.peek())
+                    .map_or(u64::MAX, |e| e.at),
+            );
     }
 
     #[inline(always)]
