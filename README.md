@@ -155,23 +155,40 @@ off the bus.
 ### Comparing calibrations
 
 ```sh
-# What the ECU asks for (rail pressure, boost, air flow, load, EGR, throttle) over a
-# grid of engine speed and pedal, and where a second image differs:
+# What the ECU asks for over a grid of engine speed and pedal, and where a second image
+# differs: fuel per stroke, torque delivered, desired rail pressure, SCV current and duty
+# command, desired air flow and boost, VGT vane command, desired EGR and throttle, load.
 sh705x maps --flash <original.bin> --compare <modified.bin> --eeprom <eeprom.bin>
 ```
 
 And which maps the firmware reads in a scenario, through its interpolation routines
 (found with the map catalogue's Ghidra tools), with their inputs and results, marking
-those a second image changes:
+those a second image changes. With `--labels` each map is also named in words (VNT duty
+cycle, target air mass, torque-to-IQ, rail pressure limiters...):
 
 ```sh
-sh705x touched --flash <original.bin> --compare <modified.bin> --eeprom <eeprom.bin>     --rpm 2500 --sensor pedal=60 --masters 3d=7128,2d=70B4 --catalog <maps-3d.csv>
+sh705x touched --flash <original.bin> --compare <modified.bin> --eeprom <eeprom.bin>     --rpm 2500 --sensor pedal=60 --masters 3d=7128,2d=70B4 --catalog <maps-3d.csv> --labels <tags.txt>
 ```
 
 Each point of `maps` boots the ECU there and lets the boost settle on its target. The setpoints
 come from the calibration's maps, so a changed map shows where the engine is on it; as
-long as the ECU does not inject, setpoints that depend on the fuel it delivers (EGR) do
-not show.
+long as the ECU does not inject, the fuel per stroke reads 0 and the setpoints that depend
+on it (EGR) sit at their idle floor.
+
+### Actuators that run without injection
+
+Two of the ECU's loops regulate whatever the fuel cut does: the suction control valve's
+current (ATU-II output 7A, read back on AN1) and the EGR valve's position (7C, AN10).
+`actuators` boots the ECU idling, drives a physical plant with the firmware's duties and
+returns the plant's output to those inputs every step, so the firmware's own regulators
+close against it, and traces the result:
+
+```sh
+sh705x actuators --flash <flash.bin> --eeprom <eeprom.bin> --millis 4000
+```
+
+The EGR loop settles shut at idle, as the car does; the SCV current loop holds a steady
+current, the pump driven hard because the rail pressure plant is not closed yet.
 
 ```sh
 cargo test --all
