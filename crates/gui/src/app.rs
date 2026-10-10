@@ -1,7 +1,7 @@
 //! The window: controls, registers, code around the PC, memory, CAN, interrupts, the
 //! A/D inputs as sliders, and an ELM327 console.
 
-use crate::emu::{Cmd, MEM_WINDOW, Snapshot};
+use crate::emu::{Cmd, MEM_WINDOW, Origin, Snapshot};
 use eframe::egui::{self, Color32, RichText};
 use sh2e::disasm;
 use std::sync::mpsc::Sender;
@@ -281,15 +281,19 @@ impl App {
                                     let text = format!(
                                         "{:>12.3} ms  {}  {:03X}  [{}]  {}",
                                         e.us as f64 / 1000.0,
-                                        if e.from_ecu { "ECU →" } else { "→ ECU" },
+                                        match e.from {
+                                            Origin::Ecu => "ECU  →",
+                                            Origin::Tool => "tool →",
+                                            Origin::Node => "node →",
+                                        },
                                         f.id,
                                         f.dlc,
                                         data.join(" ")
                                     );
-                                    let color = if e.from_ecu {
-                                        Color32::LIGHT_GRAY
-                                    } else {
-                                        Color32::LIGHT_BLUE
+                                    let color = match e.from {
+                                        Origin::Ecu => Color32::LIGHT_GRAY,
+                                        Origin::Tool => Color32::LIGHT_BLUE,
+                                        Origin::Node => Color32::LIGHT_GREEN,
                                     };
                                     ui.monospace(RichText::new(text).color(color));
                                 }
@@ -508,7 +512,7 @@ mod tests {
         snap.console = vec!["> 0100".into(), "    41 00 98 3B 20 13".into()];
         snap.can.push_back(emu::CanEvent {
             us: 12,
-            from_ecu: true,
+            from: Origin::Ecu,
             frame: sh7059::hcan::Frame::standard(0x7E8, &[2, 0x41, 0]),
         });
         snap.interrupts = vec![(192, 3)];

@@ -28,7 +28,8 @@ pub fn wire_cycles(f: &Frame) -> u64 {
 pub trait CanLink {
     /// Puts a frame on the bus.
     fn send(&mut self, frame: Frame);
-    /// The next frame from the ECU, waiting at most `timeout_us` of bus time.
+    /// The next frame from the ECU or another node on the bus, waiting at most
+    /// `timeout_us` of bus time.
     fn recv(&mut self, timeout_us: u64) -> Option<Frame>;
     /// Bus time now, in microseconds from an arbitrary start.
     fn now_us(&self) -> u64;
@@ -169,9 +170,16 @@ impl RealTimeEcu {
                     let lag = (target - done) / CYCLES_PER_US;
                     stats2.worst_lag_us.fetch_max(lag, Ordering::Relaxed);
                 }
-                // About 100 µs of emulation, then look at the bus again.
+                // About 100 µs of emulation, then look at the bus again: what the ECU
+                // and the other nodes put on it, in time order.
                 machine.run(8_000);
-                for (_, f) in machine.chip.hcan.ch[channel].outbox.drain(..) {
+                let mut bus: Vec<(u64, Frame)> =
+                    machine.chip.hcan.ch[channel].outbox.drain(..).collect();
+                if channel == 0 {
+                    bus.append(&mut machine.chip.heard);
+                    bus.sort_by_key(|&(t, _)| t);
+                }
+                for (_, f) in bus {
                     match ecu_tx.try_send(f) {
                         Ok(()) | Err(TrySendError::Full(_)) => {}
                         Err(TrySendError::Disconnected(_)) => break,

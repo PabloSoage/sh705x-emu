@@ -41,13 +41,24 @@ pub enum Cmd {
     Quit,
 }
 
-/// One CAN frame seen on HCAN0: when, which way, what.
+/// Who put a frame on the bus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// The ECU.
+    Ecu,
+    /// The diagnostic tool (the ELM327 console).
+    Tool,
+    /// Another node of the simulated car (the ABS).
+    Node,
+}
+
+/// One CAN frame seen on HCAN0: when, who sent it, what.
 #[derive(Clone, Copy, Debug)]
 pub struct CanEvent {
     /// Emulated time, µs.
     pub us: u64,
-    /// Sent by the ECU (true) or by the tool (false).
-    pub from_ecu: bool,
+    /// Who put it on the bus.
+    pub from: Origin,
     /// The frame.
     pub frame: Frame,
 }
@@ -220,12 +231,19 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
                 }
             }
         }
-        // CAN frames the ECU sent.
-        for (t, f) in m.chip.hcan.ch[0].outbox.drain(..) {
+        // CAN frames the ECU and the other nodes sent, in time order.
+        let mut bus: Vec<(u64, Origin, Frame)> = m.chip.hcan.ch[0]
+            .outbox
+            .drain(..)
+            .map(|(t, f)| (t, Origin::Ecu, f))
+            .chain(m.chip.heard.drain(..).map(|(t, f)| (t, Origin::Node, f)))
+            .collect();
+        bus.sort_by_key(|e| e.0);
+        for (t, from, frame) in bus {
             can.push_back(CanEvent {
                 us: t / CYCLES_PER_US,
-                from_ecu: true,
-                frame: f,
+                from,
+                frame,
             });
         }
         while can.len() > CAN_KEPT {
@@ -282,7 +300,7 @@ impl bridge::link::CanLink for LoggingLink<'_, '_> {
         let us = self.inner.now_us();
         self.can.push_back(CanEvent {
             us,
-            from_ecu: false,
+            from: Origin::Tool,
             frame,
         });
         self.inner.send(frame);
@@ -293,7 +311,7 @@ impl bridge::link::CanLink for LoggingLink<'_, '_> {
         let us = self.inner.now_us();
         self.can.push_back(CanEvent {
             us,
-            from_ecu: true,
+            from: Origin::Ecu,
             frame: f,
         });
         Some(f)
