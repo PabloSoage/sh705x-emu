@@ -60,15 +60,21 @@ fn pin_of(code: u8) -> Pin {
 }
 
 impl Wheels {
-    /// A 60-2 crank on TI0A with one cam pulse per cycle on TI0B, at `rpm`, starting at
-    /// cycle `start`.
+    /// A 60-2 crank on TI0A and TI10, and a cam on TI0B with four teeth 180° apart plus a
+    /// sync tooth 60° after the last, at `rpm`, starting at cycle `start`.
+    ///
+    /// The firmware's cam routine (0xDD80) keeps the interval between cam edges and
+    /// synchronises when one is shorter than half the one before: a cam wheel with an
+    /// extra tooth close to another. Four plus one is the simplest such wheel, and with it
+    /// the firmware reports the crank speed exactly [DER]; the real wheel's tooth
+    /// positions are not known [SUP].
     pub fn new(rpm: f64, start: u64) -> Self {
         let mut w = Self {
             rpm: rpm.max(1.0),
             teeth: 60,
             missing: 2,
-            cam_angles: vec![90.0],
-            cam_width: 30.0,
+            cam_angles: vec![0.0, 180.0, 360.0, 540.0, 600.0],
+            cam_width: 10.0,
             crank_pins: vec![Pin::Ti0(0), Pin::Ti10],
             cam_pin: Pin::Ti0(1),
             queue: BinaryHeap::new(),
@@ -178,13 +184,22 @@ mod tests {
         let mut w = Wheels::new(3000.0, 1000);
         let all: Vec<Edge> = std::iter::from_fn(|| w.take()).take(1000).collect();
         assert!(all.windows(2).all(|p| p[0].at <= p[1].at), "time order");
-        let cam: Vec<&Edge> = all
+        let cam: Vec<u64> = all
             .iter()
             .filter(|e| e.pin == Pin::Ti0(1) && e.high)
+            .map(|e| e.at)
             .collect();
-        // 3000 rpm: 20 ms a revolution, 1.6 M cycles; a cam pulse every two.
-        assert!(cam.len() >= 2);
-        assert_eq!(cam[1].at - cam[0].at, 3_200_000);
-        assert_eq!(cam[0].at, 1000 + (90.0 * 1_600_000.0 / 360.0) as u64);
+        // 3000 rpm: 20 ms a revolution, 1.6 M cycles; five cam teeth per two
+        // revolutions, the last 60° after the fourth.
+        let at = |deg: f64| 1000 + (deg * 1_600_000.0 / 360.0) as u64;
+        assert_eq!(
+            &cam[..5],
+            &[at(0.0), at(180.0), at(360.0), at(540.0), at(600.0)]
+        );
+        assert_eq!(cam[5] - cam[0], 3_200_000, "the pattern repeats every 720°");
+        assert!(
+            2 * (cam[4] - cam[3]) < cam[3] - cam[2],
+            "the sync interval is under half"
+        );
     }
 }

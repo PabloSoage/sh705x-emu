@@ -56,3 +56,24 @@ fn obd_needs_a_command() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn the_ecu_sees_the_engine_turn() {
+    let (Ok(flash), Ok(eeprom)) = (
+        std::env::var("SH705X_FLASH"),
+        std::env::var("SH705X_EEPROM"),
+    ) else {
+        eprintln!("SH705X_FLASH or SH705X_EEPROM not set: skipped");
+        return;
+    };
+    let args: Vec<String> = [
+        "obd", "--flash", &flash, "--eeprom", &eeprom, "--rpm", "2500", "--boot", "80000000",
+        "010C", "010C",
+    ]
+    .map(String::from)
+    .to_vec();
+    let out = run(&parse(&args).unwrap()).unwrap();
+    // The second reading, once settled: 2500 rpm × 4 = 0x2710.
+    let last = out.lines().map(str::trim).rfind(|l| l.starts_with("41 0C"));
+    assert_eq!(last, Some("41 0C 27 10"), "{out}");
+}
