@@ -14,3 +14,4 @@ dumps/
 # Tool output
 *.log
 *.report.txt
+*.stackdump
