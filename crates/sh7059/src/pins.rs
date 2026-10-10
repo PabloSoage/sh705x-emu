@@ -106,7 +106,7 @@ impl SquareWave {
 
 impl Stimulus for SquareWave {
     fn peek(&self) -> Option<Edge> {
-        (self.hz > 0.0).then(|| Edge {
+        (self.hz > 0.0).then_some(Edge {
             at: self.next as u64,
             pin: self.pin,
             high: !self.high,
