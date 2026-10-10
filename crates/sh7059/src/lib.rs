@@ -95,6 +95,10 @@ pub fn region(addr: u32) -> Region {
     }
 }
 
+/// Frames of other nodes kept in [`Sh7059::heard`] for a listener that does not read
+/// them; later ones are dropped.
+pub const HEARD_KEPT: usize = 4096;
+
 /// One access to the peripheral register area, for tracing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IoAccess {
@@ -238,6 +242,11 @@ pub struct Sh7059 {
     wires: Vec<Wire>,
     /// What drives the input pins from outside, if anything.
     pub stimulus: Option<Box<dyn pins::Stimulus>>,
+    /// Other nodes on the CAN bus of HCAN channel 0, if any.
+    pub can_source: Option<Box<dyn hcan::CanSource>>,
+    /// Frames the nodes of [`Sh7059::can_source`] have put on the bus, for tools that
+    /// listen to it; whoever reads them empties it.
+    pub heard: Vec<(u64, hcan::Frame)>,
     /// Highest pending interrupt: (level, vector), or (0, 0) for none.
     pub pending: (u32, u32),
     /// CPU cycle of the next timer event.
@@ -277,6 +286,8 @@ impl Sh7059 {
             dma_busy: false,
             wires: Vec::new(),
             stimulus: None,
+            can_source: None,
+            heard: Vec::new(),
             pending: (0, 0),
             next_event: u64::MAX,
         })
@@ -522,7 +533,31 @@ impl Sh7059 {
         self.atu.advance(self.now, &mut self.io);
         self.dma_catch_up();
         self.hcan.advance(self.now, &mut self.io);
+        self.take_frames();
         self.update_interrupts();
+    }
+
+    /// Connects other nodes to the CAN bus of HCAN channel 0, replacing any before.
+    pub fn set_can_source(&mut self, s: Box<dyn hcan::CanSource>) {
+        self.can_source = Some(s);
+        self.update_interrupts();
+    }
+
+    /// Delivers the frames of other nodes whose last bit is through by `now`.
+    fn take_frames(&mut self) {
+        let Some(s) = self.can_source.as_mut() else {
+            return;
+        };
+        while let Some((at, _)) = s.peek() {
+            if at > self.now {
+                break;
+            }
+            let (at, f) = s.take().expect("peeked");
+            self.hcan.deliver(&mut self.io, 0, &f);
+            if self.heard.len() < HEARD_KEPT {
+                self.heard.push((at, f));
+            }
+        }
     }
 
     /// Connects what drives the input pins, replacing what did before.
@@ -651,6 +686,12 @@ impl Sh7059 {
                     .as_ref()
                     .and_then(|s| s.peek())
                     .map_or(u64::MAX, |e| e.at),
+            )
+            .min(
+                self.can_source
+                    .as_ref()
+                    .and_then(|s| s.peek())
+                    .map_or(u64::MAX, |(at, _)| at),
             );
     }
 

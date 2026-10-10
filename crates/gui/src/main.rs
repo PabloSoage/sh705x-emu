@@ -68,6 +68,7 @@ fn main() -> Result<(), String> {
             0,
         )),
     ])));
+    chip.set_can_source(Box::new(engine::bus::abs()));
     let mut m = Machine::new(chip, true);
     let engine = emu::Engine::ignition_on();
     engine.apply(&mut m);

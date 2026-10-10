@@ -13,7 +13,8 @@ usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
        sh705x disasm --flash <flash.bin> --from <addr> [--count <instructions>]
        sh705x obd   --flash <flash.bin> [--eeprom <eeprom.bin>] [--boot <instructions>]
                     [--adc <channel:code>]... [--rpm <rpm>] [--sensors on|idle|off]
-                    [--sensor <key=value>]... [--maf-hz <hz>] <ELM327 command>...
+                    [--sensor <key=value>]... [--maf-hz <hz>] [--peers abs|none]
+                    <ELM327 command>...
        sh705x serve --flash <flash.bin> [--eeprom <eeprom.bin>] [--port <port>]
                     [--adc <channel:code>]... [--flat-out]
        sh705x sm3   --flash <flash.bin> [--eeprom <eeprom.bin>] [--bind <address>]
@@ -34,7 +35,8 @@ commands:
           on), idling with --rpm (idle), or all at code 0 (off); --sensor sets one in
           physical units, as the ECU reports it (coolant=90, rail=30, battery=13.8...;
           an unknown key lists them all; maf is g/s, a square wave on TI0C); --adc
-          sets a raw code and --maf-hz the MAF frequency on top of all that
+          sets a raw code and --maf-hz the MAF frequency on top of all that; the ABS
+          sends its frame 0x1E9 on the bus unless --peers none
           ('0100', 'ATSH7E0', '1A90'...) over the emulated CAN bus, in virtual time;
           prints each answer as an ELM327 would
   serve   run the ECU in real time and serve an ELM327 on TCP (port 35000 by
@@ -112,6 +114,8 @@ pub struct EcuOptions {
     pub sensor: Vec<String>,
     /// Frequency of the MAF's square wave on TI0C, over what the sensors give.
     pub maf_hz: Option<u32>,
+    /// Other nodes on the bus: "abs" (the default) or "none".
+    pub peers: String,
 }
 
 /// AN14 code that wakes the ECU: the firmware reads its ignition input there and stays
@@ -151,6 +155,7 @@ fn parse_ecu(
         sensors: None,
         sensor: Vec::new(),
         maf_hz: None,
+        peers: "abs".into(),
     };
     let (mut flash, mut args) = (None, Vec::new());
     let mut it = rest.iter().peekable();
@@ -183,6 +188,12 @@ fn parse_ecu(
                         .parse()
                         .map_err(|_| format!("bad --maf-hz '{value}'"))?,
                 )
+            }
+            "--peers" => {
+                if !["abs", "none"].contains(&value.as_str()) {
+                    return Err(format!("--peers is abs or none, not '{value}'"));
+                }
+                o.peers = value.clone();
             }
             "--sensors" => {
                 if !["on", "idle", "off"].contains(&value.as_str()) {
@@ -728,6 +739,9 @@ fn boot(o: &EcuOptions) -> Result<Machine, String> {
     }
     if !pins.0.is_empty() {
         chip.set_stimulus(Box::new(pins));
+    }
+    if o.peers == "abs" {
+        chip.set_can_source(Box::new(engine::bus::abs()));
     }
     let mut m = Machine::new(chip, true);
     m.run(o.boot);

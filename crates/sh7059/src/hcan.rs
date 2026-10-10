@@ -34,6 +34,14 @@
 use crate::IO_BASE;
 use std::collections::VecDeque;
 
+/// Other nodes on a CAN bus, as seen from the ECU: their frames in time order.
+pub trait CanSource: Send {
+    /// The next frame and the cycle at which its last bit is through, without taking it.
+    fn peek(&self) -> Option<(u64, Frame)>;
+    /// Takes the next frame.
+    fn take(&mut self) -> Option<(u64, Frame)>;
+}
+
 /// First HCAN register (MCR_0).
 pub const BASE: u32 = 0xFFFF_D000;
 /// One past the last HCAN register (end of channel 1's mailbox 31).
