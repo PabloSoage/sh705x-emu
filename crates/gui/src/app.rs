@@ -30,6 +30,10 @@ pub struct App {
     follow: bool,
     code_at: u32,
     code_text: String,
+    /// The engine view's window is open.
+    engine_view: bool,
+    /// What it shows.
+    view: crate::view::Settings,
 }
 
 impl App {
@@ -47,6 +51,8 @@ impl App {
             follow: true,
             code_at: 0,
             code_text: String::new(),
+            engine_view: false,
+            view: Default::default(),
         }
     }
 
@@ -138,6 +144,8 @@ impl App {
                 {
                     self.send(Cmd::NextTooth);
                 }
+                ui.toggle_value(&mut self.engine_view, "Engine view")
+                    .on_hover_text("The wheels, the cylinders and the history of what the firmware asks for and gets");
                 let mut rt = s.real_time;
                 if ui.checkbox(&mut rt, "Real time").changed() {
                     self.send(Cmd::RealTime(rt));
@@ -168,6 +176,20 @@ impl App {
                 }
             });
         });
+
+        if self.engine_view {
+            let mut open = true;
+            let now_us = s.cpu.cycles as f64 / 80.0;
+            egui::Window::new("Engine view")
+                .open(&mut open)
+                .default_size([1000.0, 640.0])
+                .default_pos([200.0, 60.0])
+                .show(root.ctx(), |ui| {
+                    let scope = s.scope.lock().expect("scope lock");
+                    crate::view::show(ui, &scope, &mut self.view, now_us);
+                });
+            self.engine_view = open;
+        }
 
         egui::Panel::left("registers").show(root, |ui| {
             ui.heading("CPU");
@@ -712,10 +734,23 @@ mod tests {
         });
         snap.interrupts = vec![(192, 3)];
         snap.plant = Some(engine::plants::State::default());
+        // Some history for the engine view: the crank turning, an injector pulse.
+        {
+            let mut sc = snap.scope.lock().unwrap();
+            for i in 0..400 {
+                sc.samples.push_back(crate::scope::Sample {
+                    us: i as f64 * 100.0,
+                    crank: (i as f32 * 0.45) % 720.0,
+                    v: [i as f32; crate::scope::TRACES.len()],
+                });
+            }
+            sc.pulses.push_back((8, 1000.0, 1300.0));
+        }
         let shared = Arc::new(Mutex::new(snap));
         let (tx, rx) = mpsc::channel();
         let mut app = App::new(shared, tx, Arc::new(img));
         app.breakpoints.push(0x1002);
+        app.engine_view = true;
         let ctx = egui::Context::default();
         for tab in [Tab::Console, Tab::Can, Tab::Memory, Tab::Interrupts] {
             app.tab = tab;
@@ -818,6 +853,17 @@ mod tests {
             h.render().unwrap().save(&path).unwrap();
             eprintln!("{}", path.display());
         }
+        // The engine view, paused at idle: 50 ms of the wheels, the EGR, boost and rail.
+        h.state().send(Cmd::Pause);
+        wait_for(&h.state().shared, |s| !s.running);
+        h.state_mut().engine_view = true;
+        h.state_mut().view.window = 1;
+        h.state_mut().tab = Tab::Console;
+        h.run_steps(3);
+        let path = dir.join("gui-engine.png");
+        h.render().unwrap().save(&path).unwrap();
+        eprintln!("{}", path.display());
+        h.state_mut().engine_view = false;
         // Stopped where the firmware takes the first tooth after the gap (0xE854), slowed
         // down, to go on from there an instruction or a tooth at a time.
         let app = h.state_mut();

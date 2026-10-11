@@ -175,6 +175,21 @@ cycle, the tooth, and the next input edge.
 *Stopped at a breakpoint on 0xE854, the routine the firmware runs at the first tooth after
 the gap (crank at 363°, tooth 0), slowed to ×0.001, ready to step.*
 
+"Engine view" opens a window with the engine drawn and its history in ECU time: the crank
+and cam wheels turning under their sensors, the four cylinders (their phase to the crank
+is assumed), and strip charts of what the firmware asks for against what the plants give
+back: engine speed, EGR asked, position and drive, boost, the VGT and SCV commands and the
+SCV current, rail pressure, fresh air, fuel and torque asked. Under them, the crank and cam
+signals and the one-shot pulses of the ATU-II's channel 8, where the injectors are
+(TO8I–L; they never pulse here: the immobilizer cuts injection). The window goes from 10
+ms to 20 s; the pointer reads every chart at one instant. Slowed down or a tooth at a time,
+the fast moves show, such as each step of the EGR's drive.
+
+![The engine view: wheels, cylinders and 50 ms of history at idle](docs/img/gui-engine.png)
+
+*50 ms at idle: the 60-4 crank wheel with its gap, the cam's sync and main pulses, the EGR
+held at a third open by a drive that steps every few milliseconds, boost and rail.*
+
 | CAN traffic | Memory |
 |---|---|
 | ![The CAN tab](docs/img/gui-can.png) | ![The memory tab](docs/img/gui-memory.png) |

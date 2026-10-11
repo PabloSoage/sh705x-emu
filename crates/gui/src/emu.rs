@@ -1,6 +1,7 @@
 //! The emulation thread: it owns the machine, takes orders from the interface over a
 //! channel, and publishes a snapshot about every 30 ms (ADR-0004).
 
+use crate::scope::Scope;
 use bridge::elm::Elm327;
 use bridge::link::{CYCLES_PER_US, VirtualLink};
 use engine::crank::Crank;
@@ -127,6 +128,8 @@ pub struct Snapshot {
     pub plant_mode: PlantMode,
     /// What they gave last, if they are on.
     pub plant: Option<State>,
+    /// The history the engine view draws (the same one in every snapshot).
+    pub scope: Arc<Mutex<Scope>>,
 }
 
 /// The simulated engine's settings: what drives the ECU's inputs.
@@ -192,6 +195,7 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
     let mut plants: Option<Plants> = None;
     let mut plant: Option<State> = None;
     let mut plant_cycle = m.cpu.cycles;
+    let scope = shared.lock().expect("snapshot lock").scope.clone();
     loop {
         // Orders: wait for one while paused, take what is there while running.
         let first = if running {
@@ -395,6 +399,10 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
             rt_factor = (m.cpu.cycles - rt_cycle) as f64 / (CYCLES_PER_US as f64 * 1e6) / w;
             (rt_cycle, rt_wall) = (m.cpu.cycles, Instant::now());
         }
+        scope
+            .lock()
+            .expect("scope lock")
+            .take(&m, plant.as_ref(), &engine, !running);
         if published.elapsed() >= Duration::from_millis(30) {
             let mut interrupts: Vec<(usize, u64)> = m
                 .interrupts
@@ -428,6 +436,7 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
                 engine: engine.clone(),
                 plant_mode,
                 plant,
+                scope: scope.clone(),
             };
             *shared.lock().expect("snapshot lock") = snap;
             published = Instant::now();
@@ -489,5 +498,6 @@ pub fn first_snapshot(m: &Machine, engine: &Engine) -> Snapshot {
         engine: engine.clone(),
         plant_mode: PlantMode::Off,
         plant: None,
+        scope: Arc::default(),
     }
 }

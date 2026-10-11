@@ -9,6 +9,8 @@
 
 mod app;
 mod emu;
+mod scope;
+mod view;
 
 use sh7059::pins::{Merge, Pin, SquareWave};
 use sh7059::{Machine, Sh7059};
