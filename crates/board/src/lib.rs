@@ -3,6 +3,15 @@
 //!
 //! The EEPROM is four 93C86 Microwire chips on the synchronous serial ports
 //! ([`microwire`]); [`wire_eeproms`] connects them as on the Denso board of the Astra J.
+//!
+//! The status chips that watch the output stages share SCI3 and SCI4 ([`status`],
+//! [`wire_status`]). On SCI0 sits the injector driver [MED]: the firmware's module for it
+//! (`0x61xxx`) is the one that reports P0201-P0204, P2147/P2148 and P0611. It writes four
+//! registers from the calibration (`0x113AC`: register number on PK3-PK4, the byte on
+//! SCI0), at power-on and again when its state changes, and reads back one byte: bit 0
+//! (even registers) or 1 (odd) is a fault, heeded while an analog reading (`FFFEB874`) is
+//! at 340 codes or more (`0x61C0C`). Nothing
+//! modelled answers 0, no fault; it matters once there is injection.
 
 pub mod microwire;
 pub mod status;
