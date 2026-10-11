@@ -26,7 +26,7 @@ usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
        sh705x disasm --flash <flash.bin> --from <addr> [--count <instructions>]
        sh705x obd   --flash <flash.bin> [--eeprom <eeprom.bin>] [--boot <instructions>]
                     [--adc <channel:code>]... [--rpm <rpm>] [--sensors on|idle|off]
-                    [--sensor <key=value>]... [--maf-hz <hz>] [--peers abs|none]
+                    [--sensor <key=value>]... [--maf-hz <hz>] [--peers abs|car|none]
                     <ELM327 command>...
        sh705x serve --flash <flash.bin> [--eeprom <eeprom.bin>] [--port <port>]
                     [--adc <channel:code>]... [--flat-out]
@@ -58,7 +58,8 @@ commands:
           physical units, as the ECU reports it (coolant=90, rail=30, battery=13.8...;
           an unknown key lists them all; maf is g/s, a square wave on TI0C); --adc
           sets a raw code and --maf-hz the MAF frequency on top of all that; the ABS
-          sends its frame 0x1E9 on the bus unless --peers none
+          sends its frame 0x1E9 on the bus unless --peers none; --peers car adds the
+          car's other nodes as they send standing still
           ('0100', 'ATSH7E0', '1A90'...) over the emulated CAN bus, in virtual time;
           prints each answer as an ELM327 would
   serve   run the ECU in real time and serve an ELM327 on TCP (port 35000 by
@@ -168,7 +169,7 @@ pub struct EcuOptions {
     pub sensor: Vec<String>,
     /// Frequency of the MAF's square wave on TI0C, over what the sensors give.
     pub maf_hz: Option<u32>,
-    /// Other nodes on the bus: "abs" (the default) or "none".
+    /// Other nodes on the bus: "abs" (the default), "car" or "none".
     pub peers: String,
 }
 
@@ -244,8 +245,8 @@ fn parse_ecu(
                 )
             }
             "--peers" => {
-                if !["abs", "none"].contains(&value.as_str()) {
-                    return Err(format!("--peers is abs or none, not '{value}'"));
+                if !["abs", "car", "none"].contains(&value.as_str()) {
+                    return Err(format!("--peers is abs, car or none, not '{value}'"));
                 }
                 o.peers = value.clone();
             }
@@ -958,8 +959,10 @@ fn boot(o: &EcuOptions) -> Result<Machine, String> {
     if !pins.0.is_empty() {
         chip.set_stimulus(Box::new(pins));
     }
-    if o.peers == "abs" {
-        chip.set_can_source(Box::new(engine::bus::abs()));
+    match o.peers.as_str() {
+        "abs" => chip.set_can_source(Box::new(engine::bus::abs())),
+        "car" => chip.set_can_source(Box::new(engine::bus::car())),
+        _ => {}
     }
     let mut m = Machine::new(chip, true);
     m.run(o.boot);

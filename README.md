@@ -68,7 +68,8 @@ second, which makes it a reference oracle rather than an emulator.
   ratiometric to one of the two 5 V references, which the firmware checks. The MAF is
   a frequency on TI0C. The defaults are the car's own values at warm idle.
 - **Other nodes on the bus:** of the 20 identifiers the firmware listens to, the ABS
-  frame is the one whose absence it reports (U0121); it is sent by default.
+  frame is the one whose absence it reports (U0121); it is sent by default, and `--peers
+  car` adds the rest of the car as it sends standing still (not the VIN).
 - **Debugging:** memory watchpoints, PC breakpoints and single stepping in the core,
   and a disassembler.
 - **Speed:** with the EEPROM, CAN and the engine turning, the emulated ECU runs 1.26 to

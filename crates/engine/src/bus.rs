@@ -74,6 +74,61 @@ pub fn abs() -> Periodic {
     p
 }
 
+/// The car's other nodes as the ECU hears them standing still: for each identifier the
+/// firmware listens to that the car sent (scanmatik-bench `60-identificar-app.log`), its
+/// most frequent frame at its measured period [MED]. Left out: 0x4E1, which carries part
+/// of the VIN, and 0x4E9, which may carry the odometer [SUP]; 0x680, the immobilizer's
+/// side, is not sent by any of them. Frames with rolling counters are frozen at their most
+/// frequent value [SUP].
+pub fn car() -> Periodic {
+    let mut p = Periodic::default();
+    for (id, data, period_ms) in [
+        (
+            0x0C1,
+            &[0x82, 0x21, 0x0A, 0x30, 0x82, 0x35, 0x94, 0xF4][..],
+            10.7,
+        ),
+        (
+            0x0C5,
+            &[0xC1, 0xCA, 0x9C, 0x04, 0x41, 0xEA, 0x80, 0xF8][..],
+            10.8,
+        ),
+        (0x0F1, &[0x34, 0x04, 0x00, 0x40][..], 10.7),
+        (0x1C7, &[0x06, 0xA0, 0x39, 0x60, 0x03, 0xFF, 0x3F][..], 21.4),
+        (0x1E1, &[0x00, 0xFD, 0x07, 0x00][..], 32.2),
+        (
+            0x1E5,
+            &[0x46, 0x01, 0x59, 0xC0, 0x00, 0xFE, 0xA5, 0x00][..],
+            10.8,
+        ),
+        (
+            0x1E9,
+            &[0x0F, 0x98, 0x00, 0x0C, 0x0F, 0xFA, 0x00, 0x00][..],
+            21.4,
+        ),
+        (
+            0x1F1,
+            &[0xAE, 0x0A, 0x00, 0x00, 0x10, 0x00, 0x00, 0x72][..],
+            43.4,
+        ),
+        (0x1F3, &[0x40, 0xFC, 0x00][..], 32.5),
+        (0x2F9, &[0xE8, 0x00, 0x00, 0x00, 0x00, 0x00][..], 53.6),
+        (
+            0x3C9,
+            &[0x07, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00][..],
+            108.2,
+        ),
+        (
+            0x3F1,
+            &[0x00, 0xC1, 0x96, 0x08, 0x00, 0xFA, 0x02, 0x75][..],
+            272.7,
+        ),
+    ] {
+        p.add(Frame::standard(id, data), period_ms, 0);
+    }
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +154,16 @@ mod tests {
                 (2_400_000, 0x0C1)
             ]
         );
+    }
+
+    #[test]
+    fn the_car_set_keeps_the_vin_and_the_immobilizer_out() {
+        let p = car();
+        let ids: Vec<u32> = p.0.iter().map(|m| m.frame.id).collect();
+        assert_eq!(ids.len(), 12);
+        assert!(ids.contains(&0x1E9), "the ABS, whose absence sets U0121");
+        for out in [0x4E1, 0x4E9, 0x680] {
+            assert!(!ids.contains(&out), "{out:03X}");
+        }
     }
 }
