@@ -21,3 +21,7 @@ eframe = { version = "0.36.2", default-features = false, features = ["default_fo
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+egui_kittest = { version = "0.36.2", features = ["wgpu"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

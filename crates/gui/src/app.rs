@@ -232,19 +232,30 @@ impl App {
                     }
                 });
                 if let Some(p) = &s.plant {
-                    ui.monospace(format!(
-                        "torque {:7.1} N·m   fuel asked {:6.2} mm3\n\
-                         boost  {:7.1} kPa   VGT  {:5.1} %\n\
-                         EGR    {:7.1} %     air  {:6.2} g/s\n\
-                         SCV    {:7.0} mA",
-                        p.torque,
-                        p.quantity,
-                        p.boost,
-                        p.vgt_duty.unwrap_or(0.0) * 100.0,
-                        p.egr,
-                        p.maf,
-                        p.scv_ma
-                    ));
+                    let vgt = p.vgt_duty.unwrap_or(0.0) * 100.0;
+                    egui::Grid::new("plant").show(ui, |ui| {
+                        for row in [
+                            [
+                                ("torque", format!("{:.1} N·m", p.torque)),
+                                ("fuel", format!("{:.2} mm3", p.quantity)),
+                            ],
+                            [
+                                ("boost", format!("{:.1} kPa", p.boost)),
+                                ("VGT", format!("{vgt:.1} %")),
+                            ],
+                            [
+                                ("EGR", format!("{:.1} %", p.egr)),
+                                ("air", format!("{:.2} g/s", p.maf)),
+                            ],
+                            [("SCV", format!("{:.0} mA", p.scv_ma)), ("", String::new())],
+                        ] {
+                            for (name, value) in row {
+                                ui.monospace(name);
+                                ui.monospace(value);
+                            }
+                            ui.end_row();
+                        }
+                    });
                 }
                 ui.label("Sensors as the ECU reports them:");
                 for &(key, value) in &s.engine.sensors.values {
@@ -301,6 +312,7 @@ impl App {
                             ui.label("e.g. 0100, 010C, 03, 0902, ATSH7E0, 1A92");
                         });
                         egui::ScrollArea::vertical()
+                            .id_salt("console")
                             .stick_to_bottom(true)
                             .show(ui, |ui| {
                                 for l in &s.console {
@@ -310,6 +322,7 @@ impl App {
                     }
                     Tab::Can => {
                         egui::ScrollArea::vertical()
+                            .id_salt("can")
                             .stick_to_bottom(true)
                             .show(ui, |ui| {
                                 for e in &s.can {
@@ -350,32 +363,36 @@ impl App {
                             }
                             ui.label("(peripheral registers show their last stored value)");
                         });
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            for row in 0..MEM_WINDOW / 16 {
-                                let a = s.mem_addr.wrapping_add(row * 16);
-                                let b = &s.mem[(row * 16) as usize..(row * 16 + 16) as usize];
-                                let hexs: Vec<String> =
-                                    b.iter().map(|x| format!("{x:02X}")).collect();
-                                let ascii: String = b
-                                    .iter()
-                                    .map(|&x| {
-                                        if (0x20..0x7F).contains(&x) {
-                                            x as char
-                                        } else {
-                                            '.'
-                                        }
-                                    })
-                                    .collect();
-                                ui.monospace(format!("{a:08X}  {}  {ascii}", hexs.join(" ")));
-                            }
-                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt("memory")
+                            .show(ui, |ui| {
+                                for row in 0..MEM_WINDOW / 16 {
+                                    let a = s.mem_addr.wrapping_add(row * 16);
+                                    let b = &s.mem[(row * 16) as usize..(row * 16 + 16) as usize];
+                                    let hexs: Vec<String> =
+                                        b.iter().map(|x| format!("{x:02X}")).collect();
+                                    let ascii: String = b
+                                        .iter()
+                                        .map(|&x| {
+                                            if (0x20..0x7F).contains(&x) {
+                                                x as char
+                                            } else {
+                                                '.'
+                                            }
+                                        })
+                                        .collect();
+                                    ui.monospace(format!("{a:08X}  {}  {ascii}", hexs.join(" ")));
+                                }
+                            });
                     }
                     Tab::Interrupts => {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            for (v, n) in &s.interrupts {
-                                ui.monospace(format!("vector {v:3}: {n}"));
-                            }
-                        });
+                        egui::ScrollArea::vertical()
+                            .id_salt("interrupts")
+                            .show(ui, |ui| {
+                                for (v, n) in &s.interrupts {
+                                    ui.monospace(format!("vector {v:3}: {n}"));
+                                }
+                            });
                     }
                 }
             });
@@ -575,28 +592,17 @@ mod tests {
         assert!(rx.try_recv().is_err(), "drawing alone sends no order");
     }
 
-    #[test]
-    fn on_its_torque_the_engine_idles() {
+    /// The user's flash (`SH705X_FLASH`) on the board as `sh705x-gui` wires it, idling
+    /// on its plants flat out, once `secs` seconds of ECU time have gone by; `None`
+    /// without a flash.
+    fn idling(secs: u64) -> Option<(App, std::thread::JoinHandle<()>)> {
         let Ok(path) = std::env::var("SH705X_FLASH") else {
             eprintln!("SH705X_FLASH not set: skipped");
-            return;
+            return None;
         };
-        use sh7059::pins::{Merge, Pin, SquareWave};
         let img = std::fs::read(path).unwrap();
         let mut chip = Sh7059::new(&img).unwrap();
-        board::wire_status(&mut chip);
-        chip.adc.input[14] = crate::IGNITION_ON;
-        chip.set_stimulus(Box::new(Merge(vec![
-            Box::new(engine::wheel::Wheels::new(0.0, 0)),
-            Box::new(SquareWave::new(
-                Pin::Ti0(2),
-                engine::sensors::MAF_KEY,
-                0.0,
-                engine::wheel::CYCLES_PER_S,
-                0,
-            )),
-        ])));
-        chip.set_can_source(Box::new(engine::bus::abs()));
+        crate::wire(&mut chip);
         let m = Machine::new(chip, true);
         let engine = emu::Engine::ignition_on();
         let shared = Arc::new(Mutex::new(emu::first_snapshot(&m, &engine)));
@@ -611,25 +617,70 @@ mod tests {
         ] {
             tx.send(c).unwrap();
         }
-        // Six seconds of ECU time: the idle governor has settled on the simulated engine.
         let t0 = Instant::now();
-        let s = loop {
-            let s = shared.lock().unwrap().clone();
-            if s.cpu.cycles > 6 * 80_000_000 {
-                break s;
+        loop {
+            let cycles = shared.lock().unwrap().cpu.cycles;
+            if cycles > secs * 80_000_000 {
+                break;
             }
             assert!(
-                t0.elapsed() < Duration::from_secs(120),
+                t0.elapsed() < Duration::from_secs(40 * secs),
                 "slow: {} M cycles",
-                s.cpu.cycles / 1_000_000
+                cycles / 1_000_000
             );
             std::thread::sleep(Duration::from_millis(50));
-        };
-        eprintln!("6 s of ECU time in {:?}", t0.elapsed());
-        let p = s.plant.expect("the plants run");
+        }
+        eprintln!("{secs} s of ECU time in {:?}", t0.elapsed());
+        Some((App::new(shared, tx, Arc::new(img)), t))
+    }
+
+    #[test]
+    fn on_its_torque_the_engine_idles() {
+        // Six seconds of ECU time: the idle governor has settled on the simulated engine.
+        let Some((app, t)) = idling(6) else { return };
+        let p = app.shared.lock().unwrap().plant.expect("the plants run");
         assert!((p.rpm - 750.0).abs() < 15.0, "{p:?}");
         assert!((p.torque - 12.0).abs() < 3.0, "{p:?}");
-        tx.send(Cmd::Quit).unwrap();
+        app.send(Cmd::Quit);
+        t.join().unwrap();
+    }
+
+    /// The README's screenshots, `docs/img/gui-*.png`: the user's flash idling on its
+    /// plants, an OBD exchange on the console, its CAN traffic and the torque in RAM.
+    /// `cargo test -p gui --release -- --ignored screenshots` with `SH705X_FLASH` set
+    /// and no EEPROM (no VIN in the pictures).
+    #[test]
+    #[ignore = "writes docs/img; needs SH705X_FLASH and a GPU or WARP"]
+    fn screenshots() {
+        let Some((mut app, t)) = idling(6) else {
+            return;
+        };
+        for line in ["ATSP6", "0100", "010C", "0105", "0110", "03", "07"] {
+            app.send(Cmd::Elm(line.into()));
+        }
+        wait_for(&app.shared, |s| {
+            s.console.iter().filter(|l| l.contains("] > ")).count() == 7
+        });
+        app.send(Cmd::Memory(0xFFFE_FC40));
+        wait_for(&app.shared, |s| s.mem_addr == 0xFFFE_FC40);
+        app.mem_text = "FFFEFC40".into();
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/img");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+        for (tab, name) in [
+            (Tab::Console, "console"),
+            (Tab::Can, "can"),
+            (Tab::Memory, "memory"),
+        ] {
+            h.state_mut().tab = tab;
+            h.run_steps(3);
+            let path = dir.join(format!("gui-{name}.png"));
+            h.render().unwrap().save(&path).unwrap();
+            eprintln!("{}", path.display());
+        }
+        h.state().send(Cmd::Quit);
         t.join().unwrap();
     }
 }

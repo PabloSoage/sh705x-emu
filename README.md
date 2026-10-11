@@ -6,6 +6,14 @@ peripherals and a simulated engine, so the ECU can be studied without the car.
 
 The first target is a Denso ECU with an SH7059 (Opel Astra J, A17DTJ engine).
 
+![sh705x-gui running the Astra's flash, idling on its own torque](docs/img/gui-console.png)
+
+*The Astra's own flash idling at 750 rpm on the simulated engine: the firmware asks for
+12.0 N·m and 7.02 mm³ per stroke, holds the EGR at 33 % for 5.2 g/s of fresh air and the
+SCV at its setpoint (right), and answers OBD requests from the ELM327 console (bottom),
+with no fault pending (`03` and `07` empty). Left, the CPU; centre, the code it is
+running.*
+
 ## Goals
 
 - **Diagnostics:** talk to the emulated ECU over its emulated CAN bus with ordinary
@@ -24,9 +32,9 @@ The first target is a Denso ECU with an SH7059 (Opel Astra J, A17DTJ engine).
 | 0 | Boot in Ghidra's p-code emulator: find where the firmware waits on hardware | done |
 | 1 | SH-2E core (integer and FPU) and memory map, in Rust | done |
 | 2 | Interrupt controller and on-chip peripherals (ATU-II, CMT, WDT, DMAC, SCI, A/D, HCAN) | in progress: INTC, CMT, DMAC, SCI, A/D, HCAN and most of the ATU-II done; the rest needs the engine |
-| 3 | The Denso board: EEPROM, external chips, pin-to-sensor map | in progress: the four EEPROMs served; 25 of the 32 analog inputs named, the MAF found on a timer input |
+| 3 | The Denso board: EEPROM, external chips, pin-to-sensor map | in progress: the four EEPROMs served, and the status chips that watch the output stages; 25 of the 32 analog inputs named, the MAF found on a timer input |
 | 4 | Diagnostics over the emulated CAN bus | done for reading: OBD and GMLAN through an ELM327 on TCP and an emulated Scanmatik SM3 |
-| 5 | Simulated engine | in progress: crank and cam wheels, sensors in physical units, the ABS on the bus; no injection yet |
+| 5 | Simulated engine | in progress: crank and cam wheels, sensors in physical units, the ABS and the car's other nodes on the bus, plants for the SCV, EGR, fresh air and turbocharger, and the crankshaft on the firmware's torque; no injection (the immobilizer) |
 | 6 | Validation against a real ECU, with an FPGA-driven bench | — |
 | 7 | Calibration comparison and map-access tracing | started: setpoints over a speed × pedal grid, two images compared; the maps looked up in a scenario |
 | 8 | The ECU on an FPGA (SH-2 soft core with an SH-2E FPU) | — |
@@ -148,6 +156,18 @@ cargo run --release -p gui -- --flash <flash.bin> --eeprom <eeprom.bin>
 In the engine panel, "Plants" puts the plants around the ECU: "Held" closes the SCV,
 EGR, fresh air and turbocharger loops at the speed set there; "On its torque" also lets
 the engine turn on the firmware's torque, as `sh705x plant` does.
+
+| CAN traffic | Memory |
+|---|---|
+| ![The CAN tab](docs/img/gui-can.png) | ![The memory tab](docs/img/gui-memory.png) |
+| The ECU's frames (grey) among the ABS node's (green), with their virtual time. Tool frames show in blue. | RAM, live: at `FFFEFC4C`, `41 40 00 00` is the torque the firmware asks for, 12.0 N·m as a float. |
+
+The pictures come from a test that draws the window with no screen, on the flash given
+in `SH705X_FLASH` (no EEPROM, so no VIN in them):
+
+```sh
+cargo test -p gui --release -- --ignored screenshots
+```
 
 All of them turn the ignition input on (`--adc 14:600`); without it the firmware stays
 silent on CAN. Frames from the tool reach the ECU after their time on a 500 kbit/s bus,

@@ -56,20 +56,7 @@ fn main() -> Result<(), String> {
         }
         board::wire_eeproms(&mut chip, &e, layout);
     }
-    board::wire_status(&mut chip);
-    chip.adc.input[14] = IGNITION_ON;
-    // The crank and cam wheels (stopped) and the MAF, so both can be set while running.
-    chip.set_stimulus(Box::new(Merge(vec![
-        Box::new(engine::wheel::Wheels::new(0.0, 0)),
-        Box::new(SquareWave::new(
-            Pin::Ti0(2),
-            engine::sensors::MAF_KEY,
-            0.0,
-            engine::wheel::CYCLES_PER_S,
-            0,
-        )),
-    ])));
-    chip.set_can_source(Box::new(engine::bus::abs()));
+    wire(&mut chip);
     let mut m = Machine::new(chip, true);
     let engine = emu::Engine::ignition_on();
     engine.apply(&mut m);
@@ -93,4 +80,22 @@ fn main() -> Result<(), String> {
     let _ = tx.send(emu::Cmd::Quit);
     let _ = thread.join();
     r.map_err(|e| e.to_string())
+}
+
+/// The board and the car around the chip: status chips, ignition on, the crank and cam
+/// wheels (stopped) and the MAF, so both can be set while running, and the ABS on the bus.
+fn wire(chip: &mut Sh7059) {
+    board::wire_status(chip);
+    chip.adc.input[14] = IGNITION_ON;
+    chip.set_stimulus(Box::new(Merge(vec![
+        Box::new(engine::wheel::Wheels::new(0.0, 0)),
+        Box::new(SquareWave::new(
+            Pin::Ti0(2),
+            engine::sensors::MAF_KEY,
+            0.0,
+            engine::wheel::CYCLES_PER_S,
+            0,
+        )),
+    ])));
+    chip.set_can_source(Box::new(engine::bus::abs()));
 }
