@@ -26,18 +26,6 @@ pub struct ActuatorsOptions {
     pub step: u64,
 }
 
-/// ATU-II outputs, as (channel 0/1 = 6/7, timer 0..3 = A..D). The SCV is on 6A: the
-/// firmware writes its command (0x323D, `FFFEF9C0`, % on-time) there, with a period it
-/// varies (`0xC4A4`) [MED].
-pub(crate) const SCV_OUT: (usize, usize) = (0, 0); // 6A
-/// The VGT's solenoid: 7A carries the vane command that 0x2041 reports (`FFFEFDDC`)
-/// [MED].
-pub(crate) const VGT_OUT: (usize, usize) = (1, 0); // 7A
-/// The EGR's H-bridge: the half that opens it, and the half that closes it. The firmware
-/// puts a positive command on 7D and a negative one on 7C (`0xB76C`) [MED].
-pub(crate) const EGR_OPEN: (usize, usize) = (1, 3); // 7D
-pub(crate) const EGR_CLOSE: (usize, usize) = (1, 2); // 7C
-
 /// The plants' step, milliseconds.
 const PLANT_MS: u64 = 1;
 

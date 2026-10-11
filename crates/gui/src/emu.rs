@@ -3,6 +3,8 @@
 
 use bridge::elm::Elm327;
 use bridge::link::{CYCLES_PER_US, VirtualLink};
+use engine::crank::Crank;
+use engine::plants::{ASTRA, Plants, State};
 use engine::sensors::{MAF_KEY, Sensors};
 use sh2e::Cpu;
 use sh7059::hcan::Frame;
@@ -37,8 +39,22 @@ pub enum Cmd {
     RealTime(bool),
     /// Send an ELM327 command line over the emulated CAN bus, in virtual time.
     Elm(String),
+    /// Put the plants around the ECU, or take them away.
+    Plants(PlantMode),
     /// End the thread.
     Quit,
+}
+
+/// The plants around the ECU (`engine::plants`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlantMode {
+    /// None: the inputs are what the sensors are set to.
+    Off,
+    /// The SCV, EGR, fresh air and turbocharger close their loops; the speed is what it
+    /// is set to.
+    Held,
+    /// And the engine turns on the firmware's torque, against the idling car's load.
+    Turning,
 }
 
 /// Who put a frame on the bus.
@@ -92,6 +108,10 @@ pub struct Snapshot {
     pub sci: [(usize, usize); 5],
     /// The engine as set: speed and sensors.
     pub engine: Engine,
+    /// The plants around the ECU.
+    pub plant_mode: PlantMode,
+    /// What they gave last, if they are on.
+    pub plant: Option<State>,
 }
 
 /// The simulated engine's settings: what drives the ECU's inputs.
@@ -124,6 +144,14 @@ impl Engine {
     }
 }
 
+/// The idling car's load beyond the friction the firmware models, N·m (see `sh705x plant`).
+const IDLE_LOAD: f64 = 12.0;
+/// The plants' step, CPU cycles: a millisecond.
+const PLANT_CYCLES: u64 = 1000 * CYCLES_PER_US;
+/// ECU time the crankshaft is held at its speed after power-on, cycles: half a second, the
+/// command line's default boot.
+const BOOT_CYCLES: u64 = 500_000 * CYCLES_PER_US;
+
 /// Frames kept for the CAN view.
 const CAN_KEPT: usize = 400;
 /// Bytes in the memory window.
@@ -144,6 +172,10 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
     // Real-time factor over the last second.
     let (mut rt_cycle, mut rt_wall, mut rt_factor) = (m.cpu.cycles, Instant::now(), 0.0);
     let mut published = Instant::now() - Duration::from_secs(1);
+    let mut plant_mode = PlantMode::Off;
+    let mut plants: Option<Plants> = None;
+    let mut plant: Option<State> = None;
+    let mut plant_cycle = m.cpu.cycles;
     loop {
         // Orders: wait for one while paused, take what is there while running.
         let first = if running {
@@ -161,6 +193,7 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
                 Cmd::Run => {
                     running = true;
                     stop = None;
+                    plant_cycle = m.cpu.cycles;
                     (pace_cycle, pace_wall) = (m.cpu.cycles, Instant::now());
                 }
                 Cmd::Pause => running = false,
@@ -178,6 +211,39 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
                 Cmd::Rpm(r) => {
                     engine.rpm = r.max(0.0);
                     engine.apply(&mut m);
+                    if let Some(p) = plants.as_mut() {
+                        p.rpm = engine.rpm;
+                        if let Some(c) = p.crank.as_mut() {
+                            c.rpm = engine.rpm;
+                        }
+                    }
+                }
+                Cmd::Plants(mode) => {
+                    plant_mode = mode;
+                    let get = |k: &str| {
+                        engine
+                            .sensors
+                            .values
+                            .iter()
+                            .find(|(x, _)| *x == k)
+                            .map(|&(_, v)| v)
+                    };
+                    let (rest, intake) =
+                        (get("boost").unwrap_or(98.0), get("intake2").unwrap_or(26.0));
+                    plants = match mode {
+                        PlantMode::Off => None,
+                        PlantMode::Held => Some(Plants::new(ASTRA, engine.rpm, None, rest, intake)),
+                        PlantMode::Turning => {
+                            let mut c = Crank::new(engine.rpm);
+                            c.load = IDLE_LOAD;
+                            Some(Plants::new(ASTRA, engine.rpm, Some(c), rest, intake))
+                        }
+                    };
+                    plant = None;
+                    plant_cycle = m.cpu.cycles;
+                    if plants.is_none() {
+                        engine.apply(&mut m);
+                    }
                 }
                 Cmd::Preset(idle) => {
                     engine = if idle {
@@ -211,6 +277,8 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
                         }
                     }
                     (pace_cycle, pace_wall) = (m.cpu.cycles, Instant::now());
+                    // The plants did not follow the exchange: pick up from here.
+                    plant_cycle = m.cpu.cycles;
                 }
                 Cmd::Quit => return,
             }
@@ -228,6 +296,18 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
                 if s != Stop::Count {
                     running = false;
                     stop = Some(s);
+                }
+                if let Some(p) = plants.as_mut() {
+                    // A step a millisecond at most, as on the command line.
+                    if m.cpu.cycles - plant_cycle >= PLANT_CYCLES {
+                        let dt = (m.cpu.cycles - plant_cycle) as f64 / (CYCLES_PER_US as f64 * 1e6);
+                        // The crankshaft turns once the firmware has booted (see sh705x rig).
+                        p.held = m.cpu.cycles < BOOT_CYCLES;
+                        let st = p.step(&mut m, dt);
+                        engine.rpm = st.rpm;
+                        plant = Some(st);
+                        plant_cycle = m.cpu.cycles;
+                    }
                 }
             }
         }
@@ -282,6 +362,8 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
                     (c.sent.len(), c.received.len())
                 }),
                 engine: engine.clone(),
+                plant_mode,
+                plant,
             };
             *shared.lock().expect("snapshot lock") = snap;
             published = Instant::now();
@@ -338,5 +420,7 @@ pub fn first_snapshot(m: &Machine, engine: &Engine) -> Snapshot {
         console: Vec::new(),
         sci: [(0, 0); 5],
         engine: engine.clone(),
+        plant_mode: PlantMode::Off,
+        plant: None,
     }
 }

@@ -38,11 +38,11 @@ pub const IDLE_LOAD: f64 = 12.0;
 /// by searching the RAM for the diagnostic value and following it over speeds [MED]. In
 /// the Astra's software (calibration NCLSW420AX36); another software may keep it
 /// elsewhere, which the check against 0x1A2D at the start catches.
-pub const TORQUE_AT: u32 = 0xFFFE_FC4C;
+pub const TORQUE_AT: u32 = engine::plants::ASTRA.torque_at;
 /// Where it keeps the fuel quantity it asks for, mm³ a stroke: the float that the
 /// rail-pressure maps take as their quantity input, and that follows the idle governor
 /// over speeds (34 at 600 rpm, 12.5 at 780, -10 from 800 with the engine held) [MED].
-pub const QUANTITY_AT: u32 = 0xFFFE_F8F4;
+pub const QUANTITY_AT: u32 = engine::plants::ASTRA.quantity_at;
 /// Where it keeps the idle speed it aims at, rpm: the largest of the requests it weighs
 /// (coolant, limp modes...), found as the float that follows the idle when the engine
 /// is held at one speed [MED].

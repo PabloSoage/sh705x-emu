@@ -100,7 +100,7 @@ second, which makes it a reference oracle rather than an emulator.
 | `crates/engine` | The simulated engine: crank and cam wheels, sensors with the firmware's A/D curves, the MAF, periodic frames of other CAN nodes |
 | `crates/bridge` | The CAN bus as a diagnostic tool sees it, in virtual or real time; ISO-TP; an ELM327; a TCP server; an emulated Scanmatik SM3 |
 | `crates/sh705x` | Command-line front end |
-| `crates/gui` | `sh705x-gui`: registers, code with breakpoints, memory, CAN, interrupts, the engine (speed and sensors in physical units) and an ELM327 console, live (egui) |
+| `crates/gui` | `sh705x-gui`: registers, code with breakpoints, memory, CAN, interrupts, the engine (speed, sensors in physical units, and the plants) and an ELM327 console, live (egui) |
 | `tools/bench.py` | Interleaved speed comparison of builds |
 | `tools/gen_curves.py` | Generates `crates/engine/src/curves.rs` from a sweep of the A/D inputs |
 | `tools/ghidra/EmuBoot.py` | Phase 0: runs a raw flash image from its reset vector in Ghidra's p-code emulator, logs every I/O access and resolves status-bit polls automatically |
@@ -143,6 +143,10 @@ To watch it run:
 ```sh
 cargo run --release -p gui -- --flash <flash.bin> --eeprom <eeprom.bin>
 ```
+
+In the engine panel, "Plants" puts the plants around the ECU: "Held" closes the SCV,
+EGR, fresh air and turbocharger loops at the speed set there; "On its torque" also lets
+the engine turn on the firmware's torque, as `sh705x plant` does.
 
 All of them turn the ignition input on (`--adc 14:600`); without it the firmware stays
 silent on CAN. Frames from the tool reach the ECU after their time on a 500 kbit/s bus,

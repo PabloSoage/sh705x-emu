@@ -1,7 +1,7 @@
 //! The window: controls, registers, code around the PC, memory, CAN, interrupts, the
 //! A/D inputs as sliders, and an ELM327 console.
 
-use crate::emu::{Cmd, MEM_WINDOW, Origin, Snapshot};
+use crate::emu::{Cmd, MEM_WINDOW, Origin, PlantMode, Snapshot};
 use eframe::egui::{self, Color32, RichText};
 use sh2e::disasm;
 use std::sync::mpsc::Sender;
@@ -206,6 +206,46 @@ impl App {
                         self.send(Cmd::Rpm(rpm));
                     }
                 });
+                ui.label("Plants around the ECU:");
+                ui.horizontal(|ui| {
+                    for (mode, name, tip) in [
+                        (PlantMode::Off, "Off", "The inputs are what the sensors are set to"),
+                        (
+                            PlantMode::Held,
+                            "Held",
+                            "SCV, EGR, fresh air and turbo close their loops; the speed is set here",
+                        ),
+                        (
+                            PlantMode::Turning,
+                            "On its torque",
+                            "And the engine turns on the firmware's torque against the idling car's load",
+                        ),
+                    ] {
+                        if ui
+                            .selectable_label(s.plant_mode == mode, name)
+                            .on_hover_text(tip)
+                            .clicked()
+                            && s.plant_mode != mode
+                        {
+                            self.send(Cmd::Plants(mode));
+                        }
+                    }
+                });
+                if let Some(p) = &s.plant {
+                    ui.monospace(format!(
+                        "torque {:7.1} N·m   fuel asked {:6.2} mm3\n\
+                         boost  {:7.1} kPa   VGT  {:5.1} %\n\
+                         EGR    {:7.1} %     air  {:6.2} g/s\n\
+                         SCV    {:7.0} mA",
+                        p.torque,
+                        p.quantity,
+                        p.boost,
+                        p.vgt_duty.unwrap_or(0.0) * 100.0,
+                        p.egr,
+                        p.maf,
+                        p.scv_ma
+                    ));
+                }
                 ui.label("Sensors as the ECU reports them:");
                 for &(key, value) in &s.engine.sensors.values {
                     let mut v = value;
@@ -516,6 +556,7 @@ mod tests {
             frame: sh7059::hcan::Frame::standard(0x7E8, &[2, 0x41, 0]),
         });
         snap.interrupts = vec![(192, 3)];
+        snap.plant = Some(engine::plants::State::default());
         let shared = Arc::new(Mutex::new(snap));
         let (tx, rx) = mpsc::channel();
         let mut app = App::new(shared, tx, Arc::new(img));
@@ -532,5 +573,63 @@ mod tests {
         app.code_at = ROM_SIZE as u32 - 4;
         frame(&ctx, &mut app);
         assert!(rx.try_recv().is_err(), "drawing alone sends no order");
+    }
+
+    #[test]
+    fn on_its_torque_the_engine_idles() {
+        let Ok(path) = std::env::var("SH705X_FLASH") else {
+            eprintln!("SH705X_FLASH not set: skipped");
+            return;
+        };
+        use sh7059::pins::{Merge, Pin, SquareWave};
+        let img = std::fs::read(path).unwrap();
+        let mut chip = Sh7059::new(&img).unwrap();
+        board::wire_status(&mut chip);
+        chip.adc.input[14] = crate::IGNITION_ON;
+        chip.set_stimulus(Box::new(Merge(vec![
+            Box::new(engine::wheel::Wheels::new(0.0, 0)),
+            Box::new(SquareWave::new(
+                Pin::Ti0(2),
+                engine::sensors::MAF_KEY,
+                0.0,
+                engine::wheel::CYCLES_PER_S,
+                0,
+            )),
+        ])));
+        chip.set_can_source(Box::new(engine::bus::abs()));
+        let m = Machine::new(chip, true);
+        let engine = emu::Engine::ignition_on();
+        let shared = Arc::new(Mutex::new(emu::first_snapshot(&m, &engine)));
+        let (tx, rx) = mpsc::channel();
+        let s2 = shared.clone();
+        let t = std::thread::spawn(move || emu::run(m, engine, rx, s2));
+        for c in [
+            Cmd::Preset(true),
+            Cmd::Plants(emu::PlantMode::Turning),
+            Cmd::RealTime(false),
+            Cmd::Run,
+        ] {
+            tx.send(c).unwrap();
+        }
+        // Six seconds of ECU time: the idle governor has settled on the simulated engine.
+        let t0 = Instant::now();
+        let s = loop {
+            let s = shared.lock().unwrap().clone();
+            if s.cpu.cycles > 6 * 80_000_000 {
+                break s;
+            }
+            assert!(
+                t0.elapsed() < Duration::from_secs(120),
+                "slow: {} M cycles",
+                s.cpu.cycles / 1_000_000
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        eprintln!("6 s of ECU time in {:?}", t0.elapsed());
+        let p = s.plant.expect("the plants run");
+        assert!((p.rpm - 750.0).abs() < 15.0, "{p:?}");
+        assert!((p.torque - 12.0).abs() < 3.0, "{p:?}");
+        tx.send(Cmd::Quit).unwrap();
+        t.join().unwrap();
     }
 }

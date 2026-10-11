@@ -12,6 +12,7 @@ pub mod air;
 pub mod bus;
 pub mod crank;
 pub mod curves;
+pub mod plants;
 pub mod sensors;
 pub mod turbo;
 pub mod wheel;

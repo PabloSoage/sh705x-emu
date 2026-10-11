@@ -5,6 +5,8 @@ mod actuators;
 mod maps;
 mod plant;
 mod rig;
+
+pub(crate) use engine::plants::f32_at;
 mod touched;
 
 pub use actuators::ActuatorsOptions;
@@ -895,12 +897,6 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
         writeln!(o, "register accesses {} -> {}", t.len(), path.display()).unwrap();
     }
     Ok(o)
-}
-
-/// A big-endian float in the chip's memory.
-pub(crate) fn f32_at(m: &Machine, addr: u32) -> f64 {
-    let bits = (0..4).fold(0u32, |v, k| v << 8 | m.chip.peek(addr + k) as u32);
-    f32::from_bits(bits) as f64
 }
 
 /// The sensors `o` describes; `--adc` and `--maf-hz` go on top of these.
