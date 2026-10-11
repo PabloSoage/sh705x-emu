@@ -333,3 +333,22 @@ usual image formats.
 
 This project is for understanding and testing ECUs. It is not a tool for disabling
 emission control systems.
+
+## License
+
+Copyright (C) 2026 Pablo Soage Rodas
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <https://www.gnu.org/licenses/>.
+
+**The license covers this repository's own code only.** It does not and cannot
+cover any ECU firmware image you run on it.
