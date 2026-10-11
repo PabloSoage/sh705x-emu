@@ -36,6 +36,10 @@ pub struct App {
     view: crate::view::Settings,
     /// Asked to power off and go back to the load screen.
     pub back: bool,
+    /// The maps window is open (and the maps traced).
+    maps_view: bool,
+    /// What it shows.
+    maps: crate::mapview::MapView,
 }
 
 impl App {
@@ -56,6 +60,8 @@ impl App {
             engine_view: false,
             view: Default::default(),
             back: false,
+            maps_view: false,
+            maps: Default::default(),
         }
     }
 
@@ -147,6 +153,13 @@ impl App {
                 }
                 ui.toggle_value(&mut self.engine_view, "Engine view")
                     .on_hover_text("The wheels, the cylinders and the history of what the firmware asks for and gets");
+                if ui
+                    .toggle_value(&mut self.maps_view, "Maps")
+                    .on_hover_text("The calibration maps the firmware reads, as it reads them")
+                    .changed()
+                {
+                    self.send(Cmd::TraceMaps(self.maps_view));
+                }
                 let mut rt = s.real_time;
                 if ui.checkbox(&mut rt, "Real time").changed() {
                     self.send(Cmd::RealTime(rt));
@@ -190,6 +203,43 @@ impl App {
                     crate::view::show(ui, &scope, &mut self.view, now_us);
                 });
             self.engine_view = open;
+        }
+
+        if self.maps_view {
+            let mut open = true;
+            let mut actions = Vec::new();
+            egui::Window::new("Maps")
+                .open(&mut open)
+                .default_size([1150.0, 720.0])
+                .default_pos([160.0, 40.0])
+                .show(root.ctx(), |ui| match &s.maps {
+                    Some(t) => {
+                        let t = t.lock().expect("map trace lock");
+                        actions = crate::mapview::show(ui, &t, &mut self.maps, s.map_break);
+                    }
+                    None => {
+                        ui.label("Finding the interpolation routines in the flash…");
+                    }
+                });
+            for a in actions {
+                match a {
+                    crate::mapview::Action::GoTo(at) => {
+                        self.follow = false;
+                        self.code_at = at & !1;
+                        self.code_text = format!("{at:08X}");
+                    }
+                    crate::mapview::Action::Break(d) => {
+                        self.send(Cmd::BreakOnMap(d));
+                        if d.is_some() {
+                            self.send(Cmd::Run);
+                        }
+                    }
+                }
+            }
+            if !open {
+                self.maps_view = false;
+                self.send(Cmd::TraceMaps(false));
+            }
         }
 
         egui::Panel::left("registers").show(root, |ui| {
@@ -823,6 +873,52 @@ mod tests {
     /// plants, an OBD exchange on the console, its CAN traffic and the torque in RAM.
     /// `cargo test -p gui --release -- --ignored screenshots` with `SH705X_FLASH` set
     /// and no EEPROM (no VIN in the pictures).
+    /// Idling, with the maps traced and the boost target (0x9DADC) among them.
+    fn tracing_maps() -> Option<(App, std::thread::JoinHandle<()>)> {
+        let (app, t) = idling(2)?;
+        app.send(Cmd::TraceMaps(true));
+        wait_for(&app.shared, |s| {
+            s.maps.as_ref().is_some_and(|m| {
+                let m = m.lock().unwrap();
+                m.seen.len() > 300 && m.seen.contains_key(&0x9DADC)
+            })
+        });
+        Some((app, t))
+    }
+
+    #[test]
+    fn the_maps_window_draws_every_view() {
+        let Some((mut app, t)) = tracing_maps() else {
+            return;
+        };
+        app.maps_view = true;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+        // A map in each view, and a curve.
+        let curve = {
+            let s = h.state().shared.lock().unwrap();
+            let m = s.maps.as_ref().unwrap().lock().unwrap();
+            *m.seen
+                .iter()
+                .find(|(_, s)| s.map.as_ref().is_some_and(|m| m.dims() == 2))
+                .unwrap()
+                .0
+        };
+        for (desc, mode) in [
+            (0x9DADC, crate::mapview::Mode::Heat),
+            (0x9DADC, crate::mapview::Mode::Surface),
+            (0x9DADC, crate::mapview::Mode::Table),
+            (curve, crate::mapview::Mode::Heat),
+        ] {
+            h.state_mut().maps.selected = Some(desc);
+            h.state_mut().maps.mode = mode;
+            h.run_steps(2);
+        }
+        h.state().send(Cmd::Quit);
+        t.join().unwrap();
+    }
+
     #[test]
     #[ignore = "writes docs/img; needs SH705X_FLASH and a GPU or WARP"]
     fn screenshots() {
@@ -883,6 +979,27 @@ mod tests {
         let path = dir.join("gui-step.png");
         h.render().unwrap().save(&path).unwrap();
         eprintln!("{}", path.display());
+        h.state().send(Cmd::Quit);
+        t.join().unwrap();
+        // The maps window, on the boost target, while idling: as a heat map and a surface.
+        let Some((mut app, t)) = tracing_maps() else {
+            return;
+        };
+        app.maps_view = true;
+        app.maps.selected = Some(0x9DADC);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+        for (mode, name) in [
+            (crate::mapview::Mode::Heat, "gui-maps.png"),
+            (crate::mapview::Mode::Surface, "gui-maps-surface.png"),
+        ] {
+            h.state_mut().maps.mode = mode;
+            h.run_steps(3);
+            let path = dir.join(name);
+            h.render().unwrap().save(&path).unwrap();
+            eprintln!("{}", path.display());
+        }
         h.state().send(Cmd::Quit);
         t.join().unwrap();
     }

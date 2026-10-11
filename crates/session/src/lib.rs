@@ -11,8 +11,10 @@ use bridge::link::CYCLES_PER_US;
 use engine::crank::Crank;
 use engine::plants::{ASTRA, Plants, State};
 use engine::sensors::{MAF_KEY, Sensors};
+use maps::{MapTrace, Masters};
 use sh7059::pins::{Merge, Pin, SquareWave};
 use sh7059::{Machine, Sh7059, Stop};
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// AN14 code that turns the ignition on (see `sh705x` IGNITION_ON).
 pub const IGNITION_ON: u16 = 600;
@@ -137,6 +139,46 @@ pub struct Session {
     plants: Option<Plants>,
     /// Cycle of the plants' last step.
     plant_cycle: u64,
+    /// The maps the firmware reads, while they are traced.
+    pub maps: Option<Arc<Mutex<MapTrace>>>,
+    /// The breakpoints asked for (the machine's may add the masters, for `map_break`).
+    breakpoints: Vec<u32>,
+    /// Stop at the next lookup of this map (its descriptor).
+    map_break: Option<u32>,
+}
+
+/// Passes the masters' breakpoints set for a map break when another map is looked up.
+struct MapBreak {
+    /// The map stopped for.
+    want: u32,
+    /// The masters.
+    entries: Vec<u32>,
+    /// The breakpoints asked for, which always stop.
+    user: Vec<u32>,
+}
+
+impl MapBreak {
+    /// Whether a stop at a breakpoint should go on: at a master, for another map.
+    fn passes(&self, m: &Machine) -> bool {
+        let pc = m.cpu.pc;
+        self.entries.contains(&pc) && !self.user.contains(&pc) && m.cpu.r[4] != self.want
+    }
+}
+
+/// `m.run_until(n)`, going on past the stops `skip` passes.
+fn run_past(m: &mut Machine, n: u64, skip: Option<&MapBreak>) -> Stop {
+    let end = m.cpu.instructions + n;
+    loop {
+        let left = end.saturating_sub(m.cpu.instructions);
+        if left == 0 {
+            return Stop::Count;
+        }
+        let s = m.run_until(left);
+        if s == Stop::Breakpoint && skip.is_some_and(|k| k.passes(m)) {
+            continue;
+        }
+        return s;
+    }
 }
 
 impl Session {
@@ -151,7 +193,88 @@ impl Session {
             plant: None,
             plants: None,
             plant_cycle,
+            maps: None,
+            breakpoints: Vec::new(),
+            map_break: None,
         }
+    }
+
+    /// Starts tracing the maps the firmware reads (its interpolation routines found in its
+    /// flash), or stops.
+    pub fn trace_maps(&mut self, on: bool) {
+        if on && self.maps.is_none() {
+            let chip = &self.m.chip;
+            let flash: Vec<u8> = (0..sh7059::ROM_SIZE as u32).map(|a| chip.peek(a)).collect();
+            let t = MapTrace::attach(&mut self.m, maps::find_masters(&flash));
+            self.maps = Some(Arc::new(Mutex::new(t)));
+        } else if !on {
+            self.m.probes = None;
+            self.maps = None;
+            self.map_break = None;
+            self.apply_breakpoints();
+        }
+    }
+
+    /// The masters being traced.
+    pub fn masters(&self) -> Masters {
+        self.maps.as_ref().map_or_else(Masters::default, |t| {
+            t.lock().unwrap_or_else(PoisonError::into_inner).masters
+        })
+    }
+
+    /// Replaces the PC breakpoints.
+    pub fn set_breakpoints(&mut self, b: Vec<u32>) {
+        self.breakpoints = b;
+        self.apply_breakpoints();
+    }
+
+    /// Stops at the next lookup of the map whose descriptor is `desc` (with the maps
+    /// traced), or no longer.
+    pub fn break_on_map(&mut self, desc: Option<u32>) {
+        self.map_break = desc.filter(|_| self.maps.is_some());
+        self.apply_breakpoints();
+    }
+
+    /// The map stopped for, if a map break is set.
+    pub fn map_break(&self) -> Option<u32> {
+        self.map_break
+    }
+
+    /// The machine's breakpoints: those asked for, and the masters for a map break.
+    fn apply_breakpoints(&mut self) {
+        let mut b = self.breakpoints.clone();
+        if self.map_break.is_some() {
+            let m = self.masters();
+            b.extend([m.d3, m.d2].into_iter().flatten());
+        }
+        self.m.breakpoints = b;
+    }
+
+    /// What a map break passes, if one is set.
+    fn skip(&self) -> Option<MapBreak> {
+        let m = self.masters();
+        self.map_break.map(|want| MapBreak {
+            want,
+            entries: [m.d3, m.d2].into_iter().flatten().collect(),
+            user: self.breakpoints.clone(),
+        })
+    }
+
+    /// Takes the lookups made since the last time into the trace.
+    fn take_maps(&mut self) {
+        if let Some(t) = &self.maps {
+            t.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(&mut self.m);
+        }
+    }
+
+    /// Executes `n` instructions (breakpoints still stop it), without the plants.
+    pub fn step(&mut self, n: u64) -> Stop {
+        let skip = self.skip();
+        let s = run_past(&mut self.m, n, skip.as_ref());
+        self.take_maps();
+        s
     }
 
     /// Sets the engine speed, rpm (0 stops it); with the engine turning on its torque,
@@ -215,7 +338,9 @@ impl Session {
     /// Runs `cycles` (breakpoints still stop it), then steps the plants if a millisecond
     /// of ECU time has gone by since their last step.
     pub fn run(&mut self, cycles: u64) -> Stop {
-        let s = self.m.run_until(cycles);
+        let skip = self.skip();
+        let s = run_past(&mut self.m, cycles, skip.as_ref());
+        self.take_maps();
         if let Some(p) = self.plants.as_mut()
             && self.m.cpu.cycles - self.plant_cycle >= PLANT_CYCLES
         {
@@ -233,29 +358,33 @@ impl Session {
     /// Runs until the next edge on the input pins (crank, cam or MAF) has reached the
     /// chip, or a breakpoint; `None` if no edge is coming.
     pub fn next_edge(&mut self) -> Option<Stop> {
+        let skip = self.skip();
         let m = &mut self.m;
-        m.chip.next_edge().map(|e| {
+        let r = m.chip.next_edge().map(|e| {
             let mut s = Stop::Count;
             for _ in 0..STEP_LIMIT {
                 if s != Stop::Count || m.chip.next_edge().is_none_or(|n| n.at > e.at) {
                     break;
                 }
-                s = m.run_until(1);
+                s = run_past(m, 1, skip.as_ref());
             }
             s
-        })
+        });
+        self.take_maps();
+        r
     }
 
     /// Runs until the crankshaft has turned to the next tooth position (6°) and its edge
     /// has reached the chip, or a breakpoint; `None` with the engine stopped.
     pub fn next_tooth(&mut self) -> Option<Stop> {
+        let skip = self.skip();
         let m = &mut self.m;
         let pitch = |m: &Machine| {
             m.chip
                 .crank_angle(m.cpu.cycles)
                 .map(|a| (a / 6.0).floor() as u32)
         };
-        pitch(m).map(|start| {
+        let r = pitch(m).map(|start| {
             let mut s = Stop::Count;
             for _ in 0..STEP_LIMIT {
                 let turned = pitch(m).is_some_and(|p| p != start);
@@ -263,10 +392,12 @@ impl Session {
                 if s != Stop::Count || (turned && !due) {
                     break;
                 }
-                s = m.run_until(1);
+                s = run_past(m, 1, skip.as_ref());
             }
             s
-        })
+        });
+        self.take_maps();
+        r
     }
 
     /// Adds the moment to `scope` (every moment with `stepping`, else at its pace).

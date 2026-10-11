@@ -554,6 +554,31 @@ mod tests {
         assert!(bad * 100 <= calls, "{bad} of {calls}");
         assert_eq!(t.dropped, 0);
     }
+
+    #[test]
+    fn a_map_break_stops_at_that_map_and_passes_the_others() {
+        let Some(f) = flash() else { return };
+        let mut m = crate::machine(&f, None, board::DEFAULT_LAYOUT).unwrap();
+        let engine = crate::Engine::idle();
+        engine.apply(&mut m);
+        let mut s = crate::Session::new(m, engine);
+        s.trace_maps(true);
+        s.run(8_000_000);
+        // The boost target (resultados fase 7): read, but not on every lookup.
+        let want = 0x0009_DADC;
+        let t = s.maps.clone().unwrap();
+        assert!(t.lock().unwrap().seen.contains_key(&want));
+        s.break_on_map(Some(want));
+        let stop = s.run(80_000_000);
+        assert_eq!(stop, sh7059::Stop::Breakpoint);
+        assert_eq!(s.m.cpu.r[4], want);
+        assert_eq!(Some(s.m.cpu.pc), s.masters().d3);
+        // Going on, the lookup it stopped at is traced.
+        let before = t.lock().unwrap().seen[&want].calls;
+        s.break_on_map(None);
+        s.run(1_000);
+        assert!(t.lock().unwrap().seen[&want].calls > before);
+    }
 }
 
 #[cfg(test)]

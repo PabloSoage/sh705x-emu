@@ -51,6 +51,10 @@ pub enum Cmd {
     Elm(String),
     /// Put the plants around the ECU, or take them away.
     Plants(PlantMode),
+    /// Trace the maps the firmware reads, or stop.
+    TraceMaps(bool),
+    /// Stop at the next lookup of this map (its descriptor), or no longer.
+    BreakOnMap(Option<u32>),
     /// End the thread.
     Quit,
 }
@@ -118,6 +122,10 @@ pub struct Snapshot {
     pub plant: Option<State>,
     /// The history the engine view draws (the same one in every snapshot).
     pub scope: Arc<Mutex<Scope>>,
+    /// The maps the firmware reads, while they are traced.
+    pub maps: Option<Arc<Mutex<session::maps::MapTrace>>>,
+    /// The map a map break waits for.
+    pub map_break: Option<u32>,
 }
 
 /// Frames kept for the CAN view.
@@ -166,9 +174,11 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
                 Cmd::Pause => running = false,
                 Cmd::Step(n) => {
                     running = false;
-                    stop = Some(ecu.m.run_until(n));
+                    stop = Some(ecu.step(n));
                 }
-                Cmd::Breakpoints(b) => ecu.m.breakpoints = b,
+                Cmd::Breakpoints(b) => ecu.set_breakpoints(b),
+                Cmd::TraceMaps(on) => ecu.trace_maps(on),
+                Cmd::BreakOnMap(d) => ecu.break_on_map(d),
                 Cmd::Adc(c, v) => ecu.m.chip.adc.input[c] = v,
                 Cmd::Sensor(k, v) => {
                     let _ = ecu.set_sensor(k, v);
@@ -298,6 +308,8 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
                 plant_mode: ecu.plant_mode,
                 plant: ecu.plant,
                 scope: scope.clone(),
+                maps: ecu.maps.clone(),
+                map_break: ecu.map_break(),
             };
             *shared.lock().expect("snapshot lock") = snap;
             published = Instant::now();
@@ -360,5 +372,7 @@ pub fn first_snapshot(m: &Machine, engine: &Engine) -> Snapshot {
         plant_mode: PlantMode::Off,
         plant: None,
         scope: Arc::default(),
+        maps: None,
+        map_break: None,
     }
 }

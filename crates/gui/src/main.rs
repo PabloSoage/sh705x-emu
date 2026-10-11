@@ -16,6 +16,7 @@
 mod app;
 mod emu;
 mod load;
+mod mapview;
 mod view;
 
 use std::sync::mpsc::{self, Sender};
