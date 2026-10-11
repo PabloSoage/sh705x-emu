@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SH705x emulator</string>
+
+    <string name="load_intro">Runs an SH705x ECU\'s own firmware on the phone, on a simulated engine. Pick the ECU\'s flash dump (1.5 MB) and, if you have it, its EEPROM dump (8 KB).</string>
+    <string name="pick_flash">Flash dump…</string>
+    <string name="pick_eeprom">EEPROM dump (optional)…</string>
+    <string name="picked">%1$s (%2$d bytes)</string>
+    <string name="power_on">Power on</string>
+    <string name="no_firmware">No firmware comes with the app: the dumps are read from your storage into memory and never copied or sent anywhere.</string>
+
+    <string name="status">%1$.3f s of ECU time · %2$.0f rpm · ×%3$.2f real time</string>
+    <string name="stopped_by">Stopped: %1$s</string>
+    <string name="run">Run</string>
+    <string name="pause">Pause</string>
+    <string name="next_tooth">Next tooth</string>
+    <string name="next_edge">Next edge</string>
+    <string name="idle_on_torque">Idle on its torque</string>
+    <string name="power_off">Power off</string>
+    <string name="speed">Speed</string>
+    <string name="real_time">Real time</string>
+    <string name="plants">Plants</string>
+    <string name="plants_off">Off</string>
+    <string name="plants_held">Held</string>
+    <string name="plants_turning">On its torque</string>
+    <string name="engine_speed">Engine speed: %1$.0f rpm</string>
+    <string name="pedal">Pedal: %1$.0f %%</string>
+
+    <string name="wheel_stopped">stopped</string>
+    <string name="wheel_tooth">tooth %1$d</string>
+    <string name="wheel_gap">gap</string>
+    <string name="phase_assumed">Crank 60-4 and cam under their sensors (red). The cylinders\' phase to the crank is assumed (cylinder 1 at 0°, firing 1-3-4-2): where its top dead centre falls relative to the gap is not known.</string>
+
+    <string name="window">Window</string>
+    <string name="signals">Crank and cam signals; one-shot pulses of channel 8</string>
+    <string name="crank">crank</string>
+    <string name="cam">cam</string>
+    <string name="injector">inj %1$d</string>
+    <string name="no_injection">The injectors (TO8I–L) never pulse here: the ECU does not inject while the immobilizer, whose other side is not emulated, keeps it shut. The rail pressure shown is the sensor as set, not a combustion.</string>
+
+    <string-array name="strokes">
+        <item>power</item>
+        <item>exhaust</item>
+        <item>intake</item>
+        <item>compr.</item>
+    </string-array>
+
+    <!-- In session::scope::TRACES order. -->
+    <string-array name="trace_names">
+        <item>engine speed</item>
+        <item>EGR asked</item>
+        <item>EGR position</item>
+        <item>EGR drive</item>
+        <item>boost asked</item>
+        <item>boost</item>
+        <item>VGT command</item>
+        <item>SCV current asked</item>
+        <item>SCV current</item>
+        <item>SCV command</item>
+        <item>rail asked</item>
+        <item>rail (sensor)</item>
+        <item>fresh air</item>
+        <item>fuel asked</item>
+        <item>torque asked</item>
+    </string-array>
+
+    <string-array name="panels">
+        <item>Engine speed (rpm)</item>
+        <item>EGR (%)</item>
+        <item>Boost (kPa)</item>
+        <item>VGT and SCV commands (%)</item>
+        <item>SCV current (mA)</item>
+        <item>Rail pressure (MPa)</item>
+        <item>Fresh air (g/s)</item>
+        <item>Fuel asked (mm³)</item>
+        <item>Torque asked (N·m)</item>
+    </string-array>
+</resources>

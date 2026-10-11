@@ -9,15 +9,9 @@
 
 mod app;
 mod emu;
-mod scope;
 mod view;
 
-use sh7059::pins::{Merge, Pin, SquareWave};
-use sh7059::{Machine, Sh7059};
 use std::sync::{Arc, Mutex, mpsc};
-
-/// AN14 code that turns the ignition on (see `sh705x` IGNITION_ON).
-const IGNITION_ON: u16 = 600;
 
 fn main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -49,17 +43,11 @@ fn main() -> Result<(), String> {
     }
     let flash = flash.ok_or("usage: sh705x-gui --flash <flash.bin> [--eeprom <eeprom.bin>]")?;
     let image = std::fs::read(&flash).map_err(|e| format!("{flash}: {e}"))?;
-    let mut chip = Sh7059::new(&image).map_err(|e| format!("{flash}: {e}"))?;
-    if let Some(path) = eeprom {
-        let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
-        let e = board::Eeprom::new(&bytes).map_err(|e| format!("{path}: {e}"))?;
-        if e.len() != 4 * board::CHIP_BYTES {
-            return Err(format!("{path}: the board has four 93C86, 8192 bytes"));
-        }
-        board::wire_eeproms(&mut chip, &e, layout);
-    }
-    wire(&mut chip);
-    let mut m = Machine::new(chip, true);
+    let eeprom = match eeprom {
+        Some(path) => Some(std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?),
+        None => None,
+    };
+    let mut m = session::machine(&image, eeprom.as_deref(), layout)?;
     let engine = emu::Engine::ignition_on();
     engine.apply(&mut m);
     let shared = Arc::new(Mutex::new(emu::first_snapshot(&m, &engine)));
@@ -82,22 +70,4 @@ fn main() -> Result<(), String> {
     let _ = tx.send(emu::Cmd::Quit);
     let _ = thread.join();
     r.map_err(|e| e.to_string())
-}
-
-/// The board and the car around the chip: status chips, ignition on, the crank and cam
-/// wheels (stopped) and the MAF, so both can be set while running, and the ABS on the bus.
-fn wire(chip: &mut Sh7059) {
-    board::wire_status(chip);
-    chip.adc.input[14] = IGNITION_ON;
-    chip.set_stimulus(Box::new(Merge(vec![
-        Box::new(engine::wheel::Wheels::new(0.0, 0)),
-        Box::new(SquareWave::new(
-            Pin::Ti0(2),
-            engine::sensors::MAF_KEY,
-            0.0,
-            engine::wheel::CYCLES_PER_S,
-            0,
-        )),
-    ])));
-    chip.set_can_source(Box::new(engine::bus::abs()));
 }

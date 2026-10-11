@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Emulador SH705x</string>
+
+    <string name="load_intro">Ejecuta en el móvil el propio firmware de una centralita SH705x, sobre un motor simulado. Elige el volcado de la flash (1,5 MB) y, si lo tienes, el de la EEPROM (8 KB).</string>
+    <string name="pick_flash">Volcado de la flash…</string>
+    <string name="pick_eeprom">Volcado de la EEPROM (opcional)…</string>
+    <string name="picked">%1$s (%2$d bytes)</string>
+    <string name="power_on">Encender</string>
+    <string name="no_firmware">La app no trae ningún firmware: los volcados se leen de tu almacenamiento a memoria y no se copian ni se envían a ningún sitio.</string>
+
+    <string name="status">%1$.3f s de tiempo de centralita · %2$.0f rpm · ×%3$.2f tiempo real</string>
+    <string name="stopped_by">Parada: %1$s</string>
+    <string name="run">Ejecutar</string>
+    <string name="pause">Pausa</string>
+    <string name="next_tooth">Siguiente diente</string>
+    <string name="next_edge">Siguiente flanco</string>
+    <string name="idle_on_torque">Ralentí con su par</string>
+    <string name="power_off">Apagar</string>
+    <string name="speed">Velocidad</string>
+    <string name="real_time">Tiempo real</string>
+    <string name="plants">Plantas</string>
+    <string name="plants_off">No</string>
+    <string name="plants_held">Fijo</string>
+    <string name="plants_turning">Con su par</string>
+    <string name="engine_speed">Régimen: %1$.0f rpm</string>
+    <string name="pedal">Pedal: %1$.0f %%</string>
+
+    <string name="wheel_stopped">parado</string>
+    <string name="wheel_tooth">diente %1$d</string>
+    <string name="wheel_gap">hueco</string>
+    <string name="phase_assumed">Cigüeñal 60-4 y levas bajo sus sensores (rojo). La fase de los cilindros respecto al cigüeñal es supuesta (cilindro 1 a 0°, encendido 1-3-4-2): no se sabe dónde cae su punto muerto superior respecto al hueco.</string>
+
+    <string name="window">Ventana</string>
+    <string name="signals">Señales de cigüeñal y levas; pulsos del canal 8</string>
+    <string name="crank">cigüeñal</string>
+    <string name="cam">levas</string>
+    <string name="injector">iny %1$d</string>
+    <string name="no_injection">Los inyectores (TO8I–L) no dan ningún pulso aquí: la centralita no inyecta mientras el inmovilizador, cuyo otro lado no se emula, la tiene cerrada. La presión de raíl que se ve es la del sensor tal como se pone, no la de una combustión.</string>
+
+    <string-array name="strokes">
+        <item>expansión</item>
+        <item>escape</item>
+        <item>admisión</item>
+        <item>compr.</item>
+    </string-array>
+
+    <string-array name="trace_names">
+        <item>régimen</item>
+        <item>EGR pedida</item>
+        <item>posición EGR</item>
+        <item>mando EGR</item>
+        <item>soplado pedido</item>
+        <item>soplado</item>
+        <item>mando VGT</item>
+        <item>corriente SCV pedida</item>
+        <item>corriente SCV</item>
+        <item>mando SCV</item>
+        <item>raíl pedido</item>
+        <item>raíl (sensor)</item>
+        <item>aire fresco</item>
+        <item>combustible pedido</item>
+        <item>par pedido</item>
+    </string-array>
+
+    <string-array name="panels">
+        <item>Régimen (rpm)</item>
+        <item>EGR (%)</item>
+        <item>Soplado (kPa)</item>
+        <item>Mandos de VGT y SCV (%)</item>
+        <item>Corriente de la SCV (mA)</item>
+        <item>Presión de raíl (MPa)</item>
+        <item>Aire fresco (g/s)</item>
+        <item>Combustible pedido (mm³)</item>
+        <item>Par pedido (N·m)</item>
+    </string-array>
+</resources>

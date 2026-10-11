@@ -1,0 +1,9 @@
+.gradle/
+.kotlin/
+build/
+local.properties
+.idea/
+*.apk
+# Built from crates/android by cargo-ndk at every build.
+app/src/main/jniLibs/
+app/release/

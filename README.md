@@ -81,6 +81,8 @@ second, which makes it a reference oracle rather than an emulator.
 - **Debugging:** memory watchpoints, PC breakpoints and single stepping in the core,
   and a disassembler; in the window, a step at a time, a crank tooth or an input edge at
   a time, and slow motion down to a thousandth of real time.
+- **On a phone:** an Android app (Kotlin, Compose) runs the same core and draws the
+  engine view: the Astra's flash idles on its own torque there as on the desktop.
 - **Checked against the car:** the 204 answers of a diagnostic sweep of the car's engine
   and its 27 GMLAN identifiers come back with the same shape; 108 are the same byte for
   byte, the rest are live values, injection, the immobilizer, or counters the EEPROM
@@ -115,7 +117,10 @@ second, which makes it a reference oracle rather than an emulator.
 | `crates/engine` | The simulated engine: crank and cam wheels, sensors with the firmware's A/D curves, the MAF, periodic frames of other CAN nodes |
 | `crates/bridge` | The CAN bus as a diagnostic tool sees it, in virtual or real time; ISO-TP; an ELM327; a TCP server; an emulated Scanmatik SM3 |
 | `crates/sh705x` | Command-line front end |
+| `crates/session` | The ECU as an interactive front end drives it: wired into its car, the plants around it, run a slice, a tooth or an edge at a time, and the history the engine view draws |
 | `crates/gui` | `sh705x-gui`: registers, code with breakpoints, memory, CAN, interrupts, the engine (speed, sensors in physical units, and the plants) and an ELM327 console, live (egui) |
+| `crates/android` | The Android app's native side: the ECU on its own thread behind a JNI bridge (`libsh705x_jni.so`) |
+| `android/` | The Android app: Kotlin and Compose, the engine view on a phone |
 | `tools/bench.py` | Interleaved speed comparison of builds |
 | `tools/gen_curves.py` | Generates `crates/engine/src/curves.rs` from a sweep of the A/D inputs |
 | `tools/ghidra/EmuBoot.py` | Phase 0: runs a raw flash image from its reset vector in Ghidra's p-code emulator, logs every I/O access and resolves status-bit polls automatically |
@@ -227,6 +232,35 @@ sh705x bench --flash <flash.bin> --eeprom <eeprom.bin> --rpm 800
 `--sensors off` leaves every analog input at code 0 and `--peers none` takes the ABS
 off the bus.
 
+### On Android
+
+The engine view also runs on a phone: `android/` is an app in Kotlin and Compose over the
+same core, built into `libsh705x_jni.so` (`crates/android`) and driven as the window
+drives it, on a thread of its own. Pick the flash dump (and the EEPROM, if you have it)
+with the system's file picker; the app ships no firmware, asks for no permissions, and
+keeps the dumps in memory only. "Idle on its torque" sets the car's warm idle, puts the
+plants around the ECU and lets the engine turn on the firmware's torque; slow motion, "Next
+tooth" and "Next edge" work as in the window.
+
+| The engine | Its history |
+|---|---|
+| <img src="docs/img/app-engine.png" width="300" alt="The app idling: controls, the crank and cam wheels, the cylinders"> | <img src="docs/img/app-charts.png" width="300" alt="The app's charts: SCV current, rail, fresh air, fuel and torque asked, crank and cam signals"> |
+| The Astra's flash idling at 750 rpm on its own torque (Android emulator, x86_64). | SCV current on its setpoint, rail asked 24 MPa, 5.2 g/s of fresh air, 7.0 mm³ and 12 N·m asked; the crank signal with its gap and the cam's pulses. |
+
+Building it needs the Android SDK with NDK 29.0.14206865, JDK 21 (Gradle provisions
+Corretto 21 for Kotlin), [cargo-ndk](https://github.com/bbqsrc/cargo-ndk) and the two Rust
+targets; Gradle runs `cargo ndk` before it packs the native libraries:
+
+```sh
+rustup target add aarch64-linux-android x86_64-linux-android
+cargo install cargo-ndk
+cd android
+./gradlew :app:assembleDebug    # app/build/outputs/apk/debug/app-{arm64-v8a,x86_64}-debug.apk
+```
+
+There is one APK per ABI: `arm64-v8a` for phones, `x86_64` for the Android emulator.
+`-Psh705x.rust=false` builds without the native side, as CI does.
+
 ### Comparing calibrations
 
 ```sh
@@ -298,9 +332,11 @@ cargo fmt --all --check
 Tests that need a real dump read it from `SH705X_FLASH` (and `SH705X_EEPROM`) and are
 skipped when those are not set.
 
-CI (`.github/workflows/ci.yml`) runs those three on Ubuntu, with the latest stable Rust, on
-every push to `main` and every pull request. No dump is given to it, so the tests that
-need one skip themselves there; run them locally with the dumps before pushing.
+CI (`.github/workflows/ci.yml`) runs those three on Ubuntu, with the latest stable Rust,
+on every push to `main` and every pull request, and builds the Android app and runs its
+unit tests (without the native side, which the Rust job already covers). No dump is given
+to it, so the tests that need one skip themselves there; run them locally with the dumps
+before pushing.
 
 The phase 0 tool needs Ghidra 12 (`GHIDRA_INSTALL_DIR` or `-Ghidra`):
 

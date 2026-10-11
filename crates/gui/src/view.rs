@@ -4,8 +4,8 @@
 //! (the injectors' outputs) under them. Slowed down or a tooth at a time, the fast moves
 //! show: the EGR's drive, the teeth, a pulse.
 
-use crate::scope::{Sample, Scope, TRACES};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2};
+use session::scope::{Sample, Scope, TRACES};
 
 /// The chart panels: title and traces (indexes into [`TRACES`]).
 const PANELS: [(&str, &[usize]); 9] = [

@@ -1,0 +1,17 @@
+[package]
+name = "session"
+description = "The emulated ECU as an interactive front end drives it: wired into its car, the plants around it, stepped by tooth or edge, and its history"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+sh7059.workspace = true
+board.workspace = true
+bridge.workspace = true
+engine.workspace = true
+
+[lints]
+workspace = true

@@ -16,6 +16,7 @@ sh7059 = { path = "crates/sh7059" }
 board = { path = "crates/board" }
 engine = { path = "crates/engine" }
 bridge = { path = "crates/bridge" }
+session = { path = "crates/session" }
 
 [profile.release]
 lto = "fat"

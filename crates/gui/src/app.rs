@@ -738,10 +738,10 @@ mod tests {
         {
             let mut sc = snap.scope.lock().unwrap();
             for i in 0..400 {
-                sc.samples.push_back(crate::scope::Sample {
+                sc.samples.push_back(session::scope::Sample {
                     us: i as f64 * 100.0,
                     crank: (i as f32 * 0.45) % 720.0,
-                    v: [i as f32; crate::scope::TRACES.len()],
+                    v: [i as f32; session::scope::TRACES.len()],
                 });
             }
             sc.pulses.push_back((8, 1000.0, 1300.0));
@@ -775,7 +775,7 @@ mod tests {
         };
         let img = std::fs::read(path).unwrap();
         let mut chip = Sh7059::new(&img).unwrap();
-        crate::wire(&mut chip);
+        session::wire(&mut chip);
         let m = Machine::new(chip, true);
         let engine = emu::Engine::ignition_on();
         let shared = Arc::new(Mutex::new(emu::first_snapshot(&m, &engine)));

@@ -1,0 +1,30 @@
+[package]
+name = "android"
+description = "The Android app's native side: the emulated ECU on a thread of its own, behind a JNI bridge"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sh705x_jni"
+# cdylib: the .so cargo-ndk builds into the APK; rlib: so the tests can link it.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+session.workspace = true
+sh7059.workspace = true
+board.workspace = true
+bridge.workspace = true
+jni = { version = "0.22.4", default-features = false }
+
+# The workspace's lints, but `unsafe_code` denied rather than forbidden: the JNI exports
+# need `#[unsafe(no_mangle)]` for the JVM to find them by name, and that one module
+# allows it. Nothing else in the crate may.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

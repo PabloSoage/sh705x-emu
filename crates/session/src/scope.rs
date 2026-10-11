@@ -1,6 +1,6 @@
 //! The engine's history, for the engine view: what the firmware asks for and what the
 //! plants give back, sampled in ECU time, and the one-shot pulses of the ATU-II's channel 8
-//! (where the injectors are). Kept apart from the snapshot, so a frame does not copy it.
+//! (where the injectors are). Kept apart from any snapshot, so a frame does not copy it.
 
 use engine::plants::{State, f32_at};
 use sh7059::Machine;
@@ -124,7 +124,7 @@ impl Scope {
         &mut self,
         m: &Machine,
         plant: Option<&State>,
-        engine: &crate::emu::Engine,
+        engine: &crate::Engine,
         stepping: bool,
     ) {
         let now = m.cpu.cycles;
@@ -147,14 +147,7 @@ impl Scope {
             return;
         }
         self.last = Some(now);
-        let sensor = |k: &str| {
-            engine
-                .sensors
-                .values
-                .iter()
-                .find(|(x, _)| *x == k)
-                .map_or(f64::NAN, |&(_, v)| v)
-        };
+        let sensor = |k: &str| engine.sensor(k).unwrap_or(f64::NAN);
         let ram = |a| f32_at(m, a);
         let duty = |ch, k| m.chip.pwm_duty(ch, k).map_or(f64::NAN, |d| d * 100.0);
         let egr_drive = {

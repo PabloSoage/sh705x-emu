@@ -47,6 +47,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "android"
+version = "0.1.0"
+dependencies = [
+ "board",
+ "bridge",
+ "jni",
+ "session",
+ "sh7059",
+]
+
+[[package]]
 name = "android-activity"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -964,6 +975,7 @@ dependencies = [
  "egui_kittest",
  "engine",
  "image",
+ "session",
  "sh2e",
  "sh7059",
 ]
@@ -2137,6 +2149,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7523beb55eece201a2356bee0bbca0d1ab466c14c07703b2e0ee6d42cb0c2c"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "session"
+version = "0.1.0"
+dependencies = [
+ "board",
+ "bridge",
+ "engine",
+ "sh7059",
 ]
 
 [[package]]

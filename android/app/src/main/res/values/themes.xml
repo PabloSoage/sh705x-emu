@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Only the window before Compose draws; Compose takes the colours from there. -->
+    <style name="Theme.Sh705x" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#121212</item>
+    </style>
+</resources>

@@ -1,12 +1,12 @@
 //! The emulation thread: it owns the machine, takes orders from the interface over a
 //! channel, and publishes a snapshot about every 30 ms (ADR-0004).
 
-use crate::scope::Scope;
 use bridge::elm::Elm327;
 use bridge::link::{CYCLES_PER_US, VirtualLink};
-use engine::crank::Crank;
-use engine::plants::{ASTRA, Plants, State};
-use engine::sensors::{MAF_KEY, Sensors};
+use engine::plants::State;
+use session::Session;
+use session::scope::Scope;
+pub use session::{Engine, PlantMode};
 use sh2e::Cpu;
 use sh7059::hcan::Frame;
 use sh7059::{Machine, Stop};
@@ -53,18 +53,6 @@ pub enum Cmd {
     Plants(PlantMode),
     /// End the thread.
     Quit,
-}
-
-/// The plants around the ECU (`engine::plants`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PlantMode {
-    /// None: the inputs are what the sensors are set to.
-    Off,
-    /// The SCV, EGR, fresh air and turbocharger close their loops; the speed is what it
-    /// is set to.
-    Held,
-    /// And the engine turns on the firmware's torque, against the idling car's load.
-    Turning,
 }
 
 /// Who put a frame on the bus.
@@ -132,51 +120,14 @@ pub struct Snapshot {
     pub scope: Arc<Mutex<Scope>>,
 }
 
-/// The simulated engine's settings: what drives the ECU's inputs.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Engine {
-    /// Speed, rpm; 0 is stopped.
-    pub rpm: f64,
-    /// Sensors in physical units.
-    pub sensors: Sensors,
-}
-
-impl Engine {
-    /// A warm engine with the ignition on, not turning.
-    pub fn ignition_on() -> Self {
-        Self {
-            rpm: 0.0,
-            sensors: Sensors::ignition_on(),
-        }
-    }
-
-    /// Puts every setting on the machine: A/D codes, the wheels' speed, the MAF.
-    pub fn apply(&self, m: &mut Machine) {
-        for (c, v) in self.sensors.codes() {
-            m.chip.adc.input[c] = v;
-        }
-        m.chip.stimulus_set("rpm", self.rpm);
-        if let Some(hz) = self.sensors.maf_hz() {
-            m.chip.stimulus_set(MAF_KEY, hz);
-        }
-    }
-}
-
-/// The idling car's load beyond the friction the firmware models, N·m (see `sh705x plant`).
-const IDLE_LOAD: f64 = 12.0;
-/// The plants' step, CPU cycles: a millisecond.
-const PLANT_CYCLES: u64 = 1000 * CYCLES_PER_US;
-/// ECU time the crankshaft is held at its speed after power-on, cycles: half a second, the
-/// command line's default boot.
-const BOOT_CYCLES: u64 = 500_000 * CYCLES_PER_US;
-
 /// Frames kept for the CAN view.
 const CAN_KEPT: usize = 400;
 /// Bytes in the memory window.
 pub const MEM_WINDOW: u32 = 256;
 
 /// Runs the machine until told to quit.
-pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Snapshot>>) {
+pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Snapshot>>) {
+    let mut ecu = Session::new(m, engine);
     let mut running = false;
     let mut real_time = true;
     let mut speed = 1.0f64;
@@ -187,14 +138,10 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
     let mut elm = Elm327::new();
     elm.echo = false;
     // Pacing: the cycle and wall-clock instant real time is measured from.
-    let (mut pace_cycle, mut pace_wall) = (m.cpu.cycles, Instant::now());
+    let (mut pace_cycle, mut pace_wall) = (ecu.m.cpu.cycles, Instant::now());
     // Real-time factor over the last second.
-    let (mut rt_cycle, mut rt_wall, mut rt_factor) = (m.cpu.cycles, Instant::now(), 0.0);
+    let (mut rt_cycle, mut rt_wall, mut rt_factor) = (ecu.m.cpu.cycles, Instant::now(), 0.0);
     let mut published = Instant::now() - Duration::from_secs(1);
-    let mut plant_mode = PlantMode::Off;
-    let mut plants: Option<Plants> = None;
-    let mut plant: Option<State> = None;
-    let mut plant_cycle = m.cpu.cycles;
     let scope = shared.lock().expect("snapshot lock").scope.clone();
     loop {
         // Orders: wait for one while paused, take what is there while running.
@@ -213,118 +160,44 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
                 Cmd::Run => {
                     running = true;
                     stop = None;
-                    plant_cycle = m.cpu.cycles;
-                    (pace_cycle, pace_wall) = (m.cpu.cycles, Instant::now());
+                    ecu.resync();
+                    (pace_cycle, pace_wall) = (ecu.m.cpu.cycles, Instant::now());
                 }
                 Cmd::Pause => running = false,
                 Cmd::Step(n) => {
                     running = false;
-                    stop = Some(m.run_until(n));
+                    stop = Some(ecu.m.run_until(n));
                 }
-                Cmd::Breakpoints(b) => m.breakpoints = b,
-                Cmd::Adc(c, v) => m.chip.adc.input[c] = v,
+                Cmd::Breakpoints(b) => ecu.m.breakpoints = b,
+                Cmd::Adc(c, v) => ecu.m.chip.adc.input[c] = v,
                 Cmd::Sensor(k, v) => {
-                    if engine.sensors.set(k, v).is_ok() {
-                        engine.apply(&mut m);
-                    }
+                    let _ = ecu.set_sensor(k, v);
                 }
-                Cmd::Rpm(r) => {
-                    engine.rpm = r.max(0.0);
-                    engine.apply(&mut m);
-                    if let Some(p) = plants.as_mut() {
-                        p.rpm = engine.rpm;
-                        if let Some(c) = p.crank.as_mut() {
-                            c.rpm = engine.rpm;
-                        }
-                    }
-                }
-                Cmd::Plants(mode) => {
-                    plant_mode = mode;
-                    let get = |k: &str| {
-                        engine
-                            .sensors
-                            .values
-                            .iter()
-                            .find(|(x, _)| *x == k)
-                            .map(|&(_, v)| v)
-                    };
-                    let (rest, intake) =
-                        (get("boost").unwrap_or(98.0), get("intake2").unwrap_or(26.0));
-                    plants = match mode {
-                        PlantMode::Off => None,
-                        PlantMode::Held => Some(Plants::new(ASTRA, engine.rpm, None, rest, intake)),
-                        PlantMode::Turning => {
-                            let mut c = Crank::new(engine.rpm);
-                            c.load = IDLE_LOAD;
-                            Some(Plants::new(ASTRA, engine.rpm, Some(c), rest, intake))
-                        }
-                    };
-                    plant = None;
-                    plant_cycle = m.cpu.cycles;
-                    if plants.is_none() {
-                        engine.apply(&mut m);
-                    }
-                }
-                Cmd::Preset(idle) => {
-                    engine = if idle {
-                        Engine {
-                            rpm: 750.0,
-                            sensors: Sensors::idle(),
-                        }
-                    } else {
-                        Engine::ignition_on()
-                    };
-                    engine.apply(&mut m);
-                }
+                Cmd::Rpm(r) => ecu.set_rpm(r),
+                Cmd::Plants(mode) => ecu.set_plants(mode),
+                Cmd::Preset(idle) => ecu.preset(idle),
                 Cmd::Memory(a) => mem_addr = a,
                 Cmd::RealTime(r) => {
                     real_time = r;
-                    (pace_cycle, pace_wall) = (m.cpu.cycles, Instant::now());
+                    (pace_cycle, pace_wall) = (ecu.m.cpu.cycles, Instant::now());
                 }
                 Cmd::Speed(s) => {
                     speed = s.clamp(1e-4, 1.0);
-                    (pace_cycle, pace_wall) = (m.cpu.cycles, Instant::now());
+                    (pace_cycle, pace_wall) = (ecu.m.cpu.cycles, Instant::now());
                 }
                 Cmd::NextEdge => {
                     running = false;
-                    stop = m.chip.next_edge().map(|e| {
-                        // A tooth is about 100 000 instructions at 750 rpm; stop well past
-                        // that rather than run on if the edge never comes.
-                        let mut s = Stop::Count;
-                        for _ in 0..50_000_000 {
-                            if s != Stop::Count || m.chip.next_edge().is_none_or(|n| n.at > e.at) {
-                                break;
-                            }
-                            s = m.run_until(1);
-                        }
-                        s
-                    });
+                    stop = ecu.next_edge();
                 }
                 Cmd::NextTooth => {
                     running = false;
-                    let pitch = |m: &Machine| {
-                        m.chip
-                            .crank_angle(m.cpu.cycles)
-                            .map(|a| (a / 6.0).floor() as u32)
-                    };
-                    stop = pitch(&m).map(|start| {
-                        let mut s = Stop::Count;
-                        for _ in 0..50_000_000 {
-                            let turned = pitch(&m).is_some_and(|p| p != start);
-                            let due = m.chip.next_edge().is_some_and(|e| e.at <= m.cpu.cycles);
-                            if s != Stop::Count || (turned && !due) {
-                                break;
-                            }
-                            s = m.run_until(1);
-                        }
-                        s
-                    });
+                    stop = ecu.next_tooth();
                 }
                 Cmd::Elm(line) => {
-                    let us = m.cpu.cycles / CYCLES_PER_US;
+                    let us = ecu.m.cpu.cycles / CYCLES_PER_US;
                     let answer = {
                         let mut link = LoggingLink {
-                            inner: VirtualLink::new(&mut m, 0),
+                            inner: VirtualLink::new(&mut ecu.m, 0),
                             can: &mut can,
                         };
                         elm.line(&line, &mut link)
@@ -335,9 +208,9 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
                             console.push(format!("    {}", l.trim_end()));
                         }
                     }
-                    (pace_cycle, pace_wall) = (m.cpu.cycles, Instant::now());
+                    (pace_cycle, pace_wall) = (ecu.m.cpu.cycles, Instant::now());
                     // The plants did not follow the exchange: pick up from here.
-                    plant_cycle = m.cpu.cycles;
+                    ecu.resync();
                 }
                 Cmd::Quit => return,
             }
@@ -346,7 +219,8 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
         if running {
             let ahead = real_time && {
                 let wall_us = pace_wall.elapsed().as_micros() as u64;
-                (m.cpu.cycles - pace_cycle) as f64 > wall_us as f64 * CYCLES_PER_US as f64 * speed
+                (ecu.m.cpu.cycles - pace_cycle) as f64
+                    > wall_us as f64 * CYCLES_PER_US as f64 * speed
             };
             if ahead {
                 std::thread::sleep(Duration::from_micros(500));
@@ -357,26 +231,15 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
                 } else {
                     40_000
                 };
-                let s = m.run_until(slice);
+                let s = ecu.run(slice);
                 if s != Stop::Count {
                     running = false;
                     stop = Some(s);
                 }
-                if let Some(p) = plants.as_mut() {
-                    // A step a millisecond at most, as on the command line.
-                    if m.cpu.cycles - plant_cycle >= PLANT_CYCLES {
-                        let dt = (m.cpu.cycles - plant_cycle) as f64 / (CYCLES_PER_US as f64 * 1e6);
-                        // The crankshaft turns once the firmware has booted (see sh705x rig).
-                        p.held = m.cpu.cycles < BOOT_CYCLES;
-                        let st = p.step(&mut m, dt);
-                        engine.rpm = st.rpm;
-                        plant = Some(st);
-                        plant_cycle = m.cpu.cycles;
-                    }
-                }
             }
         }
         // CAN frames the ECU and the other nodes sent, in time order.
+        let m = &mut ecu.m;
         let mut bus: Vec<(u64, Origin, Frame)> = m.chip.hcan.ch[0]
             .outbox
             .drain(..)
@@ -399,11 +262,9 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
             rt_factor = (m.cpu.cycles - rt_cycle) as f64 / (CYCLES_PER_US as f64 * 1e6) / w;
             (rt_cycle, rt_wall) = (m.cpu.cycles, Instant::now());
         }
-        scope
-            .lock()
-            .expect("scope lock")
-            .take(&m, plant.as_ref(), &engine, !running);
+        ecu.sample(&mut scope.lock().expect("scope lock"), !running);
         if published.elapsed() >= Duration::from_millis(30) {
+            let m = &ecu.m;
             let mut interrupts: Vec<(usize, u64)> = m
                 .interrupts
                 .iter()
@@ -433,9 +294,9 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
                     let c = &m.chip.sci.ch[k];
                     (c.sent.len(), c.received.len())
                 }),
-                engine: engine.clone(),
-                plant_mode,
-                plant,
+                engine: ecu.engine.clone(),
+                plant_mode: ecu.plant_mode,
+                plant: ecu.plant,
                 scope: scope.clone(),
             };
             *shared.lock().expect("snapshot lock") = snap;
