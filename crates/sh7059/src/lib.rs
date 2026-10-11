@@ -24,7 +24,7 @@ mod machine;
 pub mod pins;
 pub mod sci;
 
-pub use machine::{Machine, Stop};
+pub use machine::{Call, Machine, Probes, Stop};
 use sh2e::Bus;
 use std::fmt;
 

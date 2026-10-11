@@ -4,6 +4,7 @@
 //! the history the engine view draws ([`scope`]). The desktop window (`gui`) and the
 //! Android app (`android`) both drive it; the command line has its own rig.
 
+pub mod maps;
 pub mod scope;
 
 use bridge::link::CYCLES_PER_US;

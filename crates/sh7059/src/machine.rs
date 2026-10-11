@@ -18,6 +18,98 @@ pub enum Stop {
     Asleep,
 }
 
+/// A call to a probed routine: where from, with what, and what it gave back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Call {
+    /// The routine.
+    pub routine: u32,
+    /// The return address (PR on entry): the caller is just before it.
+    pub ret: u32,
+    /// R4 on entry (a Denso map routine's descriptor).
+    pub r4: u32,
+    /// FR4 and FR5 on entry (its inputs).
+    pub fr4: f32,
+    /// See [`Call::fr4`].
+    pub fr5: f32,
+    /// FR0 on return (its result).
+    pub fr0: f32,
+    /// Cycle of the entry.
+    pub cycles: u64,
+}
+
+/// Routines watched without stopping: every call to one of them, with its registers on
+/// entry and FR0 on return, is added to [`Probes::calls`] for the caller to take.
+#[derive(Clone, Debug, Default)]
+pub struct Probes {
+    /// The routines' entry addresses.
+    pub routines: Vec<u32>,
+    /// Calls that have returned, oldest first; the caller drains them.
+    pub calls: Vec<Call>,
+    /// Calls not kept because [`Probes::calls`] was full.
+    pub dropped: u64,
+    /// Calls under way, innermost last.
+    pending: Vec<Call>,
+}
+
+impl Probes {
+    /// Calls kept before new ones are dropped, if nobody drains them.
+    pub const KEPT: usize = 1 << 20;
+    /// Calls under way kept: one that never returns (a jump out) is forgotten.
+    const NESTED: usize = 64;
+    /// Routines watched at most: the run loop compares the PC with each of them.
+    pub const ROUTINES: usize = 4;
+
+    /// Probes on `routines` (the first [`Probes::ROUTINES`] of them).
+    pub fn new(mut routines: Vec<u32>) -> Self {
+        routines.truncate(Self::ROUTINES);
+        Self {
+            routines,
+            ..Self::default()
+        }
+    }
+
+    /// The entries as the run loop compares them (unused slots never match: odd).
+    fn entries(&self) -> [u32; Self::ROUTINES] {
+        std::array::from_fn(|k| self.routines.get(k).copied().unwrap_or(u32::MAX))
+    }
+
+    /// The return the run loop waits for, if a call is under way.
+    fn waiting(&self) -> u32 {
+        self.pending.last().map_or(u32::MAX, |c| c.ret)
+    }
+
+    /// Looks at the instruction about to run: a return from a probed call, or an entry.
+    #[inline]
+    fn check(&mut self, cpu: &Cpu) {
+        let pc = cpu.pc;
+        if let Some(c) = self.pending.last()
+            && c.ret == pc
+        {
+            let mut c = self.pending.pop().expect("just seen");
+            c.fr0 = f32::from_bits(cpu.fr[0]);
+            if self.calls.len() < Self::KEPT {
+                self.calls.push(c);
+            } else {
+                self.dropped += 1;
+            }
+        }
+        if self.routines.contains(&pc) {
+            if self.pending.len() == Self::NESTED {
+                self.pending.remove(0);
+            }
+            self.pending.push(Call {
+                routine: pc,
+                ret: cpu.pr,
+                r4: cpu.r[4],
+                fr4: f32::from_bits(cpu.fr[4]),
+                fr5: f32::from_bits(cpu.fr[5]),
+                fr0: f32::NAN,
+                cycles: cpu.cycles,
+            });
+        }
+    }
+}
+
 /// An SH7059 running its firmware.
 pub struct Machine {
     /// The core.
@@ -32,6 +124,8 @@ pub struct Machine {
     /// interrupt: the request level seen then, so the next step executes without taking
     /// another interrupt first, as it would have without the stop.
     resume: Option<u32>,
+    /// Routines watched without stopping, if any.
+    pub probes: Option<Box<Probes>>,
 }
 
 impl Machine {
@@ -46,6 +140,7 @@ impl Machine {
             interrupts: Box::new([0; 256]),
             breakpoints: Vec::new(),
             resume: None,
+            probes: None,
         }
     }
 
@@ -57,7 +152,37 @@ impl Machine {
             Some(l) => l,
             None => self.take_interrupt(),
         };
+        self.probe();
         self.execute(level)
+    }
+
+    /// Lets the probes see the instruction about to run, if there are probes.
+    #[inline(always)]
+    fn probe(&mut self) {
+        if let Some(p) = self.probes.as_deref_mut()
+            && !self.cpu.sleeping
+        {
+            p.check(&self.cpu);
+        }
+    }
+
+    /// The probes' entries and the return they wait for, for the run loop to compare the
+    /// PC with: never matching without probes.
+    fn probe_state(&self) -> ([u32; Probes::ROUTINES], u32) {
+        self.probes
+            .as_deref()
+            .map_or(([u32::MAX; Probes::ROUTINES], u32::MAX), |p| {
+                (p.entries(), p.waiting())
+            })
+    }
+
+    /// The PC is at a probed entry or at the awaited return: the probes take it. Returns
+    /// the return to wait for next.
+    #[cold]
+    #[inline(never)]
+    fn probe_hit(&mut self) -> u32 {
+        self.probe();
+        self.probes.as_deref().map_or(u32::MAX, Probes::waiting)
     }
 
     /// Takes the pending interrupt if the CPU accepts it now. Returns the request level.
@@ -102,15 +227,32 @@ impl Machine {
     pub fn run(&mut self, count: u64) {
         let end = self.cpu.instructions + count;
         let mut idle = 0u32;
-        if let Some(level) = self.resume.take()
-            && !self.execute(level)
-        {
-            return;
+        if let Some(level) = self.resume.take() {
+            self.probe();
+            if !self.execute(level) {
+                return;
+            }
         }
         let debugging = self.chip.trace.is_some() || self.chip.watch.is_some();
+        let probing = self.probes.is_some();
+        let (entries, mut waiting) = self.probe_state();
+        // The entries' span, so most instructions are passed with one comparison.
+        let low = entries.iter().copied().min().unwrap_or(u32::MAX);
+        let span = entries
+            .iter()
+            .filter(|&&e| e != u32::MAX)
+            .map(|&e| e - low)
+            .max()
+            .unwrap_or(0);
         while self.cpu.instructions < end {
             let before = self.cpu.instructions;
             let level = self.take_interrupt();
+            if probing {
+                let pc = self.cpu.pc;
+                if pc == waiting || (pc.wrapping_sub(low) <= span && entries.contains(&pc)) {
+                    waiting = self.probe_hit();
+                }
+            }
             if !debugging && !self.cpu.sleeping {
                 // The common case, without the checks `execute` makes for the rest.
                 self.chip.now = self.cpu.cycles;
@@ -163,6 +305,7 @@ impl Machine {
                 return Stop::Breakpoint;
             }
             first = false;
+            self.probe();
             let before = self.cpu.instructions;
             if !self.execute(level) {
                 return Stop::Asleep;
@@ -323,5 +466,35 @@ mod tests {
             m.cpu.sleeping,
             "asleep for good: the request can never get in"
         );
+    }
+
+    #[test]
+    fn a_probe_sees_the_call_and_its_result_without_stopping() {
+        let mut f = vec![0u8; ROM_SIZE];
+        let put16 =
+            |f: &mut Vec<u8>, a: usize, v: u16| f[a..a + 2].copy_from_slice(&v.to_be_bytes());
+        f[0..4].copy_from_slice(&0x1000u32.to_be_bytes()); // reset PC
+        f[4..8].copy_from_slice(&0xFFFF_BFF0u32.to_be_bytes()); // reset SP
+        for (a, op) in [
+            (0x1000, 0xD403), // MOV.L @(0x1010),R4
+            (0x1002, 0xB002), // BSR 0x100A
+            (0x1004, 0x0009), // NOP (slot)
+            (0x1006, 0xAFFE), // BRA 0x1006: spin here
+            (0x1008, 0x0009), // NOP (slot)
+            (0x100A, 0xF09D), // FLDI1 FR0
+            (0x100C, 0x000B), // RTS
+            (0x100E, 0x0009), // NOP (slot)
+        ] {
+            put16(&mut f, a, op);
+        }
+        f[0x1010..0x1014].copy_from_slice(&0x0009_DADCu32.to_be_bytes());
+        let mut m = Machine::new(Sh7059::new(&f).unwrap(), true);
+        m.probes = Some(Box::new(Probes::new(vec![0x100A])));
+        assert_eq!(m.run_until(40), Stop::Count);
+        let p = m.probes.as_ref().unwrap();
+        assert_eq!(p.calls.len(), 1, "{:?}", p.calls);
+        let c = p.calls[0];
+        assert_eq!((c.routine, c.ret, c.r4), (0x100A, 0x1006, 0x0009_DADC));
+        assert_eq!(c.fr0, 1.0);
     }
 }
