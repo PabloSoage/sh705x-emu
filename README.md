@@ -118,13 +118,25 @@ second, which makes it a reference oracle rather than an emulator.
 | `crates/bridge` | The CAN bus as a diagnostic tool sees it, in virtual or real time; ISO-TP; an ELM327; a TCP server; an emulated Scanmatik SM3 |
 | `crates/sh705x` | Command-line front end |
 | `crates/session` | The ECU as an interactive front end drives it: wired into its car, the plants around it, run a slice, a tooth or an edge at a time, and the history the engine view draws |
-| `crates/gui` | `sh705x-gui`: registers, code with breakpoints, memory, CAN, interrupts, the engine (speed, sensors in physical units, and the plants) and an ELM327 console, live (egui) |
+| `crates/gui` | `sh705x-gui`: a load screen for the images, then registers, code with breakpoints, memory, CAN, interrupts, the engine (speed, sensors in physical units, and the plants) and an ELM327 console, live (egui) |
 | `crates/android` | The Android app's native side: the ECU on its own thread behind a JNI bridge (`libsh705x_jni.so`) |
 | `android/` | The Android app: Kotlin and Compose, the engine view on a phone |
 | `tools/bench.py` | Interleaved speed comparison of builds |
 | `tools/gen_curves.py` | Generates `crates/engine/src/curves.rs` from a sweep of the A/D inputs |
 | `tools/ghidra/EmuBoot.py` | Phase 0: runs a raw flash image from its reset vector in Ghidra's p-code emulator, logs every I/O access and resolves status-bit polls automatically |
 | `tools/ghidra/emu_boot.ps1` | Runs `EmuBoot.py` headless in a throwaway project |
+
+## Download
+
+Each [release](https://github.com/PabloSoage/sh705x-emu/releases) carries:
+
+- `sh705x-<version>-windows-x86_64.zip`: `sh705x-gui.exe`, the window, and `sh705x.exe`,
+  the command line. Both carry their C runtime, so they run on any 64-bit Windows with
+  nothing else installed.
+- the Android app, one APK per ABI: `arm64-v8a` for phones, `x86_64` for the Android
+  emulator and x86 devices.
+
+No firmware comes with any of them: bring your own dump.
 
 ## Building and running
 
@@ -158,11 +170,18 @@ sh705x sm3 --flash <flash.bin> --eeprom <eeprom.bin>
 and set opendash's adapter address to this machine's IP (port 777), on the same
 network.
 
-To watch it run:
+To watch it run, start `sh705x-gui` (on Windows, the `.exe` from a release runs as it is,
+with no runtime to install). It opens on a load screen: choose the flash image and, if you
+have it, the EEPROM image with the system's file dialog, type their paths, or drop the
+files onto the window; set the EEPROM layout if your dump is not a PCMflash one as it is,
+and power on. "⏏ Images…" powers off and goes back there. The same can be given on the
+command line, and then it powers on straight away:
 
 ```sh
-cargo run --release -p gui -- --flash <flash.bin> --eeprom <eeprom.bin>
+cargo run --release -p gui -- --flash <flash.bin> --eeprom <eeprom.bin> [--eeprom-layout 0123[le]]
 ```
+
+![The load screen](docs/img/gui-load.png)
 
 In the engine panel, "Plants" puts the plants around the ECU: "Held" closes the SCV,
 EGR, fresh air and turbocharger loops at the speed set there; "On its torque" also lets
@@ -239,8 +258,9 @@ same core, built into `libsh705x_jni.so` (`crates/android`) and driven as the wi
 drives it, on a thread of its own. Pick the flash dump (and the EEPROM, if you have it)
 with the system's file picker; the app ships no firmware, asks for no permissions, and
 keeps the dumps in memory only. "Idle on its torque" sets the car's warm idle, puts the
-plants around the ECU and lets the engine turn on the firmware's torque; slow motion, "Next
-tooth" and "Next edge" work as in the window.
+plants around the ECU and lets the engine turn on the firmware's torque; slow motion,
+"Next tooth" and "Next edge" work as in the window. It starts in a dark theme; light, or
+the system's, is a tap away.
 
 | The engine | Its history |
 |---|---|
@@ -336,7 +356,9 @@ CI (`.github/workflows/ci.yml`) runs those three on Ubuntu, with the latest stab
 on every push to `main` and every pull request, and builds the Android app and runs its
 unit tests (without the native side, which the Rust job already covers). No dump is given
 to it, so the tests that need one skip themselves there; run them locally with the dumps
-before pushing.
+before pushing. A tag `v*` builds the Windows programs, checks that they need no Visual C++
+runtime (`.cargo/config.toml` links it in) and puts them on a draft release
+(`.github/workflows/release.yml`), where the signed Android APKs are added by hand.
 
 The phase 0 tool needs Ghidra 12 (`GHIDRA_INSTALL_DIR` or `-Ghidra`):
 

@@ -84,8 +84,9 @@ private suspend fun read(context: Context, uri: Uri): Picked = withContext(Dispa
     Picked(name, bytes)
 }
 
+/** The app: the load screen, then the ECU running; [theme] and [onTheme] for the theme row. */
 @Composable
-fun App() {
+fun App(theme: ThemeChoice, onTheme: (ThemeChoice) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var flash by remember { mutableStateOf<Picked?>(null) }
@@ -151,6 +152,7 @@ fun App() {
                     frame = Frame.EMPTY
                 })
             }
+            ThemeRow(theme, onTheme)
         }
     }
 }
@@ -311,4 +313,24 @@ private fun Engine(frame: Frame, window: Int, onWindow: (Int) -> Unit, onOff: ()
     )
     Text(stringResource(R.string.no_injection), style = MaterialTheme.typography.bodySmall)
     Spacer(Modifier.height(24.dp))
+}
+
+/** Dark (the default), light, or as the system is. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ThemeRow(theme: ThemeChoice, onTheme: (ThemeChoice) -> Unit) {
+    Text(stringResource(R.string.theme), style = MaterialTheme.typography.labelLarge)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf(
+            ThemeChoice.DARK to R.string.theme_dark,
+            ThemeChoice.LIGHT to R.string.theme_light,
+            ThemeChoice.SYSTEM to R.string.theme_system,
+        ).forEach { (choice, label) ->
+            FilterChip(
+                selected = theme == choice,
+                onClick = { onTheme(choice) },
+                label = { Text(stringResource(label)) },
+            )
+        }
+    }
 }

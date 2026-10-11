@@ -38,6 +38,11 @@
     <string name="injector">iny %1$d</string>
     <string name="no_injection">Los inyectores (TO8I–L) no dan ningún pulso aquí: la centralita no inyecta mientras el inmovilizador, cuyo otro lado no se emula, la tiene cerrada. La presión de raíl que se ve es la del sensor tal como se pone, no la de una combustión.</string>
 
+    <string name="theme">Tema</string>
+    <string name="theme_dark">Oscuro</string>
+    <string name="theme_light">Claro</string>
+    <string name="theme_system">Como el sistema</string>
+
     <string-array name="strokes">
         <item>expansión</item>
         <item>escape</item>

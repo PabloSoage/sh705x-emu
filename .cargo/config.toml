@@ -1,0 +1,4 @@
+# The Windows builds carry the C runtime inside them, so sh705x-gui.exe and sh705x.exe run
+# on a PC without the Visual C++ redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

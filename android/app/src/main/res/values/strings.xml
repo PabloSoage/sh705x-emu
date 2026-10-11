@@ -38,6 +38,11 @@
     <string name="injector">inj %1$d</string>
     <string name="no_injection">The injectors (TO8I–L) never pulse here: the ECU does not inject while the immobilizer, whose other side is not emulated, keeps it shut. The rail pressure shown is the sensor as set, not a combustion.</string>
 
+    <string name="theme">Theme</string>
+    <string name="theme_dark">Dark</string>
+    <string name="theme_light">Light</string>
+    <string name="theme_system">As the system</string>
+
     <string-array name="strokes">
         <item>power</item>
         <item>exhaust</item>

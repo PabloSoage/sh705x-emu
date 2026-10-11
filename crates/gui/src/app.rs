@@ -34,6 +34,8 @@ pub struct App {
     engine_view: bool,
     /// What it shows.
     view: crate::view::Settings,
+    /// Asked to power off and go back to the load screen.
+    pub back: bool,
 }
 
 impl App {
@@ -53,6 +55,7 @@ impl App {
             code_text: String::new(),
             engine_view: false,
             view: Default::default(),
+            back: false,
         }
     }
 
@@ -90,16 +93,6 @@ fn hex(s: &str) -> Option<u32> {
     .ok()
 }
 
-impl eframe::App for App {
-    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.draw(root);
-    }
-
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.send(Cmd::Quit);
-    }
-}
-
 impl App {
     /// Draws the whole window from the latest snapshot.
     pub fn draw(&mut self, root: &mut egui::Ui) {
@@ -109,6 +102,14 @@ impl App {
 
         egui::Panel::top("controls").show(root, |ui| {
             ui.horizontal(|ui| {
+                if ui
+                    .button("⏏ Images…")
+                    .on_hover_text("Power off and choose other flash and EEPROM images")
+                    .clicked()
+                {
+                    self.back = true;
+                }
+                ui.separator();
                 if s.running {
                     if ui.button("⏸ Pause").clicked() {
                         self.send(Cmd::Pause);

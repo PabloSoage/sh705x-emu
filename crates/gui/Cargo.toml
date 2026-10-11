@@ -20,6 +20,8 @@ bridge.workspace = true
 engine.workspace = true
 session.workspace = true
 eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow"] }
+# The system's open dialog for the load screen (on Linux through the XDG portal: no GTK).
+rfd = "0.17"
 
 # On Linux winit needs a windowing backend; both load their libraries at run time.
 [target.'cfg(target_os = "linux")'.dependencies]
