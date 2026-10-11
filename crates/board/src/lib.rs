@@ -10,8 +10,8 @@
 //! registers from the calibration (`0x113AC`: register number on PK3-PK4, the byte on
 //! SCI0), at power-on and again when its state changes, and reads back one byte: bit 0
 //! (even registers) or 1 (odd) is a fault, heeded while an analog reading (`FFFEB874`) is
-//! at 340 codes or more (`0x61C0C`). Nothing
-//! modelled answers 0, no fault; it matters once there is injection.
+//! at 340 codes or more (`0x61C0C`). Nothing modelled
+//! answers 0, no fault; it matters once there is injection.
 
 pub mod microwire;
 pub mod status;
