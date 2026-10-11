@@ -261,7 +261,7 @@ pub fn touched(o: &TouchedOptions) -> Result<String, String> {
     if images.is_some() {
         let used: Vec<String> = uses
             .keys()
-            .filter(|d| catalog.get(d).and_then(&differs) == Some(true))
+            .filter(|d| catalog.get(d).and_then(differs) == Some(true))
             .map(|d| format!("{d:08X}"))
             .collect();
         let all = catalog

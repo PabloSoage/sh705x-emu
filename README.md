@@ -283,6 +283,10 @@ cargo fmt --all --check
 Tests that need a real dump read it from `SH705X_FLASH` (and `SH705X_EEPROM`) and are
 skipped when those are not set.
 
+CI (`.github/workflows/ci.yml`) runs those three on Ubuntu, with the latest stable Rust, on
+every push to `main` and every pull request. No dump is given to it, so the tests that
+need one skip themselves there; run them locally with the dumps before pushing.
+
 The phase 0 tool needs Ghidra 12 (`GHIDRA_INSTALL_DIR` or `-Ghidra`):
 
 ```powershell

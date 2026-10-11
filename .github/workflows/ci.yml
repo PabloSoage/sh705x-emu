@@ -1,0 +1,28 @@
+# Format, lints and tests on every push to main and every pull request.
+# Tests that need a real dump (SH705X_FLASH, SH705X_EEPROM) skip themselves here: no dump
+# ever goes to GitHub. The README screenshots test is ignored and is not run.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --workspace
