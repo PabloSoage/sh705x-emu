@@ -6,9 +6,28 @@
 //!   into `FFFEB742` and `FFFEB743`. Bit 6 of the first is the throttle driver: the
 //!   firmware turns it off for eight ticks after power-on (PA11 high) and expects to see
 //!   the bit go low and come back (P060E) [MED].
+//!   Bit 1 of the second (PJ0) is the main relay, checked against P0686/P0687 (`0x66D0E`)
+//!   [MED: read in the code].
 //! - **SCI4, chip selects PD5 and PD6**: one fault bit per output stage (`0x126D4`), read
 //!   most significant bit first, the first of them off the receive line (PB11) before the
-//!   clock runs. A set bit is a fault: P2102/P2103, P245C/P245D... [MED].
+//!   clock runs, so bit k of the byte a chip sends lands in bit k - 1 of the firmware's.
+//!   A set bit is a fault, and each has a pair of circuit codes (`0x1258C` and its
+//!   callers). In the bits a chip sends:
+//!
+//!   | Chip | Bit | Output stage | Codes |
+//!   |---|---|---|---|
+//!   | PD5 | `0x04` | fan 1 | P0691/P0692 |
+//!   | PD5 | `0x08` | fan 3 | P0695/P0696 |
+//!   | PD5 | `0x10` | EGR cooler bypass | P245C/P245D [MED: sets P245C] |
+//!   | PD5 | `0x40` | glow plug module | P0383/P0384 |
+//!   | PD6 | `0x04` | A/C clutch relay | P0646/P0647 |
+//!   | PD6 | `0x08` | fuel heater | P2688/P2689 |
+//!   | PD6 | `0x40` | fan 2 | P0693/P0694 |
+//!   | PD6 | `0x80` | throttle motor | P2102/P2103 [MED: sets P2103] |
+//!
+//!   The six not measured set nothing in 8 s idling (glow plugs with a cold engine, fan 1
+//!   with a hot one and the A/C also for 20 s): their checks want something not modelled
+//!   [SUP]. The other bits have no reader.
 //!
 //! What the chips are is not known: the model is the least that gives the firmware what
 //! it reads [SUP].
