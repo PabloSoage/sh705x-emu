@@ -56,6 +56,7 @@ fn main() -> Result<(), String> {
         }
         board::wire_eeproms(&mut chip, &e, layout);
     }
+    board::wire_status(&mut chip);
     chip.adc.input[14] = IGNITION_ON;
     // The crank and cam wheels (stopped) and the MAF, so both can be set while running.
     chip.set_stimulus(Box::new(Merge(vec![

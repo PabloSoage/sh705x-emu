@@ -9,10 +9,9 @@
 //! pedal map close their loop through a simulated engine: nothing in the firmware is
 //! changed, and nothing here would make a real engine run.
 
-use crate::{EcuOptions, boot, sensors};
-use engine::actuators::{Egr, Solenoid};
+use crate::rig::Rig;
+use crate::{EcuOptions, f32_at};
 use engine::crank::Crank;
-use engine::sensors::{MAF_KEY, input, maf_hz};
 use sh7059::Machine;
 use std::fmt::Write as _;
 
@@ -49,16 +48,6 @@ pub const QUANTITY_AT: u32 = 0xFFFE_F8F4;
 /// is held at one speed [MED].
 pub const IDLE_TARGET_AT: u32 = 0xFFFE_FB60;
 
-/// ATU-II outputs of the SCV and EGR loops (see `sh705x actuators`).
-const SCV_OUT: (usize, usize) = (1, 0);
-const EGR_OUT: (usize, usize) = (1, 2);
-
-/// A big-endian float in the chip's memory.
-fn f32_at(m: &Machine, addr: u32) -> f64 {
-    let bits = (0..4).fold(0u32, |v, k| v << 8 | m.chip.peek(addr + k) as u32);
-    f32::from_bits(bits) as f64
-}
-
 /// The torque the firmware reports on diagnostics, N·m (0x1A2D, signed, 0.25 a bit).
 fn diagnostic_torque(m: &mut Machine) -> Option<f64> {
     let mut link = bridge::link::VirtualLink::new(m, 0);
@@ -82,21 +71,18 @@ struct Sample {
     torque: f64,
     quantity: f64,
     maf: f64,
+    egr: f64,
 }
 
 /// Runs `sh705x plant`.
 pub fn plant(o: &PlantOptions) -> Result<String, String> {
-    let s = sensors(&o.ecu)?;
-    let get = |k: &str| s.values.iter().find(|(x, _)| *x == k).map(|&(_, v)| v);
-    let boost = get("boost").unwrap_or(98.0);
-    let intake = get("intake2").or(get("intake")).unwrap_or(26.0);
-    let scv_in = input("scv-feedback").expect("scv-feedback curve");
-    let egr_in = input("egr").expect("egr curve");
-    let mut m = boot(&o.ecu)?;
+    let mut crank = Crank::new(o.ecu.rpm.unwrap_or(750) as f64);
+    crank.load = o.load;
+    let mut rig = Rig::new(&o.ecu, Some(crank), o.step_us)?;
 
     // The RAM must hold what the diagnostics say, or this is another software.
-    let said = diagnostic_torque(&mut m).ok_or("no answer to 0x1A2D")?;
-    let held = f32_at(&m, TORQUE_AT);
+    let said = diagnostic_torque(&mut rig.m).ok_or("no answer to 0x1A2D")?;
+    let held = f32_at(&rig.m, TORQUE_AT);
     if (said - held).abs() > 0.5 {
         return Err(format!(
             "the torque is not at {TORQUE_AT:08X} in this image ({held} there, {said} on \
@@ -104,38 +90,18 @@ pub fn plant(o: &PlantOptions) -> Result<String, String> {
         ));
     }
 
-    let mut crank = Crank::new(o.ecu.rpm.unwrap_or(750) as f64);
-    crank.load = o.load;
-    let mut scv = Solenoid::scv();
-    let mut egr = Egr::new();
-    let dt = o.step_us as f64 / 1e6;
-    let slice = o.step_us * bridge::link::CYCLES_PER_US;
     let samples = o.millis * 1000 / o.step_us.max(1);
-
     let mut trace: Vec<Sample> = Vec::new();
     for k in 0..samples {
-        m.run(slice);
-        m.chip.hcan.ch[0].outbox.clear();
-        let torque = f32_at(&m, TORQUE_AT);
-        let quantity = f32_at(&m, QUANTITY_AT);
-        let was = crank.rpm;
-        let rpm = crank.step(torque, dt);
-        if rpm != was {
-            m.chip.stimulus_set("rpm", rpm);
-        }
-        let maf = engine::air::maf_g_per_s(rpm, boost, intake);
-        m.chip.stimulus_set(MAF_KEY, maf_hz(maf));
-        scv.step(m.chip.pwm_duty(SCV_OUT.0, SCV_OUT.1).unwrap_or(0.0), dt);
-        let egr_pos = egr.step(m.chip.pwm_duty(EGR_OUT.0, EGR_OUT.1).unwrap_or(0.0), dt);
-        m.chip.adc.input[scv_in.channel] = scv_in.code(scv.milliamps());
-        m.chip.adc.input[egr_in.channel] = egr_in.code(egr_pos);
+        let st = rig.step();
         trace.push(Sample {
-            t: (k + 1) as f64 * dt * 1000.0,
-            rpm,
-            target: f32_at(&m, IDLE_TARGET_AT),
-            torque,
-            quantity,
-            maf,
+            t: (k + 1) as f64 * rig.dt * 1000.0,
+            rpm: st.rpm,
+            target: f32_at(&rig.m, IDLE_TARGET_AT),
+            torque: st.torque,
+            quantity: f32_at(&rig.m, QUANTITY_AT),
+            maf: st.maf,
+            egr: st.egr,
         });
     }
 
@@ -148,8 +114,8 @@ pub fn plant(o: &PlantOptions) -> Result<String, String> {
     .unwrap();
     writeln!(
         out,
-        "{:>8} {:>8} {:>8} {:>10} {:>12} {:>8}",
-        "t/ms", "rpm", "target", "torque/Nm", "fuel/mm3", "maf/g/s"
+        "{:>8} {:>8} {:>8} {:>10} {:>12} {:>8} {:>7}",
+        "t/ms", "rpm", "target", "torque/Nm", "fuel/mm3", "maf/g/s", "egr/%"
     )
     .unwrap();
     // Show at most ~40 rows, thinning evenly, but always the last.
@@ -158,8 +124,8 @@ pub fn plant(o: &PlantOptions) -> Result<String, String> {
         if i % keep == 0 || i + 1 == trace.len() {
             writeln!(
                 out,
-                "{:>8.0} {:>8.1} {:>8.0} {:>10.2} {:>12.2} {:>8.2}",
-                r.t, r.rpm, r.target, r.torque, r.quantity, r.maf
+                "{:>8.0} {:>8.1} {:>8.0} {:>10.2} {:>12.2} {:>8.2} {:>7.1}",
+                r.t, r.rpm, r.target, r.torque, r.quantity, r.maf, r.egr
             )
             .unwrap();
         }
@@ -175,11 +141,14 @@ pub fn plant(o: &PlantOptions) -> Result<String, String> {
     writeln!(
         out,
         "Last quarter: {:.0} rpm on average (from {lo:.0} to {hi:.0}), aiming at an idle of \
-         {:.0}; {:.1} N·m, {:.2} mm3 a stroke asked for.",
+         {:.0}; {:.1} N·m, {:.2} mm3 a stroke asked for; EGR {:.1} % open, {:.2} g/s of \
+         fresh air.",
         mean(|r| r.rpm),
         mean(|r| r.target),
         mean(|r| r.torque),
         mean(|r| r.quantity),
+        mean(|r| r.egr),
+        mean(|r| r.maf),
     )
     .unwrap();
     Ok(out)

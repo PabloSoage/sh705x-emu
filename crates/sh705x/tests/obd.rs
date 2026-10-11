@@ -156,3 +156,36 @@ fn the_ecu_reads_the_sensors_as_set() {
     let b = bytes("0142");
     near((b[0] * 256 + b[1]) as f64 / 1000.0, 13.8, 0.05);
 }
+
+#[test]
+fn no_fault_is_pending_at_idle() {
+    let Ok(flash) = std::env::var("SH705X_FLASH") else {
+        eprintln!("SH705X_FLASH not set: skipped");
+        return;
+    };
+    // Seven seconds idling, with and without the car's EEPROM: the board's status chips
+    // and fault lines pass the firmware's output checks (P060E, P1407, P2103, P245C before
+    // them, resultados fase 9). Later, with nothing driving the EGR, P0404 would come:
+    // `plant` has its loop.
+    let eeproms = std::iter::once(None).chain(std::env::var("SH705X_EEPROM").ok().map(Some));
+    for eeprom in eeproms {
+        let mut args: Vec<String> = [
+            "obd",
+            "--flash",
+            &flash,
+            "--rpm",
+            "750",
+            "--boot",
+            "560000000",
+            "07",
+        ]
+        .map(String::from)
+        .to_vec();
+        if let Some(e) = &eeprom {
+            args.extend(["--eeprom", e].map(String::from));
+        }
+        let out = run(&parse(&args).unwrap()).unwrap();
+        let answer = out.lines().map(str::trim).find(|l| l.starts_with("47"));
+        assert_eq!(answer, Some("47 00"), "{eeprom:?}: {out}");
+    }
+}

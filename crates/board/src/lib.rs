@@ -5,6 +5,7 @@
 //! ([`microwire`]); [`wire_eeproms`] connects them as on the Denso board of the Astra J.
 
 pub mod microwire;
+pub mod status;
 
 use std::fmt;
 
@@ -179,6 +180,93 @@ pub fn wire_eeproms(chip: &mut sh7059::Sh7059, image: &Eeprom, layout: Layout) {
     }
 }
 
+/// Port A data register: PA11 high turns the throttle driver off (the firmware's
+/// power-on test of it, `0x31566`) [MED].
+pub const PADR: u32 = 0xFFFF_F726;
+/// Port B data register: PB11 reads SCI4's receive line [MED].
+pub const PBDR: u32 = 0xFFFF_F738;
+/// Port B I/O register.
+pub const PBIOR: u32 = 0xFFFF_F730;
+/// Port J I/O register.
+pub const PJIOR: u32 = 0xFFFF_F766;
+
+/// Puts the status chips ([`status`]) on SCI3 and SCI4, beside any EEPROMs already
+/// there, and the board's other inputs the firmware checks its outputs with:
+/// - SCI3: the chip on PJ1 reports the throttle driver on in bit 6 while PA11 is low;
+///   every other bit, and the chip on PJ0, read 0 [SUP];
+/// - SCI4: the chips on PD5 and PD6 report no fault (0), the first bit on PB11;
+/// - PJ13 and PJ15 are high: two output stages' fault lines, low on a fault (P1407 and
+///   P0403) [MED].
+///
+/// On a channel with no EEPROM the data line reads low when no chip drives it, as it
+/// did with nothing there ([`sh7059::sci::Fixed`]`(0)`).
+pub fn wire_status(chip: &mut sh7059::Sh7059) {
+    use microwire::Line;
+    use sh7059::{InputPin, Level, Wire};
+    use status::StatusChip;
+    // (channel, msb first, [(chip select register, bit)], [(chip, bit, register, bit)])
+    type Chips = &'static [(u32, u8)];
+    type Bits = &'static [(usize, u8, u32, u8)];
+    let plan: [(usize, bool, Chips, Bits); 2] = [
+        (3, false, &[(PJDR, 1), (PJDR, 0)], &[(0, 6, PADR, 11)]),
+        (4, true, &[(PDDR, 5), (PDDR, 6)], &[]),
+    ];
+    for (sci, msb_first, selects, bits) in plan {
+        let fresh = chip.sci.ch[sci]
+            .peer
+            .as_any()
+            .is_none_or(|a| !a.is::<microwire::MicrowireBus>());
+        if fresh {
+            let mut bus = microwire::MicrowireBus::new(Vec::new());
+            bus.pull = false;
+            chip.sci.ch[sci].peer = Box::new(bus);
+        }
+        let bus = chip.sci.ch[sci]
+            .peer
+            .as_any_mut()
+            .and_then(|a| a.downcast_mut::<microwire::MicrowireBus>())
+            .expect("a bus");
+        let mut wires = Vec::new();
+        for &(reg, bit) in selects {
+            bus.status.push(StatusChip::new(0, msb_first, true));
+            let line = bus.add_line(Line::Status(bus.status.len() - 1));
+            wires.push((reg, bit, line));
+        }
+        for &(k, b, reg, bit) in bits {
+            let line = bus.add_line(Line::StatusBit {
+                chip: k,
+                bit: b,
+                inverted: true,
+            });
+            wires.push((reg, bit, line));
+        }
+        if fresh {
+            // PL8IR, PL9IR invert SCK3, SCK4.
+            wires.push((PLIR, 5 + sci as u8, 0));
+        }
+        for (reg, bit, line) in wires {
+            chip.wire(Wire {
+                reg,
+                bit,
+                sci,
+                line,
+            });
+        }
+    }
+    for (dr, ior, bit, level) in [
+        (PJDR, PJIOR, 13, Level::Fixed(true)),
+        (PJDR, PJIOR, 15, Level::Fixed(true)),
+        (PBDR, PBIOR, 11, Level::SciData(4)),
+    ] {
+        chip.inputs.push(InputPin {
+            dr,
+            ior,
+            bit,
+            level,
+        });
+    }
+}
+
 /// The EEPROM contents as they are now in the chip's peers, laid out as `layout`; None
 /// if [`wire_eeproms`] was not used.
 pub fn eeprom_image(chip: &sh7059::Sh7059, layout: Layout) -> Option<Vec<u8>> {
@@ -236,5 +324,28 @@ mod tests {
                 Err(EepromError::BadSize { actual: n })
             );
         }
+    }
+
+    #[test]
+    fn the_throttle_status_bit_follows_pa11() {
+        use sh2e::Bus;
+        let mut chip = sh7059::Sh7059::new(&vec![0; sh7059::ROM_SIZE]).unwrap();
+        wire_status(&mut chip);
+        // Read the chip on PJ1 (SCI3) as the firmware does: select it alone, one byte.
+        let read = |chip: &mut sh7059::Sh7059, pa11: bool| {
+            chip.write16(PJDR, 0x0003);
+            chip.write16(PADR, if pa11 { 0x0800 } else { 0 });
+            chip.write16(PJDR, 0x0001);
+            chip.sci.ch[3].peer.exchange(0xFF, false)
+        };
+        assert_eq!(read(&mut chip, false), 0x40, "driver on");
+        assert_eq!(
+            read(&mut chip, true),
+            0x00,
+            "driver off for the power-on test"
+        );
+        assert_eq!(read(&mut chip, false), 0x40);
+        // The fault lines read high (no fault) while the firmware has them as inputs.
+        assert_eq!(chip.read16(PJDR) & 0xA000, 0xA000);
     }
 }

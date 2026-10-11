@@ -41,8 +41,19 @@ pub trait Peer: Send {
     /// number given in the wiring.
     fn pin(&mut self, _line: usize, _high: bool) {}
 
+    /// The level of the data line from the peer between bytes: what a port pin wired to
+    /// the receive line reads. Undriven, it is taken as high.
+    fn data_out(&self) -> bool {
+        true
+    }
+
     /// The peer as `Any`, for a board model to get its own type back.
     fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
+
+    /// The peer as mutable `Any`, for a board model to add to its own type.
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         None
     }
 }
@@ -53,6 +64,10 @@ pub struct Fixed(pub u8);
 impl Peer for Fixed {
     fn exchange(&mut self, _tx: u8, _msb_first: bool) -> u8 {
         self.0
+    }
+
+    fn data_out(&self) -> bool {
+        self.0 != 0
     }
 }
 

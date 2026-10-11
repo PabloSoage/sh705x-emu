@@ -10,5 +10,8 @@ publish.workspace = true
 [dependencies]
 sh7059.workspace = true
 
+[dev-dependencies]
+sh2e.workspace = true
+
 [lints]
 workspace = true

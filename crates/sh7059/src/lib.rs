@@ -132,6 +132,31 @@ pub struct Wire {
     pub line: usize,
 }
 
+/// A pin the board drives into an I/O port. While the firmware has it as an input (its
+/// bit clear in the port's IOR), a read of the port's data register returns its [`Level`]
+/// there, not what was last written; as an output it reads back as written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputPin {
+    /// The 16-bit port data register (PxDR).
+    pub dr: u32,
+    /// The port's I/O register (PxIOR): a set bit makes the pin an output.
+    pub ior: u32,
+    /// Bit of the pin in both.
+    pub bit: u8,
+    /// The level the board puts on it.
+    pub level: Level,
+}
+
+/// What drives an [`InputPin`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    /// A fixed level: true is high.
+    Fixed(bool),
+    /// The data line from the peer of this SCI channel ([`sci::Peer::data_out`]): the
+    /// pin is wired to the channel's receive line and read as a port bit.
+    SciData(usize),
+}
+
 /// Most wires a chip takes.
 pub const MAX_WIRES: usize = 16;
 
@@ -208,6 +233,9 @@ pub struct Sh7059 {
     /// Bits set in every read of each register byte, as the phase 0 tool forced them to
     /// get past status polls. All zero by default.
     io_force: Box<[u8]>,
+    /// Pins the board drives into the I/O ports ([`InputPin`]). A pin not listed reads
+    /// back what was last written to its data register.
+    pub inputs: Vec<InputPin>,
     /// Accesses to the register area, when tracing is on.
     pub trace: Option<Vec<IoAccess>>,
     /// The instruction address recorded with each traced or watched access; the
@@ -270,6 +298,7 @@ impl Sh7059 {
             ram: vec![0; RAM_SIZE].into_boxed_slice(),
             io: vec![0; IO_SIZE].into_boxed_slice(),
             io_force: vec![0; IO_SIZE].into_boxed_slice(),
+            inputs: Vec::new(),
             trace: None,
             trace_pc: 0,
             instruction: 0,
@@ -378,6 +407,27 @@ impl Sh7059 {
         }
     }
 
+    /// Puts the levels of the board's input pins into a read of `out.len()` bytes at
+    /// `addr`.
+    fn drive_inputs(&self, addr: u32, out: &mut [u8]) {
+        for p in &self.inputs {
+            let ior = (p.ior - IO_BASE) as usize;
+            if u16::from_be_bytes([self.io[ior], self.io[ior + 1]]) >> p.bit & 1 != 0 {
+                continue;
+            }
+            // The high byte of a register comes first.
+            let at = p.dr + u32::from(p.bit < 8);
+            if let Some(b) = at.checked_sub(addr).and_then(|i| out.get_mut(i as usize)) {
+                let m = 1u8 << (p.bit % 8);
+                let high = match p.level {
+                    Level::Fixed(h) => h,
+                    Level::SciData(k) => self.sci.ch[k].peer.data_out(),
+                };
+                *b = if high { *b | m } else { *b & !m };
+            }
+        }
+    }
+
     #[inline(always)]
     fn read<const N: usize>(&mut self, addr: u32) -> [u8; N] {
         // Flash and RAM straight away when nothing watches: most data accesses.
@@ -413,6 +463,9 @@ impl Sh7059 {
                 }
                 for (i, b) in out.iter_mut().enumerate() {
                     *b = self.io[o + i] | self.io_force[o + i];
+                }
+                if !self.inputs.is_empty() {
+                    self.drive_inputs(addr, &mut out);
                 }
                 self.record(false, addr, &out);
             }
@@ -943,5 +996,32 @@ mod tests {
         let mut cpu = sh2e::Cpu::new();
         cpu.power_on_reset(&mut c);
         assert_eq!(cpu.pc, 0x0000_1000);
+    }
+
+    #[test]
+    fn an_input_pin_reads_the_board_while_it_is_an_input() {
+        // Port J: PJDR at F76C, PJIOR at F766.
+        let (dr, ior) = (0xFFFF_F76C, 0xFFFF_F766);
+        let mut c = chip();
+        c.inputs.push(InputPin {
+            dr,
+            ior,
+            bit: 13,
+            level: Level::Fixed(true),
+        });
+        c.inputs.push(InputPin {
+            dr,
+            ior,
+            bit: 2,
+            level: Level::SciData(3),
+        });
+        c.write16(dr, 0x0004);
+        // PJ13 reads high whatever was written; PJ2 follows SCI3's data line, low with
+        // nothing there (sci::Fixed(0)).
+        assert_eq!(c.read16(dr), 0x2000);
+        assert_eq!(c.read8(dr), 0x20, "the high byte alone");
+        // As outputs, both read back what was written.
+        c.write16(ior, 0x2004);
+        assert_eq!(c.read16(dr), 0x0004);
     }
 }

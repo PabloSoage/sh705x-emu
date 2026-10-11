@@ -77,11 +77,16 @@ second, which makes it a reference oracle rather than an emulator.
   decoded once, and flash and RAM accesses take a direct path.
 - **The engine runs on the firmware's torque** (`sh705x plant`): a simulated crank turns
   with the torque the firmware asks for, and its idle governor settles at 750 rpm, 12 N·m
-  and 7.0 mm³ a stroke, as the car does at warm idle. The SCV and EGR loops close against
-  plant models too (`sh705x actuators`).
-- **Not yet:** the ECU counts the engine as running but injects nothing, and so turns
-  its actuators off after a few seconds; the immobilizer is the likely reason. What can be
-  modelled without it is, from the firmware's own demands.
+  and 7.0 mm³ a stroke, as the car does at warm idle. The SCV current loop and the EGR,
+  through an air-mass loop, close against plant models from power-on: the EGR settles a
+  third open for 5.2 g/s of fresh air, as in the car.
+- **The board's output monitors:** the status chips the firmware reads on SCI3 and SCI4
+  and two fault lines on port J are modelled, so its output stage checks pass: no fault
+  is pending at idle, with or without the EEPROM.
+- **Not yet:** the ECU injects nothing while the immobilizer, whose other side is not
+  emulated, keeps it shut; with the car's EEPROM it also raises the idle to 1000 rpm for
+  it (P160D). The turbocharger and the swirl flaps have no plant yet. What can be
+  modelled without injection is, from the firmware's own demands.
 
 ## Layout
 
@@ -89,7 +94,7 @@ second, which makes it a reference oracle rather than an emulator.
 |---|---|
 | `crates/sh2e` | SH-2E core: registers, reset, and the `Bus` trait it runs against |
 | `crates/sh7059` | The SH7059: address map, flash, RAM, register area, peripherals (INTC, CMT, DMAC, SCI, A/D, ATU-II, HCAN-II), debugging aids, and `Machine`, which runs CPU and chip on one clock |
-| `crates/board` | The ECU board: the four 93C86 EEPROMs and how they are wired |
+| `crates/board` | The ECU board: the four 93C86 EEPROMs, the output status chips and fault lines, and how they are wired |
 | `crates/engine` | The simulated engine: crank and cam wheels, sensors with the firmware's A/D curves, the MAF, periodic frames of other CAN nodes |
 | `crates/bridge` | The CAN bus as a diagnostic tool sees it, in virtual or real time; ISO-TP; an ELM327; a TCP server; an emulated Scanmatik SM3 |
 | `crates/sh705x` | Command-line front end |
@@ -184,17 +189,19 @@ on it (EGR) sit at their idle floor.
 ### Actuators that run without injection
 
 Two of the ECU's loops regulate whatever the fuel cut does: the suction control valve's
-current (ATU-II output 7A, read back on AN1) and the EGR valve's position (7C, AN10).
-`actuators` boots the ECU idling, drives a physical plant with the firmware's duties and
-returns the plant's output to those inputs every step, so the firmware's own regulators
-close against it, and traces the result:
+current (ATU-II output 6A, read back on AN1) and the EGR valve's position (an H-bridge
+on 7D and 7C, read back on AN10). `actuators` powers the ECU on with the engine held at
+idle speed, drives a physical plant with the firmware's duties and returns the plant's
+output to those inputs every millisecond, so the firmware's own regulators close against
+it, and traces the result with the VGT command (7A):
 
 ```sh
 sh705x actuators --flash <flash.bin> --eeprom <eeprom.bin> --millis 4000
 ```
 
-The EGR loop settles shut at idle, as the car does; the SCV current loop holds a steady
-current, the pump driven hard because the rail pressure plant is not closed yet.
+The SCV current loop holds its own setpoint (2250 mA asked, 2249 measured). With the
+engine held, the idle governor asks for a lot of fuel and the firmware shuts the EGR, as
+the car does under load; `plant` lets the speed go and shows the EGR loop at idle.
 
 ### The engine on the firmware's own torque
 
@@ -206,13 +213,13 @@ is changed, and nothing here makes a real engine run.
 
 ```sh
 # Idle (the default), or rev it in neutral with --sensor pedal=30; --load in N·m
-sh705x plant --flash <flash.bin> --eeprom <eeprom.bin> --millis 5000
+sh705x plant --flash <flash.bin> --millis 15000
 ```
 
-At warm idle it settles at 750 rpm, 12 N·m and 7.0 mm³ a stroke, what the car reports
-standing still. About five seconds after the ignition, a throttle-position fault
-(P060E, the throttle plant is not modelled yet) puts the firmware in a limp mode that
-raises the idle to 1000 rpm; the trace shows the target it aims at.
+At warm idle it settles at 750 rpm, 12 N·m and 7.0 mm³ a stroke, with the EGR 33 % open
+and 5.2 g/s of fresh air: what the car reports standing still. With the car's EEPROM
+the firmware also checks the immobilizer, and its reaction raises the idle to 1000 rpm;
+the trace shows the target it aims at.
 
 ### Tests
 

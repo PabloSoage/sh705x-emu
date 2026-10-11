@@ -1,10 +1,8 @@
 //! `sh705x actuators`: parsing, and a short closed-loop run against a real dump.
 //!
-//! Set SH705X_FLASH to an Astra J (A17DTJ) flash dump to run the second test. Dumps never
-//! enter this repository. The test runs without the EEPROM on purpose: with the car's, the
-//! firmware also runs its output stage checks, finds the throttle (P2103) and the EGR
-//! cooler bypass (P245C) without a plant, and parks the SCV at rest after about three
-//! seconds, before its loop can be seen settle (resultados fase 8).
+//! Set SH705X_FLASH to an Astra J (A17DTJ) flash dump to run the second test, and
+//! SH705X_EEPROM to run it with the car's EEPROM as well. Dumps never enter this
+//! repository.
 
 use sh705x::{Command, parse, run};
 
@@ -43,75 +41,44 @@ fn actuators_options() {
     }
 }
 
+/// SCV current, its setpoint and spread, EGR position and the setpoint asked for, from
+/// the summary line.
+fn summary(out: &str) -> [f64; 7] {
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("SCV settled"))
+        .expect("summary");
+    let nums: Vec<f64> = line
+        .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+        .filter_map(|w| w.trim_end_matches('.').parse().ok())
+        .collect();
+    // scv, span, asked, egr, span, asked, drive
+    nums[..7].try_into().unwrap()
+}
+
 #[test]
-fn the_two_loops_close_against_the_firmware() {
+fn the_loops_close_against_the_firmware() {
     let Ok(flash) = std::env::var("SH705X_FLASH") else {
         eprintln!("SH705X_FLASH not set: skipped");
         return;
     };
-    let args: Vec<String> = [
-        "actuators",
-        "--flash",
-        &flash,
-        "--millis",
-        "4000",
-        "--step",
-        "50",
-    ]
-    .map(String::from)
-    .to_vec();
-    let out = run(&parse(&args).unwrap()).unwrap();
-    let last = out
-        .lines()
-        .find(|l| l.starts_with("SCV settled"))
-        .expect("summary");
-    // The EGR loop closes onto a shut valve at idle, as the car does (fase 5 §6): it
-    // settles near 0 % and stops moving.
-    let egr = last.split("EGR at ").nth(1).unwrap();
-    let egr_pct: f64 = egr.split_whitespace().next().unwrap().parse().unwrap();
-    let egr_span: f64 = egr
-        .split("spans ")
-        .nth(1)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert!(
-        egr_pct < 2.0 && egr_span < 1.0,
-        "EGR did not settle shut: {last}"
-    );
-    // The SCV current loop regulates: it holds a steady current well inside the sensor's
-    // range (0..3570 mA), not pinned at either rail.
-    let scv_ma: f64 = last
-        .split("settled at ")
-        .nth(1)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap();
-    let scv_span: f64 = last
-        .split("spans ")
-        .nth(1)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert!(
-        scv_ma > 500.0 && scv_ma < 3400.0,
-        "SCV not regulated: {last}"
-    );
-    assert!(scv_span < 50.0, "SCV did not settle: {last}");
-    // And the firmware was actually driving the duty, not leaving it at a rail.
-    let moved = out
-        .lines()
-        .filter_map(|l| l.split_whitespace().nth(1))
-        .filter_map(|d| d.parse::<f64>().ok())
-        .any(|d| (0.01..0.99).contains(&d));
-    assert!(moved, "the SCV duty never left its rail:\n{out}");
+    // With and without the car's EEPROM: the board's status chips pass the output checks
+    // either way (resultados fase 9).
+    let eeproms = std::iter::once(None).chain(std::env::var("SH705X_EEPROM").ok().map(Some));
+    for eeprom in eeproms {
+        let mut args: Vec<String> = ["actuators", "--flash", &flash, "--millis", "4000"]
+            .map(String::from)
+            .to_vec();
+        if let Some(e) = &eeprom {
+            args.extend(["--eeprom", e].map(String::from));
+        }
+        let out = run(&parse(&args).unwrap()).unwrap();
+        let [scv, scv_span, scv_asked, egr, _, egr_asked, _] = summary(&out);
+        // The SCV current loop holds its own setpoint, steadily.
+        assert!((scv - scv_asked).abs() < 30.0, "{out}");
+        assert!(scv_span < 30.0, "{out}");
+        // With the engine held at 750 rpm the idle governor asks for a lot of fuel, and the
+        // firmware shuts the EGR off (it asks below zero), as the car does under load.
+        assert!(egr_asked <= 0.0 && egr < 2.0, "{out}");
+    }
 }

@@ -4,6 +4,7 @@
 mod actuators;
 mod maps;
 mod plant;
+mod rig;
 mod touched;
 
 pub use actuators::ActuatorsOptions;
@@ -712,6 +713,7 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
         }
         board::wire_eeproms(&mut chip, &e, *layout);
     }
+    board::wire_status(&mut chip);
     let mut m = Machine::new(chip, address_errors);
     // The last steps before the first exception, to say where it came from.
     let mut recent = std::collections::VecDeque::with_capacity(32);
@@ -894,6 +896,12 @@ fn trace(opts: &TraceOptions) -> Result<String, String> {
     Ok(o)
 }
 
+/// A big-endian float in the chip's memory.
+pub(crate) fn f32_at(m: &Machine, addr: u32) -> f64 {
+    let bits = (0..4).fold(0u32, |v, k| v << 8 | m.chip.peek(addr + k) as u32);
+    f32::from_bits(bits) as f64
+}
+
 /// The sensors `o` describes; `--adc` and `--maf-hz` go on top of these.
 fn sensors(o: &EcuOptions) -> Result<engine::sensors::Sensors, String> {
     use engine::sensors::Sensors;
@@ -928,6 +936,7 @@ fn boot(o: &EcuOptions) -> Result<Machine, String> {
         }
         board::wire_eeproms(&mut chip, &e, o.layout);
     }
+    board::wire_status(&mut chip);
     let sensors = sensors(o)?;
     for (c, v) in sensors.codes() {
         chip.adc.input[c] = v;

@@ -24,6 +24,7 @@
 //! high again. A real 93C86 takes a few milliseconds [SUP]. With no chip driving it, the
 //! DO line reads 1, as if pulled up [SUP].
 
+use crate::status::StatusChip;
 use sh7059::sci::Peer;
 
 /// Words in a 93C86 in x16 organisation.
@@ -267,30 +268,85 @@ impl Eeprom93C86 {
     }
 }
 
-/// The EEPROMs sharing one SCI channel, each with its own chip select, and the channel's
-/// serial clock inversion bit.
+/// What a pin wired to a [`MicrowireBus`] does there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Line {
+    /// The serial clock inversion bit (PLIR) of the channel.
+    ClockInversion,
+    /// The chip select of `chips[i]`.
+    Eeprom(usize),
+    /// The chip select of `status[i]`.
+    Status(usize),
+    /// Sets bit `bit` of the byte `status[chip]` reports, to the pin's level, or to its
+    /// opposite if `inverted`.
+    StatusBit {
+        /// Which status chip.
+        chip: usize,
+        /// Which bit of its byte.
+        bit: u8,
+        /// The bit is the opposite of the pin.
+        inverted: bool,
+    },
+}
+
+/// The chips sharing one SCI channel: EEPROMs and status chips ([`StatusChip`]), each
+/// with its own chip select, and the channel's serial clock inversion bit.
 ///
-/// Lines, as wired to the chip: 0 is the clock inversion (PLIR bit), 1 + i the chip
-/// select of `chips[i]`.
-#[derive(Clone, Debug, Default)]
+/// Pins are wired by line number: as built by [`MicrowireBus::new`], 0 is the clock
+/// inversion (PLIR bit) and 1 + i the chip select of `chips[i]`; [`MicrowireBus::add_line`]
+/// adds more.
+#[derive(Clone, Debug)]
 pub struct MicrowireBus {
     /// The EEPROMs on this channel.
     pub chips: Vec<Eeprom93C86>,
+    /// The status chips on it.
+    pub status: Vec<StatusChip>,
+    /// The level of the data line when no chip drives it: high, pulled up, on the board.
+    pub pull: bool,
+    lines: Vec<Line>,
     inverted: bool,
+}
+
+impl Default for MicrowireBus {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
 }
 
 impl MicrowireBus {
     /// A bus with these chips.
     pub fn new(chips: Vec<Eeprom93C86>) -> Self {
+        let lines = std::iter::once(Line::ClockInversion)
+            .chain((0..chips.len()).map(Line::Eeprom))
+            .collect();
         Self {
             chips,
+            status: Vec::new(),
+            pull: true,
+            lines,
             inverted: false,
         }
     }
 
-    /// The DO line: any driving chip pulls it low with a 0; undriven, it reads 1.
+    /// Adds a line and returns its number, to wire a pin to.
+    pub fn add_line(&mut self, line: Line) -> usize {
+        self.lines.push(line);
+        self.lines.len() - 1
+    }
+
+    /// The data line: any driving chip pulls it low with a 0; undriven, it is at
+    /// [`MicrowireBus::pull`].
     fn line(&self) -> bool {
-        self.chips.iter().filter_map(Eeprom93C86::output).all(|b| b)
+        let mut driven = self
+            .chips
+            .iter()
+            .filter_map(Eeprom93C86::output)
+            .chain(self.status.iter().filter_map(StatusChip::output))
+            .peekable();
+        if driven.peek().is_none() {
+            return self.pull;
+        }
+        driven.all(|b| b)
     }
 }
 
@@ -304,24 +360,45 @@ impl Peer for MicrowireBus {
             for c in &mut self.chips {
                 c.clock(di);
             }
+            for s in &mut self.status {
+                s.clock();
+            }
             let bit = if self.inverted { self.line() } else { before };
             rx |= (bit as u8) << shift;
         }
         rx
     }
 
+    fn data_out(&self) -> bool {
+        self.line()
+    }
+
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         Some(self)
     }
 
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
     fn pin(&mut self, line: usize, high: bool) {
-        match line {
-            0 => self.inverted = high,
-            l => {
-                if let Some(c) = self.chips.get_mut(l - 1) {
-                    c.select(high);
+        match self.lines.get(line) {
+            Some(Line::ClockInversion) => self.inverted = high,
+            Some(&Line::Eeprom(i)) => self.chips[i].select(high),
+            Some(&Line::Status(i)) => self.status[i].select(high),
+            Some(&Line::StatusBit {
+                chip,
+                bit,
+                inverted,
+            }) => {
+                let s = &mut self.status[chip];
+                if high != inverted {
+                    s.value |= 1 << bit;
+                } else {
+                    s.value &= !(1 << bit);
                 }
             }
+            None => {}
         }
     }
 }

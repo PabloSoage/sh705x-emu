@@ -3,16 +3,17 @@
 //! valve (a position loop). Each is a small physical plant turning a duty fraction into
 //! the quantity the firmware measures, so the firmware's own loop can close against it.
 //!
-//! The firmware drives the SCV on ATU-II output 7A and reads its current back on AN1
-//! (`scv-feedback`, mA); it drives the EGR on 7C and reads the valve's position on AN10
-//! (`egr`, %). Which output is which was found by perturbing one input at a time and
-//! watching the duties move (resultados fase 5 §6) [MED]; the plants' electrical and
-//! mechanical constants are not in the flash, so they are plausible values [SUP] and the
-//! validation is that the firmware's loop settles where its own setpoints ask, not the
-//! constants themselves.
+//! The firmware drives the SCV on ATU-II output 6A and reads its current back on AN1
+//! (`scv-feedback`, mA); it drives the EGR through an H-bridge, opening on 7D and closing
+//! on 7C, and reads the valve's position on AN10 (`egr`, %). Which output is which was
+//! found in the code that writes each output (resultados fase 9; fase 5 §6 took 7A, the
+//! VGT, for the SCV) [MED]. The plants' electrical and mechanical constants are not in
+//! the flash, so they are plausible values [SUP] and the validation is that the
+//! firmware's loop settles where its own setpoints ask, not the constants themselves.
 
 /// A current-controlled solenoid: the SCV coil across the battery, switched at the PWM
 /// duty. The current follows `dI/dt = (duty·V − R·I) / L`, so it settles at `duty·V/R`.
+
 #[derive(Clone, Debug)]
 pub struct Solenoid {
     /// Coil resistance, ohm [SUP].
@@ -26,12 +27,11 @@ pub struct Solenoid {
 }
 
 impl Solenoid {
-    /// The SCV coil: 4 Ω and 6 mH [SUP] across 14 V give a full-duty current of 3.5 A,
-    /// the top of the AN1 curve (3.57 A), and 1.73 A — the car's warm-idle reading — at a
-    /// duty of about 0.49.
+    /// The SCV coil: 3.33 Ω, so that the car's warm-idle command of 41.2 % gives its
+    /// 1729 mA across 14 V (scanmatik-bench route 72) [DER]; 6 mH [SUP].
     pub fn scv() -> Self {
         Self {
-            r: 4.0,
+            r: 3.33,
             l: 6e-3,
             v: 14.0,
             i: 0.0,
@@ -59,41 +59,41 @@ impl Solenoid {
     }
 }
 
-/// A position actuator with a return spring: the EGR valve opens toward `100·duty` % with
-/// a first-order lag, and the spring shuts it when the duty falls. The firmware reads the
-/// position on AN10 and closes its own loop onto the desired-EGR setpoint.
+/// The EGR valve: a DC motor against a return spring, driven through an H-bridge whose
+/// halves are two PWM outputs, one opening and one closing (7D and 7C, resultados fase 9)
+/// [MED]. The valve moves at a speed proportional to the net drive beyond what holds it
+/// against its spring, and stops at its ends; with no drive the spring shuts it.
+///
+/// The holding drive is the car's: standing at any opening from 10 to 100 %, its EGR
+/// command (0x32A8, signed) has a mean of 10 to 15 % (scanmatik-bench route 72, 160,000
+/// samples) [DER]. The speed is a plausible value [SUP]: the car's logs are sampled too
+/// coarsely to time a full stroke.
 #[derive(Clone, Debug)]
 pub struct Egr {
-    /// Time constant of the valve, second [SUP].
-    pub tau: f64,
-    /// Open fraction reached at full duty, % of travel per unit duty [SUP].
-    pub gain: f64,
+    /// Travel speed per unit of net drive beyond the hold, % a second [SUP].
+    pub rate: f64,
+    /// Drive that holds the valve still against its spring, fraction of full.
+    pub hold: f64,
     /// Position now, % open.
     pub pos: f64,
 }
 
 impl Egr {
-    /// The EGR valve: a 120 ms travel [SUP], fully open at full duty.
+    /// The EGR valve, shut: 1000 %/s a unit of drive [SUP], held by 0.13 [DER].
     pub fn new() -> Self {
         Self {
-            tau: 0.12,
-            gain: 100.0,
+            rate: 1000.0,
+            hold: 0.13,
             pos: 0.0,
         }
     }
 
-    /// Advances `dt` seconds at `duty` (0..1) and returns the position, % open.
-    pub fn step(&mut self, duty: f64, dt: f64) -> f64 {
-        let target = (self.gain * duty.clamp(0.0, 1.0)).clamp(0.0, 100.0);
-        // Exact first-order response over the step, stable for any dt.
-        let a = (-dt / self.tau).exp();
-        self.pos = target + (self.pos - target) * a;
+    /// Advances `dt` seconds with `drive` (opening minus closing duty, -1..1) and
+    /// returns the position, % open.
+    pub fn step(&mut self, drive: f64, dt: f64) -> f64 {
+        let net = drive.clamp(-1.0, 1.0) - self.hold;
+        self.pos = (self.pos + self.rate * net * dt).clamp(0.0, 100.0);
         self.pos
-    }
-
-    /// The position it settles at for `duty`, % open.
-    pub fn steady(&self, duty: f64) -> f64 {
-        (self.gain * duty.clamp(0.0, 1.0)).clamp(0.0, 100.0)
     }
 }
 
@@ -110,15 +110,14 @@ mod tests {
     #[test]
     fn scv_current_settles_at_duty_times_v_over_r() {
         let mut s = Solenoid::scv();
-        // Full duty reaches the top of the feedback curve.
+        // Full duty: V/R.
         for _ in 0..100 {
             s.step(1.0, 1e-3);
         }
-        assert!((s.i - 3.5).abs() < 0.01, "{}", s.i);
-        assert!((s.milliamps() - 3500.0).abs() < 10.0);
-        // The warm-idle reading of 1729 mA asks for a duty near 0.49.
+        assert!((s.i - 14.0 / 3.33).abs() < 0.01, "{}", s.i);
+        // The car's warm idle: 1729 mA at 41.2 %.
         let duty = 1.729 / s.steady(1.0);
-        assert!((duty - 0.494).abs() < 0.01, "{duty}");
+        assert!((duty - 0.412).abs() < 0.005, "{duty}");
         let mut s = Solenoid::scv();
         for _ in 0..200 {
             s.step(duty, 1e-3);
@@ -129,7 +128,7 @@ mod tests {
     #[test]
     fn scv_current_rises_within_a_few_time_constants() {
         let mut s = Solenoid::scv();
-        let tau = s.l / s.r; // 1.5 ms
+        let tau = s.l / s.r; // 1.8 ms
         s.step(1.0, tau); // one time constant: about 63 %
         assert!((s.i / s.steady(1.0) - 0.632).abs() < 0.02, "{}", s.i);
         // A big step in one call is as stable as many small ones.
@@ -139,33 +138,34 @@ mod tests {
     }
 
     #[test]
-    fn egr_opens_and_the_spring_shuts_it() {
+    fn egr_holds_at_its_holding_drive() {
         let mut e = Egr::new();
-        // Half duty settles at half travel.
-        for _ in 0..100 {
-            e.step(0.5, 1e-2);
+        e.pos = 34.0;
+        for _ in 0..1000 {
+            e.step(e.hold, 1e-3);
         }
-        assert!((e.pos - 50.0).abs() < 0.1, "{}", e.pos);
-        // One time constant toward a closed valve: about 37 % of the way left.
-        e.step(0.0, e.tau);
-        assert!((e.pos - 50.0 * 0.368).abs() < 0.5, "{}", e.pos);
-        // And it shuts fully.
-        for _ in 0..100 {
-            e.step(0.0, 1e-2);
-        }
-        assert!(e.pos < 0.1, "{}", e.pos);
+        assert!((e.pos - 34.0).abs() < 1e-9, "{}", e.pos);
     }
 
     #[test]
-    fn egr_response_is_stable_for_any_step() {
-        // The exact first-order form never overshoots, whatever the step.
+    fn egr_opens_on_drive_and_the_spring_shuts_it() {
         let mut e = Egr::new();
-        e.step(1.0, 10.0);
-        assert!((e.pos - 100.0).abs() < 1e-6);
-        let mut e = Egr::new();
-        for _ in 0..1000 {
-            e.step(1.0, 1e-4);
-        }
-        assert!(e.pos <= 100.0 + 1e-9);
+        // Full opening drive: (1 - hold) x rate, 87 % in 100 ms.
+        e.step(1.0, 0.1);
+        assert!((e.pos - 87.0).abs() < 1e-9, "{}", e.pos);
+        // It stops at the end.
+        e.step(1.0, 1.0);
+        assert_eq!(e.pos, 100.0);
+        // No drive: the spring alone shuts it, at hold x rate.
+        e.step(0.0, 0.5);
+        assert!((e.pos - 35.0).abs() < 1e-9, "{}", e.pos);
+        // Closing drive is faster, and it stops shut.
+        e.step(-1.0, 0.03);
+        assert!((e.pos - 1.1).abs() < 1e-9, "{}", e.pos);
+        e.step(-1.0, 1.0);
+        assert_eq!(e.pos, 0.0);
+        // A drive past full counts as full.
+        e.step(5.0, 0.01);
+        assert!((e.pos - 8.7).abs() < 1e-9, "{}", e.pos);
     }
 }
