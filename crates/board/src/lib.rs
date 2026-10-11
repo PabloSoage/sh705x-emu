@@ -131,8 +131,8 @@ pub struct Layout {
 /// first. The order of the last two is checked [MED]: a record the firmware loads at boot
 /// (`FFFF68AC`, behind DID 0x1234) is a float and its complement, `43D40000 BC2BFFFF`
 /// (424.0), at offset 0x2AC of block 3, with the same record also at 0x620 of block 0.
-/// With blocks 2 and 3 swapped the firmware reads zeros there, the complement check
-/// fails and the value goes to 0. The byte order only makes it read 424.0 rather than
+/// With blocks 2 and 3 swapped it finds zeros there, not a value and its complement, and
+/// loads 0 (the check itself not located). The byte order only makes it read 424.0 rather than
 /// a meaningless float [DER].
 pub const DEFAULT_LAYOUT: Layout = Layout {
     blocks: [0, 1, 2, 3],
