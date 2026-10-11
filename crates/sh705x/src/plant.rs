@@ -47,6 +47,9 @@ pub const QUANTITY_AT: u32 = 0xFFFE_F8F4;
 /// (coolant, limp modes...), found as the float that follows the idle when the engine
 /// is held at one speed [MED].
 pub const IDLE_TARGET_AT: u32 = 0xFFFE_FB60;
+/// Where it keeps the boost it asks for, kPa (what 0x328A, desired boost pressure,
+/// reports) [MED].
+pub const BOOST_DESIRED_AT: u32 = 0xFFFE_FE84;
 
 /// The torque the firmware reports on diagnostics, N·m (0x1A2D, signed, 0.25 a bit).
 fn diagnostic_torque(m: &mut Machine) -> Option<f64> {
@@ -72,6 +75,9 @@ struct Sample {
     quantity: f64,
     maf: f64,
     egr: f64,
+    boost: f64,
+    boost_asked: f64,
+    vgt: f64,
 }
 
 /// Runs `sh705x plant`.
@@ -102,6 +108,9 @@ pub fn plant(o: &PlantOptions) -> Result<String, String> {
             quantity: f32_at(&rig.m, QUANTITY_AT),
             maf: st.maf,
             egr: st.egr,
+            boost: st.boost,
+            boost_asked: f32_at(&rig.m, BOOST_DESIRED_AT),
+            vgt: st.vgt_duty.unwrap_or(0.0) * 100.0,
         });
     }
 
@@ -114,8 +123,8 @@ pub fn plant(o: &PlantOptions) -> Result<String, String> {
     .unwrap();
     writeln!(
         out,
-        "{:>8} {:>8} {:>8} {:>10} {:>12} {:>8} {:>7}",
-        "t/ms", "rpm", "target", "torque/Nm", "fuel/mm3", "maf/g/s", "egr/%"
+        "{:>8} {:>8} {:>8} {:>10} {:>9} {:>8} {:>6} {:>6} {:>6} {:>5}",
+        "t/ms", "rpm", "target", "torque/Nm", "fuel/mm3", "maf/g/s", "egr/%", "kPa", "asked", "vgt"
     )
     .unwrap();
     // Show at most ~40 rows, thinning evenly, but always the last.
@@ -124,8 +133,17 @@ pub fn plant(o: &PlantOptions) -> Result<String, String> {
         if i % keep == 0 || i + 1 == trace.len() {
             writeln!(
                 out,
-                "{:>8.0} {:>8.1} {:>8.0} {:>10.2} {:>12.2} {:>8.2} {:>7.1}",
-                r.t, r.rpm, r.target, r.torque, r.quantity, r.maf, r.egr
+                "{:>8.0} {:>8.1} {:>8.0} {:>10.2} {:>9.2} {:>8.2} {:>6.1} {:>6.1} {:>6.1} {:>5.1}",
+                r.t,
+                r.rpm,
+                r.target,
+                r.torque,
+                r.quantity,
+                r.maf,
+                r.egr,
+                r.boost,
+                r.boost_asked,
+                r.vgt
             )
             .unwrap();
         }
@@ -142,13 +160,16 @@ pub fn plant(o: &PlantOptions) -> Result<String, String> {
         out,
         "Last quarter: {:.0} rpm on average (from {lo:.0} to {hi:.0}), aiming at an idle of \
          {:.0}; {:.1} N·m, {:.2} mm3 a stroke asked for; EGR {:.1} % open, {:.2} g/s of \
-         fresh air.",
+         fresh air; boost {:.1} kPa for {:.1} asked, VGT at {:.1} %.",
         mean(|r| r.rpm),
         mean(|r| r.target),
         mean(|r| r.torque),
         mean(|r| r.quantity),
         mean(|r| r.egr),
         mean(|r| r.maf),
+        mean(|r| r.boost),
+        mean(|r| r.boost_asked),
+        mean(|r| r.vgt),
     )
     .unwrap();
     Ok(out)

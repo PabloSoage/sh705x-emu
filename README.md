@@ -80,12 +80,14 @@ second, which makes it a reference oracle rather than an emulator.
   and 7.0 mm³ a stroke, as the car does at warm idle. The SCV current loop and the EGR,
   through an air-mass loop, close against plant models from power-on: the EGR settles a
   third open for 5.2 g/s of fresh air, as in the car.
+- **The turbocharger:** the VGT (7A) and the boost the car makes for each speed and fuel;
+  the firmware's boost loop closes on it (`sh705x plant --sensor pedal=30`).
 - **The board's output monitors:** the status chips the firmware reads on SCI3 and SCI4
   and two fault lines on port J are modelled, so its output stage checks pass: no fault
   is pending at idle, with or without the EEPROM.
 - **Not yet:** the ECU injects nothing while the immobilizer, whose other side is not
   emulated, keeps it shut; with the car's EEPROM it also raises the idle to 1000 rpm for
-  it (P160D). The turbocharger and the swirl flaps have no plant yet. What can be
+  it (P160D). The swirl flaps have no plant yet. What can be
   modelled without injection is, from the firmware's own demands.
 
 ## Layout

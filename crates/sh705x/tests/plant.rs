@@ -43,8 +43,9 @@ fn plant_options() {
     }
 }
 
-/// The numbers of the summary line: rpm, idle target, torque, fuel, EGR, fresh air.
-fn summary(out: &str) -> [f64; 6] {
+/// The numbers of the summary line: rpm, idle target, torque, fuel, EGR, fresh air, boost,
+/// boost asked for, VGT command.
+fn summary(out: &str) -> [f64; 9] {
     let line = out
         .lines()
         .find(|l| l.starts_with("Last quarter"))
@@ -54,8 +55,10 @@ fn summary(out: &str) -> [f64; 6] {
         .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
         .filter_map(|w| w.trim_end_matches('.').parse().ok())
         .collect();
-    // rpm, from, to, idle target, torque, fuel, EGR, fresh air
-    [nums[0], nums[3], nums[4], nums[5], nums[6], nums[7]]
+    // rpm, from, to, idle target, torque, fuel, EGR, fresh air, boost, asked, VGT
+    [
+        nums[0], nums[3], nums[4], nums[5], nums[6], nums[7], nums[8], nums[9], nums[10],
+    ]
 }
 
 #[test]
@@ -68,7 +71,7 @@ fn the_engine_idles_where_the_car_does() {
         .map(String::from)
         .to_vec();
     let out = run(&parse(&args).unwrap()).unwrap();
-    let [rpm, target, torque, fuel, egr, maf] = summary(&out);
+    let [rpm, target, torque, fuel, egr, maf, ..] = summary(&out);
     // The car at warm idle, standing (routes 67, 69, 72): 750.5 rpm, 12.0 N·m, 7.0 mm³,
     // the EGR a third open (median 34 %) and 5.2 g/s of fresh air. Ten seconds and no
     // limp mode: the board's status chips pass the firmware's output checks.
@@ -115,6 +118,10 @@ fn in_neutral_the_pedal_revs_it_to_the_limit() {
     .map(String::from)
     .to_vec();
     let out = run(&parse(&args).unwrap()).unwrap();
-    let [rpm, ..] = summary(&out);
+    let [rpm, .., boost, asked, vgt] = summary(&out);
     assert!(rpm > 4000.0 && rpm < 5200.0, "{out}");
+    // The firmware's VGT loop closes on the turbocharger: near its setpoint, the vanes
+    // well open as the car's are at that speed (28 to 36 % at 4000-4500 rpm).
+    assert!((boost - asked).abs() < 8.0, "{out}");
+    assert!((15.0..45.0).contains(&vgt), "{out}");
 }

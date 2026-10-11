@@ -13,11 +13,12 @@ use crate::{EcuOptions, boot, f32_at, sensors};
 use engine::actuators::{Egr, Solenoid};
 use engine::crank::Crank;
 use engine::sensors::{Input, MAF_KEY, input, maf_hz};
+use engine::turbo::Turbo;
 use sh7059::Machine;
 
 /// Where the firmware keeps its net torque, N·m (what 0x1A2D reports) [MED]: see
 /// [`crate::plant::TORQUE_AT`].
-use crate::plant::TORQUE_AT;
+use crate::plant::{QUANTITY_AT, TORQUE_AT};
 
 /// What one step gave.
 #[derive(Clone, Copy, Debug)]
@@ -36,6 +37,8 @@ pub(crate) struct State {
     pub egr: f64,
     /// Fresh air the MAF reads, g/s; 0 with the engine stopped.
     pub maf: f64,
+    /// Manifold pressure, kPa: the sensors' resting value plus the turbocharger's boost.
+    pub boost: f64,
     /// The firmware's net torque, N·m.
     pub torque: f64,
 }
@@ -49,8 +52,11 @@ pub(crate) struct Rig {
     pub crank: Option<Crank>,
     scv: Solenoid,
     egr: Egr,
+    turbo: Turbo,
     scv_in: &'static Input,
     egr_in: &'static Input,
+    boost_in: &'static Input,
+    /// Manifold pressure with no boost, kPa (the sensors' value).
     boost: f64,
     intake: f64,
     rpm: f64,
@@ -75,8 +81,10 @@ impl Rig {
             crank,
             scv: Solenoid::scv(),
             egr: Egr::new(),
+            turbo: Turbo::new(),
             scv_in: input("scv-feedback").expect("scv-feedback curve"),
             egr_in: input("egr").expect("egr curve"),
+            boost_in: input("boost").expect("boost curve"),
             boost: get("boost").unwrap_or(98.0),
             intake: get("intake2").or(get("intake")).unwrap_or(26.0),
             dt: step_us as f64 / 1e6,
@@ -114,8 +122,13 @@ impl Rig {
         let egr = self.egr.step(egr_drive, self.dt);
         m.chip.adc.input[self.scv_in.channel] = self.scv_in.code(self.scv.milliamps());
         m.chip.adc.input[self.egr_in.channel] = self.egr_in.code(egr);
+        // The turbine on the fuel the firmware asks for, with its vanes where 7A puts them.
+        let q = f32_at(m, QUANTITY_AT);
+        let vgt = vgt_duty.unwrap_or(0.0) * 100.0;
+        let boost = self.boost + self.turbo.step(self.rpm, q, vgt, self.dt);
+        m.chip.adc.input[self.boost_in.channel] = self.boost_in.code(boost);
         let maf = if self.rpm > 0.0 {
-            let g = engine::air::fresh_air_g_per_s(self.rpm, self.boost, self.intake, egr);
+            let g = engine::air::fresh_air_g_per_s(self.rpm, boost, self.intake, egr);
             m.chip.stimulus_set(MAF_KEY, maf_hz(g));
             g
         } else {
@@ -129,6 +142,7 @@ impl Rig {
             egr_drive,
             egr,
             maf,
+            boost,
             torque,
         }
     }
