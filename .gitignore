@@ -15,3 +15,9 @@ dumps/
 *.log
 *.report.txt
 *.stackdump
+
+# The release signing key and its password: never in the repository.
+keystore/
+*.jks
+*.keystore
+keystore.properties
