@@ -27,6 +27,7 @@ usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
        sh705x obd   --flash <flash.bin> [--eeprom <eeprom.bin>] [--boot <instructions>]
                     [--adc <channel:code>]... [--rpm <rpm>] [--sensors on|idle|off]
                     [--sensor <key=value>]... [--maf-hz <hz>] [--peers abs|car|none]
+                    [--status <sci.chip=byte>]...
                     <ELM327 command>...
        sh705x serve --flash <flash.bin> [--eeprom <eeprom.bin>] [--port <port>]
                     [--adc <channel:code>]... [--flat-out]
@@ -59,7 +60,9 @@ commands:
           an unknown key lists them all; maf is g/s, a square wave on TI0C); --adc
           sets a raw code and --maf-hz the MAF frequency on top of all that; the ABS
           sends its frame 0x1E9 on the bus unless --peers none; --peers car adds the
-          car's other nodes as they send standing still
+          car's other nodes as they send standing still; --status 4.1=FF has a status
+          chip report a byte (SCI3 chips 0 and 1 on PJ1 and PJ0, SCI4 on PD5 and PD6;
+          on SCI4 a set bit is an output stage's fault: 4.1=FF gives P2103)
           ('0100', 'ATSH7E0', '1A90'...) over the emulated CAN bus, in virtual time;
           prints each answer as an ELM327 would
   serve   run the ECU in real time and serve an ELM327 on TCP (port 35000 by
@@ -85,10 +88,11 @@ commands:
           and data; --labels <file> (the transferred-tags format) names each map in
           words; --compare <other.bin> marks the maps whose data differ there
   actuators boot the ECU (idling at --rpm, 750 by default) and close the two loops that
-          run with the immobiliser shut: the SCV current loop (output 7A fed back on AN1)
-          and the EGR position loop (7C fed back on AN10). The firmware's duties drive a
-          plant model (engine::actuators) whose output is returned to those inputs every
-          --step (50) ms over --millis (3000); prints the trace and where each loop settles
+          run with the immobiliser shut: the SCV current loop (output 6A fed back on AN1)
+          and the EGR position loop (the 7D/7C H-bridge fed back on AN10). The firmware's
+          duties drive plant models (engine::plants) stepped every millisecond from power-on;
+          prints the trace every --step (50) ms over --millis (3000) and where each loop
+          settles
   plant   boot the ECU (at --rpm, 750 by default) and run a simulated engine on the torque
           the firmware asks for: a crank (engine::crank) turns under it against --load
           N·m (12, the warm idling car's), the wheels follow its speed tooth by tooth,
@@ -169,6 +173,8 @@ pub struct EcuOptions {
     pub sensor: Vec<String>,
     /// Frequency of the MAF's square wave on TI0C, over what the sensors give.
     pub maf_hz: Option<u32>,
+    /// Status chips set to report a byte: channel, chip, byte ([`board::set_status`]).
+    pub status: Vec<(usize, usize, u8)>,
     /// Other nodes on the bus: "abs" (the default), "car" or "none".
     pub peers: String,
 }
@@ -188,6 +194,18 @@ fn parse_adc(value: &str) -> Result<(usize, u16), String> {
         return Err(bad());
     }
     Ok((c, v))
+}
+
+/// Parses `--status sci.chip=byte`, the byte in hex.
+fn parse_status(value: &str) -> Result<(usize, usize, u8), String> {
+    let bad = || format!("--status wants sci.chip=byte (4.1=FF), got '{value}'");
+    let (at, byte) = value.split_once('=').ok_or_else(bad)?;
+    let (sci, n) = at.split_once('.').ok_or_else(bad)?;
+    Ok((
+        sci.parse().map_err(|_| bad())?,
+        n.parse().map_err(|_| bad())?,
+        u8::from_str_radix(byte, 16).map_err(|_| bad())?,
+    ))
 }
 
 /// A command's own options: takes the option and the word after it, and says whether
@@ -211,6 +229,7 @@ fn parse_ecu(
         sensor: Vec::new(),
         maf_hz: None,
         peers: "abs".into(),
+        status: Vec::new(),
     };
     let (mut flash, mut args) = (None, Vec::new());
     let mut it = rest.iter().peekable();
@@ -250,6 +269,7 @@ fn parse_ecu(
                 }
                 o.peers = value.clone();
             }
+            "--status" => o.status.push(parse_status(value)?),
             "--sensors" => {
                 if !["on", "idle", "off"].contains(&value.as_str()) {
                     return Err(format!("--sensors is on, idle or off, not '{value}'"));
@@ -935,6 +955,9 @@ fn boot(o: &EcuOptions) -> Result<Machine, String> {
         board::wire_eeproms(&mut chip, &e, o.layout);
     }
     board::wire_status(&mut chip);
+    for &(sci, n, v) in &o.status {
+        board::set_status(&mut chip, sci, n, v)?;
+    }
     let sensors = sensors(o)?;
     for (c, v) in sensors.codes() {
         chip.adc.input[c] = v;

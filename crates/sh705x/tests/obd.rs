@@ -189,3 +189,30 @@ fn no_fault_is_pending_at_idle() {
         assert_eq!(answer, Some("47 00"), "{eeprom:?}: {out}");
     }
 }
+
+#[test]
+fn a_status_chip_reporting_a_fault_sets_its_code() {
+    let Ok(flash) = std::env::var("SH705X_FLASH") else {
+        eprintln!("SH705X_FLASH not set: skipped");
+        return;
+    };
+    // Every bit of the SCI4 chip on PD6 at fault: the throttle motor's P2103.
+    let args = [
+        "obd",
+        "--flash",
+        &flash,
+        "--rpm",
+        "750",
+        "--boot",
+        "560000000",
+        "--status",
+        "4.1=FF",
+        "07",
+    ]
+    .map(String::from);
+    let out = run(&parse(&args).unwrap()).unwrap();
+    let answer = out.lines().map(str::trim).find(|l| l.starts_with("47"));
+    assert!(answer.is_some_and(|a| a.contains("21 03")), "{out}");
+    let bad = ["obd", "--flash", &flash, "--status", "4.1", "07"].map(String::from);
+    assert!(parse(&bad).is_err());
+}

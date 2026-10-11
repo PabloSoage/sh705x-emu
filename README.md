@@ -182,6 +182,11 @@ sh705x obd --flash <flash.bin> --eeprom <eeprom.bin> --rpm 750 010C 0105 07
 # Any sensor in physical units (an unknown key lists them), or a raw A/D code:
 sh705x serve --flash <flash.bin> --eeprom <eeprom.bin> --rpm 2000 --sensor coolant=90 --sensor maf=40
 
+# An output stage at fault, as its status chip reports it (SCI4, chip on PD6: the
+# throttle motor, P2103); or a sensor out of range (AN11, the DPF sensor, at 1023: P2455):
+sh705x obd --flash <flash.bin> --rpm 750 --boot 875000000 --status 4.1=FF 07
+sh705x obd --flash <flash.bin> --rpm 750 --boot 875000000 --adc 11:1023 07
+
 # How fast it runs against real time, with the engine turning:
 sh705x bench --flash <flash.bin> --eeprom <eeprom.bin> --rpm 800
 ```

@@ -267,6 +267,24 @@ pub fn wire_status(chip: &mut sh7059::Sh7059) {
     }
 }
 
+/// Sets the byte status chip `index` reports on channel `sci` (in [`wire_status`] order:
+/// SCI3 PJ1, PJ0; SCI4 PD5, PD6). On SCI4 a set bit is an output stage's fault.
+pub fn set_status(
+    chip: &mut sh7059::Sh7059,
+    sci: usize,
+    index: usize,
+    value: u8,
+) -> Result<(), String> {
+    chip.sci
+        .ch
+        .get_mut(sci)
+        .and_then(|c| c.peer.as_any_mut())
+        .and_then(|a| a.downcast_mut::<microwire::MicrowireBus>())
+        .and_then(|bus| bus.status.get_mut(index))
+        .map(|s| s.value = value)
+        .ok_or_else(|| format!("no status chip {index} on SCI{sci}"))
+}
+
 /// The EEPROM contents as they are now in the chip's peers, laid out as `layout`; None
 /// if [`wire_eeproms`] was not used.
 pub fn eeprom_image(chip: &sh7059::Sh7059, layout: Layout) -> Option<Vec<u8>> {
@@ -347,5 +365,21 @@ mod tests {
         assert_eq!(read(&mut chip, false), 0x40);
         // The fault lines read high (no fault) while the firmware has them as inputs.
         assert_eq!(chip.read16(PJDR) & 0xA000, 0xA000);
+    }
+
+    #[test]
+    fn a_status_chip_reports_the_byte_it_is_set_to() {
+        let mut chip = sh7059::Sh7059::new(&vec![0; sh7059::ROM_SIZE]).unwrap();
+        wire_status(&mut chip);
+        set_status(&mut chip, 3, 1, 0x5A).unwrap();
+        // The chip on PJ0 alone.
+        sh2e::Bus::write16(&mut chip, PJDR, 0x0003);
+        sh2e::Bus::write16(&mut chip, PJDR, 0x0002);
+        assert_eq!(chip.sci.ch[3].peer.exchange(0xFF, false), 0x5A);
+        assert!(
+            set_status(&mut chip, 4, 2, 0xFF).is_err(),
+            "two chips on SCI4"
+        );
+        assert!(set_status(&mut chip, 0, 0, 0xFF).is_err(), "none on SCI0");
     }
 }
