@@ -202,6 +202,18 @@ impl Stimulus for Wheels {
             self.set_rpm(value, now);
         }
     }
+
+    /// 0° is the rising edge of tooth 0 (the first after the gap) in the revolution the
+    /// cam's first pulse starts in; stopped, there is none. Within the pitch that was
+    /// turning when the speed last changed, it is reckoned at the new speed: off by less
+    /// than a pitch.
+    fn crank_angle(&self, now: u64) -> Option<f64> {
+        if self.rpm == 0.0 {
+            return None;
+        }
+        let deg = (now as f64 - self.seg_start) / self.cycles_per_degree();
+        Some((self.seg_pitches as f64 * self.pitch() + deg).rem_euclid(720.0))
+    }
 }
 
 #[cfg(test)]
@@ -225,6 +237,25 @@ mod tests {
         assert_eq!(rising[56], 4_800_000, "one revolution: 60 ms");
         let falling = crank.iter().find(|e| !e.high).unwrap();
         assert_eq!(falling.at, 40_000, "half a pitch high");
+    }
+
+    #[test]
+    fn the_crank_angle_follows_the_teeth() {
+        let mut w = Wheels::new(1000.0, 0);
+        // 1000 rpm: 80 000 cycles a 6° pitch.
+        assert_eq!(w.crank_angle(0), Some(0.0));
+        assert_eq!(w.crank_angle(80_000), Some(6.0));
+        assert_eq!(w.crank_angle(60 * 80_000), Some(360.0));
+        assert_eq!(w.crank_angle(120 * 80_000), Some(0.0), "720° a cam cycle");
+        // Through a change of speed it goes on from where it was.
+        while w.peek().is_some_and(|e| e.at < 10 * 80_000) {
+            w.take();
+        }
+        w.set_rpm(2000.0, 10 * 80_000);
+        let at = w.crank_angle(11 * 80_000).unwrap();
+        assert!((at - 66.0).abs() < 1e-9, "{at}");
+        w.set_rpm(0.0, 12 * 80_000);
+        assert_eq!(w.crank_angle(12 * 80_000), None);
     }
 
     #[test]

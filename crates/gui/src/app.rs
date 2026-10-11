@@ -69,6 +69,13 @@ impl App {
     }
 }
 
+/// The slow-motion speeds offered.
+const SPEEDS: [f64; 4] = [1.0, 0.1, 0.01, 0.001];
+
+fn speed_name(v: f64) -> String {
+    format!("×{v}")
+}
+
 fn hex(s: &str) -> Option<u32> {
     u32::from_str_radix(
         s.trim().trim_start_matches("0x").trim_start_matches("H'"),
@@ -111,10 +118,43 @@ impl App {
                         self.send(Cmd::Step(n));
                     }
                 }
+                if ui
+                    .add_enabled(
+                        !s.running && s.next_edge.is_some(),
+                        egui::Button::new("Next edge"),
+                    )
+                    .on_hover_text("Run until the next crank or cam edge has reached the chip")
+                    .clicked()
+                {
+                    self.send(Cmd::NextEdge);
+                }
+                if ui
+                    .add_enabled(
+                        !s.running && s.crank_angle.is_some(),
+                        egui::Button::new("Next tooth"),
+                    )
+                    .on_hover_text("Run until the crankshaft reaches the next 6° tooth position")
+                    .clicked()
+                {
+                    self.send(Cmd::NextTooth);
+                }
                 let mut rt = s.real_time;
                 if ui.checkbox(&mut rt, "Real time").changed() {
                     self.send(Cmd::RealTime(rt));
                 }
+                ui.add_enabled_ui(s.real_time, |ui| {
+                    egui::ComboBox::from_id_salt("speed")
+                        .selected_text(speed_name(s.speed))
+                        .show_ui(ui, |ui| {
+                            for v in SPEEDS {
+                                if ui.selectable_label(s.speed == v, speed_name(v)).clicked() {
+                                    self.send(Cmd::Speed(v));
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text("Slow motion: ECU time per wall-clock time");
+                });
                 ui.separator();
                 let ms = s.cpu.cycles as f64 / 80_000.0;
                 ui.label(format!(
@@ -206,6 +246,26 @@ impl App {
                         self.send(Cmd::Rpm(rpm));
                     }
                 });
+                if let Some(a) = s.crank_angle {
+                    let tooth = (a.rem_euclid(360.0) / 6.0) as u32;
+                    ui.monospace(format!(
+                        "crank {a:6.1}° of 720, tooth {}",
+                        if tooth < 56 { format!("{tooth:2} of 56") } else { "gap".into() }
+                    ));
+                }
+                if let Some(e) = s.next_edge {
+                    let pin = match e.pin {
+                        sh7059::pins::Pin::Ti0(0) => "crank (TI0A)".to_string(),
+                        sh7059::pins::Pin::Ti0(1) => "cam (TI0B)".to_string(),
+                        sh7059::pins::Pin::Ti0(2) => "MAF (TI0C)".to_string(),
+                        p => format!("{p:?}"),
+                    };
+                    ui.monospace(format!(
+                        "next: {pin} {} in {:.1} µs",
+                        if e.high { "rising" } else { "falling" },
+                        e.at.saturating_sub(s.cpu.cycles) as f64 / 80.0
+                    ));
+                }
                 ui.label("Plants around the ECU:");
                 ui.horizontal(|ui| {
                     for (mode, name, tip) in [
@@ -562,6 +622,84 @@ mod tests {
     }
 
     #[test]
+    fn it_steps_from_one_tooth_to_the_next() {
+        let img = flash();
+        let mut chip = Sh7059::new(&img).unwrap();
+        // The wheel, and a MAF wave much faster than its teeth beside it.
+        chip.set_stimulus(Box::new(sh7059::pins::Merge(vec![
+            Box::new(engine::wheel::Wheels::new(1000.0, 0)),
+            Box::new(sh7059::pins::SquareWave::new(
+                sh7059::pins::Pin::Ti0(2),
+                engine::sensors::MAF_KEY,
+                5000.0,
+                engine::wheel::CYCLES_PER_S,
+                0,
+            )),
+        ])));
+        let m = Machine::new(chip, true);
+        let engine = emu::Engine::ignition_on();
+        let shared = Arc::new(Mutex::new(emu::first_snapshot(&m, &engine)));
+        let (tx, rx) = mpsc::channel();
+        let s2 = shared.clone();
+        let t = std::thread::spawn(move || emu::run(m, engine, rx, s2));
+        tx.send(Cmd::Step(10)).unwrap();
+        let s = wait_for(&shared, |s| s.cpu.instructions == 10);
+        let first = s.next_edge.expect("the wheel turns");
+        tx.send(Cmd::NextEdge).unwrap();
+        let s = wait_for(&shared, |s| s.next_edge.is_some_and(|e| e.at > first.at));
+        assert!(s.cpu.cycles >= first.at, "the edge has reached the chip");
+        assert!(!s.running);
+        // 1000 rpm: 80 000 cycles a 6° tooth.
+        let angle = s.crank_angle.unwrap();
+        assert!(
+            (angle - s.cpu.cycles as f64 / 80_000.0 * 6.0).abs() < 1e-6,
+            "{angle}"
+        );
+        // A tooth at a time, whatever the MAF does in between.
+        let before = angle;
+        tx.send(Cmd::NextTooth).unwrap();
+        let s = wait_for(&shared, |s| {
+            s.crank_angle
+                .is_some_and(|a| (a / 6.0).floor() > (before / 6.0).floor())
+        });
+        let after = s.crank_angle.unwrap();
+        assert!(
+            after - before <= 6.0 + 1e-6 && after % 6.0 < 0.1,
+            "{before} -> {after}"
+        );
+        tx.send(Cmd::Quit).unwrap();
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn slowed_down_it_follows_the_clock_at_that_speed() {
+        let img = flash();
+        let m = Machine::new(Sh7059::new(&img).unwrap(), true);
+        let engine = emu::Engine::ignition_on();
+        let shared = Arc::new(Mutex::new(emu::first_snapshot(&m, &engine)));
+        let (tx, rx) = mpsc::channel();
+        let s2 = shared.clone();
+        let t = std::thread::spawn(move || emu::run(m, engine, rx, s2));
+        for c in [Cmd::RealTime(true), Cmd::Speed(0.01), Cmd::Run] {
+            tx.send(c).unwrap();
+        }
+        let t0 = Instant::now();
+        std::thread::sleep(Duration::from_millis(500));
+        tx.send(Cmd::Pause).unwrap();
+        let s = wait_for(&shared, |s| !s.running);
+        // At most 1/100 of the wall time, a slice of 400 instructions over.
+        let ecu_s = s.cpu.cycles as f64 / 80e6;
+        assert!(
+            ecu_s <= t0.elapsed().as_secs_f64() * 0.01 + 1e-4,
+            "{ecu_s} s"
+        );
+        assert!(ecu_s > 0.0);
+        assert_eq!(s.speed, 0.01);
+        tx.send(Cmd::Quit).unwrap();
+        t.join().unwrap();
+    }
+
+    #[test]
     fn every_tab_draws_without_a_window() {
         let img = flash();
         let m = Machine::new(Sh7059::new(&img).unwrap(), true);
@@ -680,6 +818,24 @@ mod tests {
             h.render().unwrap().save(&path).unwrap();
             eprintln!("{}", path.display());
         }
+        // Stopped where the firmware takes the first tooth after the gap (0xE854), slowed
+        // down, to go on from there an instruction or a tooth at a time.
+        let app = h.state_mut();
+        let shared = app.shared.clone();
+        app.breakpoints = vec![0xE854];
+        for c in [Cmd::Breakpoints(vec![0xE854]), Cmd::Run] {
+            app.send(c);
+        }
+        wait_for(&shared, |s| s.stop == Some(sh7059::Stop::Breakpoint));
+        for c in [Cmd::RealTime(true), Cmd::Speed(0.001)] {
+            app.send(c);
+        }
+        wait_for(&shared, |s| s.speed == 0.001);
+        app.tab = Tab::Interrupts;
+        h.run_steps(3);
+        let path = dir.join("gui-step.png");
+        h.render().unwrap().save(&path).unwrap();
+        eprintln!("{}", path.display());
         h.state().send(Cmd::Quit);
         t.join().unwrap();
     }

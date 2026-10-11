@@ -31,13 +31,13 @@ running.*
 |---|---|---|
 | 0 | Boot in Ghidra's p-code emulator: find where the firmware waits on hardware | done |
 | 1 | SH-2E core (integer and FPU) and memory map, in Rust | done |
-| 2 | Interrupt controller and on-chip peripherals (ATU-II, CMT, WDT, DMAC, SCI, A/D, HCAN) | in progress: INTC, CMT, DMAC, SCI, A/D, HCAN and most of the ATU-II done; the rest needs the engine |
-| 3 | The Denso board: EEPROM, external chips, pin-to-sensor map | in progress: the four EEPROMs served, and the status chips that watch the output stages; 25 of the 32 analog inputs named, the MAF found on a timer input |
-| 4 | Diagnostics over the emulated CAN bus | done for reading: OBD and GMLAN through an ELM327 on TCP and an emulated Scanmatik SM3 |
-| 5 | Simulated engine | in progress: crank and cam wheels, sensors in physical units, the ABS and the car's other nodes on the bus, plants for the SCV, EGR, fresh air and turbocharger, and the crankshaft on the firmware's torque; no injection (the immobilizer) |
-| 6 | Validation against a real ECU, with an FPGA-driven bench | — |
-| 7 | Calibration comparison and map-access tracing | started: setpoints over a speed × pedal grid, two images compared; the maps looked up in a scenario |
-| 8 | The ECU on an FPGA (SH-2 soft core with an SH-2E FPU) | — |
+| 2 | Interrupt controller and on-chip peripherals (ATU-II, CMT, WDT, DMAC, SCI, A/D, HCAN) | done for what this firmware uses: INTC, CMT, DMAC, SCI, A/D, HCAN-II, and the ATU-II's input captures, tooth channel, one-shot pulses and PWM outputs. The WDT is not modelled: the firmware leaves it stopped at boot |
+| 3 | The Denso board: EEPROM, external chips, pin-to-sensor map | done for what the firmware checks: the four EEPROMs (their order checked), the status chips that watch the output stages, the injector driver on SCI0, the fault lines; 25 of the 32 analog inputs named |
+| 4 | Diagnostics over the emulated CAN bus | done: OBD and GMLAN through an ELM327 on TCP and an emulated Scanmatik SM3 |
+| 5 | Simulated engine | done up to injection: crank and cam wheels, sensors in physical units, the car's other nodes on the bus, plants for the SCV, EGR, fresh air and turbocharger, and the crankshaft on the firmware's torque. Injection stays off: the immobilizer's other side is not emulated, by choice |
+| 6 | Validation against a real ECU, with an FPGA-driven bench | half done: the car's recorded diagnostic answers come back from the emulator with the same shape, 108 of 231 byte for byte, the rest differing only in live values and counters (T-6.1). The FPGA bench driving a real ECU (T-6.2) needs an ECU on the bench: not started |
+| 7 | Calibration comparison and map-access tracing | done: setpoints over a speed × pedal grid on the plants, two images compared; the maps looked up in a scenario, named |
+| 8 | The ECU on an FPGA (SH-2 soft core with an SH-2E FPU) | not started: the next hardware project (J-core J2 on the KV260, the FPU in RTL) |
 
 ### Phase 0 in short
 
@@ -79,7 +79,12 @@ second, which makes it a reference oracle rather than an emulator.
   frame is the one whose absence it reports (U0121); it is sent by default, and `--peers
   car` adds the rest of the car as it sends standing still (not the VIN).
 - **Debugging:** memory watchpoints, PC breakpoints and single stepping in the core,
-  and a disassembler.
+  and a disassembler; in the window, a step at a time, a crank tooth or an input edge at
+  a time, and slow motion down to a thousandth of real time.
+- **Checked against the car:** the 204 answers of a diagnostic sweep of the car's engine
+  and its 27 GMLAN identifiers come back with the same shape; 108 are the same byte for
+  byte, the rest are live values, injection, the immobilizer, or counters the EEPROM
+  holds from the day it was read.
 - **Speed:** with the EEPROM, CAN and the engine turning, the emulated ECU runs 1.26 to
   1.36 times faster than real time (about 90 M instructions per second, i7-10870H);
   the SH7059 runs at 80 MHz, about 69 M instructions per second of ECU time. Flash is
@@ -96,8 +101,9 @@ second, which makes it a reference oracle rather than an emulator.
   is pending at idle, with or without the EEPROM.
 - **Not yet:** the ECU injects nothing while the immobilizer, whose other side is not
   emulated, keeps it shut; with the car's EEPROM it also raises the idle to 1000 rpm for
-  it (P160D). The swirl flaps have no plant yet. What can be
-  modelled without injection is, from the firmware's own demands.
+  it (P160D). The swirl flaps are driven open loop and their setpoint stays at 0 for what
+  the simulated engine asks. What can be modelled without injection is, from the
+  firmware's own demands.
 
 ## Layout
 
@@ -156,6 +162,18 @@ cargo run --release -p gui -- --flash <flash.bin> --eeprom <eeprom.bin>
 In the engine panel, "Plants" puts the plants around the ECU: "Held" closes the SCV,
 EGR, fresh air and turbocharger loops at the speed set there; "On its torque" also lets
 the engine turn on the firmware's torque, as `sh705x plant` does.
+
+To watch it act step by step: pause, then "Step 1" runs one instruction, "Next tooth"
+turns the crankshaft to its next tooth position (6°) and "Next edge" to the next edge on
+any input pin (crank, cam or MAF), each stopping at a breakpoint on the way. With "Real
+time" on, the speed box slows the whole ECU down to ×0.1, ×0.01 or ×0.001: at idle, a
+tooth about every second. The engine panel shows the crank angle over the 720° of a cam
+cycle, the tooth, and the next input edge.
+
+![Stopped at a breakpoint in the firmware's reference tooth routine](docs/img/gui-step.png)
+
+*Stopped at a breakpoint on 0xE854, the routine the firmware runs at the first tooth after
+the gap (crank at 363°, tooth 0), slowed to ×0.001, ready to step.*
 
 | CAN traffic | Memory |
 |---|---|

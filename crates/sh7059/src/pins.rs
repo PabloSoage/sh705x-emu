@@ -31,6 +31,11 @@ pub trait Stimulus: Send {
     /// Changes a setting while running (an engine speed, a frequency), from cycle `now`
     /// on. Settings a stimulus does not have are ignored.
     fn set(&mut self, _key: &str, _value: f64, _now: u64) {}
+    /// Where the crankshaft it turns is at cycle `now`, in degrees over the 720° of a
+    /// cam cycle, if it turns one.
+    fn crank_angle(&self, _now: u64) -> Option<f64> {
+        None
+    }
 }
 
 /// Edges given in advance, for tests.
@@ -77,6 +82,10 @@ impl Stimulus for Merge {
         for s in &mut self.0 {
             s.set(key, value, now);
         }
+    }
+
+    fn crank_angle(&self, now: u64) -> Option<f64> {
+        self.0.iter().find_map(|s| s.crank_angle(now))
     }
 }
 

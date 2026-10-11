@@ -35,8 +35,17 @@ pub enum Cmd {
     Preset(bool),
     /// Show memory from this address.
     Memory(u32),
+    /// Paused, run until the next edge on the input pins (crank, cam or MAF) has
+    /// reached the chip; breakpoints still stop it.
+    NextEdge,
+    /// Paused, run until the crankshaft has turned to the next tooth position (6°) and
+    /// its edge has reached the chip; breakpoints still stop it.
+    NextTooth,
     /// Follow the wall clock (true) or run flat out.
     RealTime(bool),
+    /// ECU time per wall-clock time when following the wall clock: 1 is real time,
+    /// 0.001 shows a tooth at idle about every second.
+    Speed(f64),
     /// Send an ELM327 command line over the emulated CAN bus, in virtual time.
     Elm(String),
     /// Put the plants around the ECU, or take them away.
@@ -100,6 +109,12 @@ pub struct Snapshot {
     pub rt_factor: f64,
     /// A/D inputs.
     pub adc: [u16; 32],
+    /// ECU time per wall-clock time when following it.
+    pub speed: f64,
+    /// The crankshaft angle, degrees over 720, if the engine turns.
+    pub crank_angle: Option<f64>,
+    /// The next edge on the input pins.
+    pub next_edge: Option<sh7059::pins::Edge>,
     /// Following the wall clock.
     pub real_time: bool,
     /// The ELM327 console: commands and answers.
@@ -161,6 +176,7 @@ pub const MEM_WINDOW: u32 = 256;
 pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Snapshot>>) {
     let mut running = false;
     let mut real_time = true;
+    let mut speed = 1.0f64;
     let mut stop = None;
     let mut mem_addr = sh7059::RAM_BASE;
     let mut can: VecDeque<CanEvent> = VecDeque::new();
@@ -261,6 +277,45 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
                     real_time = r;
                     (pace_cycle, pace_wall) = (m.cpu.cycles, Instant::now());
                 }
+                Cmd::Speed(s) => {
+                    speed = s.clamp(1e-4, 1.0);
+                    (pace_cycle, pace_wall) = (m.cpu.cycles, Instant::now());
+                }
+                Cmd::NextEdge => {
+                    running = false;
+                    stop = m.chip.next_edge().map(|e| {
+                        // A tooth is about 100 000 instructions at 750 rpm; stop well past
+                        // that rather than run on if the edge never comes.
+                        let mut s = Stop::Count;
+                        for _ in 0..50_000_000 {
+                            if s != Stop::Count || m.chip.next_edge().is_none_or(|n| n.at > e.at) {
+                                break;
+                            }
+                            s = m.run_until(1);
+                        }
+                        s
+                    });
+                }
+                Cmd::NextTooth => {
+                    running = false;
+                    let pitch = |m: &Machine| {
+                        m.chip
+                            .crank_angle(m.cpu.cycles)
+                            .map(|a| (a / 6.0).floor() as u32)
+                    };
+                    stop = pitch(&m).map(|start| {
+                        let mut s = Stop::Count;
+                        for _ in 0..50_000_000 {
+                            let turned = pitch(&m).is_some_and(|p| p != start);
+                            let due = m.chip.next_edge().is_some_and(|e| e.at <= m.cpu.cycles);
+                            if s != Stop::Count || (turned && !due) {
+                                break;
+                            }
+                            s = m.run_until(1);
+                        }
+                        s
+                    });
+                }
                 Cmd::Elm(line) => {
                     let us = m.cpu.cycles / CYCLES_PER_US;
                     let answer = {
@@ -287,12 +342,18 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
         if running {
             let ahead = real_time && {
                 let wall_us = pace_wall.elapsed().as_micros() as u64;
-                m.cpu.cycles - pace_cycle > wall_us * CYCLES_PER_US
+                (m.cpu.cycles - pace_cycle) as f64 > wall_us as f64 * CYCLES_PER_US as f64 * speed
             };
             if ahead {
                 std::thread::sleep(Duration::from_micros(500));
             } else {
-                let s = m.run_until(40_000);
+                // Slowed down, in smaller slices, so the teeth come one by one.
+                let slice = if real_time {
+                    (40_000.0 * speed).max(200.0) as u64
+                } else {
+                    40_000
+                };
+                let s = m.run_until(slice);
                 if s != Stop::Count {
                     running = false;
                     stop = Some(s);
@@ -356,6 +417,9 @@ pub fn run(mut m: Machine, mut engine: Engine, cmds: Receiver<Cmd>, shared: Arc<
                 rt_factor: if running { rt_factor } else { 0.0 },
                 adc: m.chip.adc.input,
                 real_time,
+                speed,
+                crank_angle: m.chip.crank_angle(m.cpu.cycles),
+                next_edge: m.chip.next_edge(),
                 console: console.clone(),
                 sci: std::array::from_fn(|k| {
                     let c = &m.chip.sci.ch[k];
@@ -417,6 +481,9 @@ pub fn first_snapshot(m: &Machine, engine: &Engine) -> Snapshot {
         rt_factor: 0.0,
         adc: m.chip.adc.input,
         real_time: true,
+        speed: 1.0,
+        crank_angle: m.chip.crank_angle(m.cpu.cycles),
+        next_edge: m.chip.next_edge(),
         console: Vec::new(),
         sci: [(0, 0); 5],
         engine: engine.clone(),

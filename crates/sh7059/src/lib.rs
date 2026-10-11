@@ -634,6 +634,17 @@ impl Sh7059 {
         }
     }
 
+    /// The next edge on the input pins, not taken yet.
+    pub fn next_edge(&self) -> Option<pins::Edge> {
+        self.stimulus.as_ref()?.peek()
+    }
+
+    /// Where the crankshaft driving the input pins is at cycle `now`, degrees over 720
+    /// (see [`pins::Stimulus::crank_angle`]).
+    pub fn crank_angle(&self, now: u64) -> Option<f64> {
+        self.stimulus.as_ref()?.crank_angle(now)
+    }
+
     /// Takes the input pin edges due by `now`, each at its own cycle.
     fn take_edges(&mut self) {
         let Some(s) = self.stimulus.as_mut() else {
