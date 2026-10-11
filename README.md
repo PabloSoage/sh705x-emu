@@ -168,7 +168,7 @@ off the bus.
 
 ```sh
 # What the ECU asks for over a grid of engine speed and pedal, and where a second image
-# differs: fuel per stroke, torque delivered, desired rail pressure, SCV current (measured)
+# differs: fuel injected and asked for, torque delivered, desired rail pressure, SCV current (measured)
 # and duty command, desired air flow and boost, VGT vane command, desired EGR and
 # throttle, load.
 sh705x maps --flash <original.bin> --compare <modified.bin> --eeprom <eeprom.bin>
@@ -183,10 +183,11 @@ cycle, target air mass, torque-to-IQ, rail pressure limiters...):
 sh705x touched --flash <original.bin> --compare <modified.bin> --eeprom <eeprom.bin>     --rpm 2500 --sensor pedal=60 --masters 3d=7128,2d=70B4 --catalog <maps-3d.csv> --labels <tags.txt>
 ```
 
-Each point of `maps` boots the ECU there and lets the boost settle on its target. The setpoints
-come from the calibration's maps, so a changed map shows where the engine is on it; as
-long as the ECU does not inject, the fuel per stroke reads 0 and the setpoints that depend
-on it (EGR) sit at their idle floor.
+Each point of `maps` holds the engine at that speed, as on a dyno, while the ECU boots
+with the plants around it (EGR, fresh air, SCV, turbocharger), and reads the setpoints
+once their loops have settled. They come from the calibration's maps, so a changed map
+shows where the engine is on it. As long as the ECU does not inject, the fuel it injects
+reads 0; the fuel it asks for, read from RAM, is the number a fuel map change moves.
 
 ### Actuators that run without injection
 

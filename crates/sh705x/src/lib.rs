@@ -69,8 +69,9 @@ commands:
           fast as it goes, and print the real-time factor: ECU time over wall time,
           1.00 being just real time
   maps    boot the ECU at each engine speed and pedal position of a grid (--rpm-list,
-          --pedal-list) and read its setpoints over diagnostics: desired rail pressure,
-          boost and air flow, load, desired EGR and throttle; with --compare, the same on
+          --pedal-list), the engine held there with the plants around it, and read its
+          setpoints: fuel asked for, desired rail pressure, boost and air flow, load,
+          desired EGR and throttle; with --compare, the same on
           a second flash image and where they differ, to see what a calibration change
           does
   touched boot the ECU as obd does, then watch --millis (2000) of ECU time and list every

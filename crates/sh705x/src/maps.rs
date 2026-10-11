@@ -7,20 +7,29 @@
 //! from the calibration's maps, so two images that differ in a map differ here where the
 //! engine is on it.
 //!
-//! Each point is a steady state: a first pass, with the manifold at the barometric
-//! pressure, gives the desired boost; the next puts the boost sensor there, as if the
-//! turbo had reached it, with the MAF reading what the engine draws at that speed and
-//! pressure (`engine::air`), until the desired boost stops moving (up to four passes). The ECU does not inject
-//! (see the README), so these are the values it asks for, not what an engine would
-//! reach.
+//! Each point is a steady state: the engine is held at the point's speed, as on a dyno,
+//! while the ECU boots with the plants around it (`crate::rig`): the EGR, the fresh air,
+//! the SCV and the turbocharger close their loops before the setpoints are read. The ECU
+//! does not inject (see the README), so these are the values it asks for, not what an
+//! engine would reach; the fuel it asks for is read from RAM.
 
-use crate::{EcuOptions, boot};
+use crate::plant::QUANTITY_AT;
+use crate::rig::Rig;
+use crate::{EcuOptions, f32_at};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-/// A setpoint read over GMLAN service 22.
+/// Where a setpoint is read.
+enum From {
+    /// A GMLAN identifier, over service 22.
+    Did(u16),
+    /// A float in RAM, for what the diagnostics do not report.
+    Ram(u32),
+}
+
+/// A setpoint.
 struct Setpoint {
-    did: u16,
+    from: From,
     name: &'static str,
     unit: &'static str,
     bytes: usize,
@@ -35,7 +44,7 @@ struct Setpoint {
 /// (`opendash-plugins/opel-vauxhall/profiles.txt`), so the ECU answers them.
 const SETPOINTS: &[Setpoint] = &[
     Setpoint {
-        did: 0x3233,
+        from: From::Did(0x3233),
         name: "fuel per stroke",
         unit: "mm3",
         bytes: 2,
@@ -43,7 +52,17 @@ const SETPOINTS: &[Setpoint] = &[
         signed: false,
     },
     Setpoint {
-        did: 0x1A2D,
+        // What the firmware asks for: 0x3233 is what it injects, 0 while the immobiliser
+        // holds it shut (resultados fase 8).
+        from: From::Ram(QUANTITY_AT),
+        name: "fuel asked for",
+        unit: "mm3",
+        bytes: 4,
+        scale: 1.0,
+        signed: false,
+    },
+    Setpoint {
+        from: From::Did(0x1A2D),
         name: "torque delivered",
         unit: "N·m",
         bytes: 2,
@@ -51,7 +70,7 @@ const SETPOINTS: &[Setpoint] = &[
         signed: true,
     },
     Setpoint {
-        did: 0x308A,
+        from: From::Did(0x308A),
         name: "desired rail pressure",
         unit: "MPa",
         bytes: 2,
@@ -59,7 +78,7 @@ const SETPOINTS: &[Setpoint] = &[
         signed: false,
     },
     Setpoint {
-        did: 0x323E,
+        from: From::Did(0x323E),
         // Despite its name in the car's profile ("regulator command"), this reads back
         // whatever current is set on AN1: the measured current [MED].
         name: "SCV current (measured)",
@@ -69,7 +88,7 @@ const SETPOINTS: &[Setpoint] = &[
         signed: false,
     },
     Setpoint {
-        did: 0x323D,
+        from: From::Did(0x323D),
         name: "SCV duty command",
         unit: "%",
         bytes: 1,
@@ -77,7 +96,7 @@ const SETPOINTS: &[Setpoint] = &[
         signed: false,
     },
     Setpoint {
-        did: 0x327B,
+        from: From::Did(0x327B),
         name: "desired air flow",
         unit: "g/s",
         bytes: 2,
@@ -85,7 +104,7 @@ const SETPOINTS: &[Setpoint] = &[
         signed: false,
     },
     Setpoint {
-        did: 0x328A,
+        from: From::Did(0x328A),
         name: "desired boost pressure",
         unit: "kPa",
         bytes: 2,
@@ -93,7 +112,7 @@ const SETPOINTS: &[Setpoint] = &[
         signed: false,
     },
     Setpoint {
-        did: 0x2041,
+        from: From::Did(0x2041),
         name: "VGT vane command",
         unit: "%",
         bytes: 1,
@@ -101,7 +120,7 @@ const SETPOINTS: &[Setpoint] = &[
         signed: false,
     },
     Setpoint {
-        did: 0x002C,
+        from: From::Did(0x002C),
         name: "desired EGR position",
         unit: "%",
         bytes: 1,
@@ -109,15 +128,15 @@ const SETPOINTS: &[Setpoint] = &[
         signed: false,
     },
     Setpoint {
-        did: 0x32A8,
+        from: From::Did(0x32A8),
         name: "EGR command",
         unit: "%",
         bytes: 1,
         scale: 1.0,
-        signed: false,
+        signed: true,
     },
     Setpoint {
-        did: 0x004C,
+        from: From::Did(0x004C),
         name: "desired throttle position",
         unit: "%",
         bytes: 1,
@@ -125,7 +144,7 @@ const SETPOINTS: &[Setpoint] = &[
         signed: false,
     },
     Setpoint {
-        did: 0x0004,
+        from: From::Did(0x0004),
         name: "engine load",
         unit: "%",
         bytes: 1,
@@ -148,20 +167,29 @@ pub struct MapsOptions {
 }
 
 /// The setpoints at one point, in setpoint order; `None` where the ECU did not answer.
+/// The engine turns at the point's speed, held there as on a dyno, with the plants of
+/// [`crate::rig`] around the ECU from power-on: the EGR and the fresh air it leaves, the
+/// SCV and the turbocharger close their loops while it boots, so what is read is the
+/// steady state the firmware reaches there.
 fn read_point(o: &EcuOptions) -> Result<Vec<Option<f64>>, String> {
-    let mut m = boot(o)?;
-    let mut link = bridge::link::VirtualLink::new(&mut m, 0);
+    let mut rig = Rig::new(o, None, 1000)?;
+    let quantity = f32_at(&rig.m, QUANTITY_AT);
+    let mut link = bridge::link::VirtualLink::new(&mut rig.m, 0);
     let mut elm = bridge::elm::Elm327::new();
     elm.echo = false;
     Ok(SETPOINTS
         .iter()
         .map(|s| {
-            let answer = elm.line(&format!("22{:04X}", s.did), &mut link);
+            let did = match s.from {
+                From::Ram(_) => return Some(quantity),
+                From::Did(did) => did,
+            };
+            let answer = elm.line(&format!("22{did:04X}"), &mut link);
             let b: Vec<u8> = answer
                 .split_whitespace()
                 .filter_map(|h| u8::from_str_radix(h, 16).ok())
                 .collect();
-            let echo = [0x62, (s.did >> 8) as u8, s.did as u8];
+            let echo = [0x62, (did >> 8) as u8, did as u8];
             let at = b.windows(3).position(|w| w == echo)? + 3;
             let raw = b.get(at..at + s.bytes)?;
             let v = raw.iter().fold(0u32, |a, &x| a << 8 | x as u32);
@@ -176,45 +204,14 @@ fn read_point(o: &EcuOptions) -> Result<Vec<Option<f64>>, String> {
         .collect())
 }
 
-/// The ECU at `rpm` with the pedal at `pedal` %, on `flash`, with the manifold at
-/// `boost` kPa and the air the engine draws there.
-fn point(o: &EcuOptions, flash: &Path, rpm: u32, pedal: u32, boost: f64) -> EcuOptions {
+/// The ECU at `rpm` with the pedal at `pedal` %, on `flash`.
+fn point(o: &EcuOptions, flash: &Path, rpm: u32, pedal: u32) -> EcuOptions {
     let mut p = o.clone();
     p.flash = flash.to_path_buf();
     p.rpm = Some(rpm);
     p.sensor.push(format!("pedal={pedal}"));
-    p.sensor.push(format!("boost={boost}"));
-    let maf = engine::air::maf_g_per_s(rpm as f64, boost, 26.0);
-    p.sensor.push(format!("maf={maf}"));
     p
 }
-
-/// Index of the desired boost in [`SETPOINTS`].
-const DESIRED_BOOST: usize = 6;
-
-/// The setpoints at one point once the engine has settled: a first pass at the
-/// barometric pressure gives the desired boost; the next puts the manifold there, as
-/// if the turbo reached its target, and reads them again, until the desired boost moves
-/// less than 1 kPa or after [`PASSES`] passes.
-fn settled(o: &EcuOptions, flash: &Path, rpm: u32, pedal: u32) -> Result<Vec<Option<f64>>, String> {
-    let mut boost = BARO;
-    let mut values = read_point(&point(o, flash, rpm, pedal, boost))?;
-    for _ in 1..PASSES {
-        let want = values[DESIRED_BOOST].unwrap_or(BARO).max(BARO);
-        if (want - boost).abs() < 1.0 {
-            break;
-        }
-        boost = want;
-        values = read_point(&point(o, flash, rpm, pedal, boost))?;
-    }
-    Ok(values)
-}
-
-/// Most passes for a point to settle.
-const PASSES: usize = 4;
-
-/// Barometric pressure of the defaults, kPa.
-const BARO: f64 = 98.0;
 
 /// Runs the grid on one image: values[setpoint][rpm][pedal].
 fn grid(o: &MapsOptions, flash: &Path) -> Result<Vec<Vec<Vec<Option<f64>>>>, String> {
@@ -229,7 +226,7 @@ fn grid(o: &MapsOptions, flash: &Path) -> Result<Vec<Vec<Vec<Option<f64>>>>, Str
                 s.spawn(move || {
                     chunk
                         .iter()
-                        .map(|&(r, p)| settled(&o.ecu, flash, o.rpm[r], o.pedal[p]))
+                        .map(|&(r, p)| read_point(&point(&o.ecu, flash, o.rpm[r], o.pedal[p])))
                         .collect::<Vec<_>>()
                 })
             })
@@ -276,7 +273,11 @@ pub fn maps(o: &MapsOptions) -> Result<String, String> {
     let mut out = String::new();
     let mut differ = 0;
     for (k, s) in SETPOINTS.iter().enumerate() {
-        let title = format!("{} ({}), identifier {:04X}", s.name, s.unit, s.did);
+        let source = match s.from {
+            From::Did(did) => format!("identifier {did:04X}"),
+            From::Ram(at) => format!("RAM {at:08X}"),
+        };
+        let title = format!("{} ({}), {source}", s.name, s.unit);
         match &b {
             None => table(&mut out, o, &title, |r, p| show(a[k][r][p])),
             Some(b) => {
@@ -312,16 +313,4 @@ pub fn maps(o: &MapsOptions) -> Result<String, String> {
         .unwrap();
     }
     Ok(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{DESIRED_BOOST, SETPOINTS};
-
-    #[test]
-    fn desired_boost_points_at_its_setpoint() {
-        // `settled` feeds this setpoint's value back as the manifold pressure, so the
-        // index must track the table if it is reordered.
-        assert_eq!(SETPOINTS[DESIRED_BOOST].did, 0x328A);
-    }
 }

@@ -63,7 +63,7 @@ fn an_image_against_itself_differs_nowhere() {
     .map(String::from)
     .to_vec();
     let out = run(&parse(&args).unwrap()).unwrap();
-    assert!(out.contains("0 of 12 setpoints differ"), "{out}");
+    assert!(out.contains("0 of 13 setpoints differ"), "{out}");
     // And alone it gives numbers, not dashes: the ECU answered.
     let args: Vec<String> = [
         "maps",
