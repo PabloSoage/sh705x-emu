@@ -38,6 +38,28 @@
     <string name="injector">iny %1$d</string>
     <string name="no_injection">Los inyectores (TO8I–L) no dan ningún pulso aquí: la centralita no inyecta mientras el inmovilizador, cuyo otro lado no se emula, la tiene cerrada. La presión de raíl que se ve es la del sensor tal como se pone, no la de una combustión.</string>
 
+    <string name="tab_engine">Motor</string>
+    <string name="tab_maps">Mapas</string>
+    <string name="maps_starting">Buscando las rutinas de interpolación en la flash…</string>
+    <string name="find_sensors">Buscar los sensores</string>
+    <string name="read_profile">Perfil de opendash…</string>
+    <string name="read_labels">Etiquetas de mapas…</string>
+    <string name="profiles_read">%1$d perfiles leídos</string>
+    <string name="labels_read">%1$d etiquetas leídas</string>
+    <string name="naming">Nombrando: la centralita corre unos segundos con el motor movido…</string>
+    <string name="name_from">Nombrar desde el perfil</string>
+    <string name="names_private">Los perfiles y las etiquetas se leen de tu almacenamiento y se quedan allí: la app no guarda nada.</string>
+    <string name="last_lookup_3d">Última lectura: X %1$s, Y %2$s, resultado %3$s</string>
+    <string name="last_lookup_2d">Última lectura: X %1$s, resultado %2$s</string>
+    <string name="heat_map">Mapa de calor</string>
+    <string name="curve">Curva</string>
+    <string name="surface">Superficie</string>
+    <string name="table">Tabla</string>
+    <string name="stop_at_lookup">Parar en su próxima lectura</string>
+    <string name="stop_cancel">Parando en su próxima lectura · cancelar</string>
+    <string name="filter">Filtro (dirección, nombre, 2D/3D)</string>
+    <string name="follow">Seguir</string>
+
     <string name="theme">Tema</string>
     <string name="theme_dark">Oscuro</string>
     <string name="theme_light">Claro</string>

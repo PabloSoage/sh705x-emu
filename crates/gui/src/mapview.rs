@@ -6,7 +6,7 @@
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 use session::maps::{Map, MapTrace, Seen};
-use session::names::{How, Name, Profile, read_labels, read_profiles};
+use session::names::{Name, Profile, read_labels, read_profiles};
 use session::sites::Source;
 use std::collections::BTreeMap;
 
@@ -450,62 +450,30 @@ fn detail(
     }
 }
 
-/// What a map is called: its label, else what its result is stored as, if named.
+/// What a map is called (see [`MapTrace::title`]).
 fn title(trace: &MapTrace, desc: u32) -> Option<String> {
-    if let Some(n) = trace.names.maps.get(&desc) {
-        return Some(n.text.clone());
-    }
-    trace.seen.get(&desc)?.sites.keys().find_map(|r| {
-        let a = trace.sites.get(r)?.out?;
-        trace
-            .names
-            .vars
-            .get(&a)
-            .map(|n| format!("gives {}", n.text))
-    })
+    trace.title(desc)
 }
 
-/// A variable: its name if known (with a ? if matched in one state only), and its address.
+/// A variable by name (see [`MapTrace::var_name`]).
 fn var_name(trace: &MapTrace, a: u32) -> String {
-    match trace.names.vars.get(&a) {
-        Some(n) => {
-            let unsure = matches!(n.how, How::Identifier { sure: false, .. });
-            let unit = if n.unit.is_empty() {
-                String::new()
-            } else {
-                format!(", {}", n.unit)
-            };
-            format!(
-                "{}{unit}{} ({a:08X})",
-                n.text,
-                if unsure { "?" } else { "" }
-            )
-        }
-        None => format!("{a:08X}"),
-    }
+    trace.var_name(a)
 }
 
 /// Where an input comes from; another map is a link to it.
 fn source_link(ui: &mut egui::Ui, trace: &MapTrace, src: Source, v: &mut MapView) {
     match src {
-        Source::Ram(a) => {
-            ui.label(egui::RichText::new(var_name(trace, a)).strong());
-        }
         Source::Map(d) => {
-            let t = title(trace, d).map_or(String::new(), |t| format!(" ({t})"));
-            if ui.link(format!("map {d:06X}{t}")).clicked() {
+            if ui.link(trace.source_text(src)).clicked() {
                 v.selected = Some(d);
                 v.follow = false;
             }
         }
-        Source::Call(t) => {
-            ui.label(match trace.names.routines.get(&t) {
-                Some(n) => format!("{} (routine {t:06X})", n.text),
-                None => format!("routine {t:06X}"),
-            });
+        Source::Ram(_) => {
+            ui.label(egui::RichText::new(trace.source_text(src)).strong());
         }
-        Source::Unknown => {
-            ui.label("computed in the caller");
+        _ => {
+            ui.label(trace.source_text(src));
         }
     }
 }

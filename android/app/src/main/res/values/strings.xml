@@ -38,6 +38,28 @@
     <string name="injector">inj %1$d</string>
     <string name="no_injection">The injectors (TO8I–L) never pulse here: the ECU does not inject while the immobilizer, whose other side is not emulated, keeps it shut. The rail pressure shown is the sensor as set, not a combustion.</string>
 
+    <string name="tab_engine">Engine</string>
+    <string name="tab_maps">Maps</string>
+    <string name="maps_starting">Finding the interpolation routines in the flash…</string>
+    <string name="find_sensors">Find the sensors</string>
+    <string name="read_profile">opendash profile…</string>
+    <string name="read_labels">Map labels…</string>
+    <string name="profiles_read">%1$d profiles read</string>
+    <string name="labels_read">%1$d labels read</string>
+    <string name="naming">Naming: the ECU runs a few seconds with the engine moved…</string>
+    <string name="name_from">Name from profile</string>
+    <string name="names_private">Profiles and labels are read from your storage and stay there: nothing is kept with the app.</string>
+    <string name="last_lookup_3d">Last lookup: X %1$s, Y %2$s, result %3$s</string>
+    <string name="last_lookup_2d">Last lookup: X %1$s, result %2$s</string>
+    <string name="heat_map">Heat map</string>
+    <string name="curve">Curve</string>
+    <string name="surface">Surface</string>
+    <string name="table">Table</string>
+    <string name="stop_at_lookup">Stop at its next lookup</string>
+    <string name="stop_cancel">Stopping at its next lookup · cancel</string>
+    <string name="filter">Filter (address, name, 2D/3D)</string>
+    <string name="follow">Follow</string>
+
     <string name="theme">Theme</string>
     <string name="theme_dark">Dark</string>
     <string name="theme_light">Light</string>

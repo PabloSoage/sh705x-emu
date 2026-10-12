@@ -19,6 +19,9 @@ use std::collections::BTreeSet;
 const SETTLE: u64 = 105_000_000;
 /// Variables a match that moved between the states may name: copies of one value.
 const COPIES: usize = 32;
+/// Inputs not moved: the 5 V references, which the firmware checks (moving them leaves
+/// P0652 pending), and the oil level switch, whose 0 or 1 matches too much to name.
+const KEEP: [&str; 3] = ["ref1", "ref2", "oil-level"];
 
 /// Every finite float in RAM, by address.
 fn ram_floats(m: &Machine) -> Vec<(u32, f32)> {
@@ -88,6 +91,15 @@ impl Session {
             .and_then(|d| p.value(d))
     }
 
+    /// Runs `n` instructions in short slices, as the window does, so that the plants
+    /// (the crankshaft turning on the firmware's torque) step as often as they should.
+    fn settle(&mut self, n: u64) {
+        let end = self.m.cpu.instructions + n;
+        while self.m.cpu.instructions < end {
+            self.run(40_000);
+        }
+    }
+
     /// RAM now, and each of `params` asked for.
     fn state(&mut self, params: &[Parameter]) -> State {
         let ram = ram_floats(&self.m);
@@ -113,13 +125,15 @@ impl Session {
             ((0.9317, -1.13), 12.0, 300.0),
         ] {
             for &(key, v) in &sensors.values {
-                let _ = self.set_sensor(key, v * scale + add);
+                if !KEEP.contains(&key) {
+                    let _ = self.set_sensor(key, v * scale + add);
+                }
             }
             let _ = self.set_sensor("pedal", pedal);
             if held {
                 self.set_rpm(rpm + faster);
             }
-            self.run(SETTLE);
+            self.settle(SETTLE);
             let set = self.engine.sensors.clone();
             states.push((set, self.state(params)));
         }
@@ -129,7 +143,7 @@ impl Session {
         if held {
             self.set_rpm(rpm);
         }
-        self.run(SETTLE / 4);
+        self.settle(SETTLE / 4);
 
         let mut names = Names::default();
         for (i, &(key, _)) in sensors.values.iter().enumerate() {
@@ -269,5 +283,39 @@ mod tests {
         let named = |a: u32| names.vars.get(&a).map(|n| n.text.as_str());
         assert_eq!(named(0xFFFE_F924), Some("Desired Fuel Rail Pressure"));
         assert_eq!(named(0xFFFE_FC4C), Some("Torque Delivered Signal"));
+    }
+}
+
+#[cfg(test)]
+mod after {
+    /// Naming moves the engine and puts it back: with the engine turning on its torque,
+    /// it idles where it did and no fault is left behind.
+    #[test]
+    fn naming_leaves_the_engine_as_it_was() {
+        let Ok(path) = std::env::var("SH705X_FLASH") else {
+            return;
+        };
+        let f = std::fs::read(path).unwrap();
+        let mut m = crate::machine(&f, None, board::DEFAULT_LAYOUT).unwrap();
+        let e = crate::Engine::idle();
+        e.apply(&mut m);
+        let mut s = crate::Session::new(m, e);
+        s.set_plants(crate::PlantMode::Turning);
+        s.settle(400_000_000);
+        let pending = |s: &mut crate::Session| {
+            let mut link = bridge::link::VirtualLink::new(&mut s.m, 0);
+            let timing = bridge::isotp::Timing {
+                answer_us: 100_000,
+                more_us: 0,
+            };
+            let a = bridge::isotp::request(&mut link, 0x7E0, &[0x07], &|id| id == 0x7E8, timing);
+            a.first().map(|a| a.payload.clone())
+        };
+        let before = (s.engine.rpm, pending(&mut s));
+        s.find_names(None);
+        s.settle(600_000_000);
+        let after = (s.engine.rpm, pending(&mut s));
+        assert!((before.0 - after.0).abs() < 30.0, "{before:?} {after:?}");
+        assert_eq!(after.1, Some(vec![0x47, 0x00]), "{after:?}");
     }
 }

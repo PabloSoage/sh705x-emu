@@ -308,6 +308,16 @@ the system's, is a tap away.
 | <img src="docs/img/app-engine.png" width="300" alt="The app idling: controls, the crank and cam wheels, the cylinders"> | <img src="docs/img/app-charts.png" width="300" alt="The app's charts: SCV current, rail, fresh air, fuel and torque asked, crank and cam signals"> |
 | The Astra's flash idling at 750 rpm on its own torque (Android emulator, x86_64). | SCV current on its setpoint, rail asked 24 MPa, 5.2 g/s of fresh air, 7.0 mm³ and 12 N·m asked; the crank signal with its gap and the cam's pulses. |
 
+The maps are there too, under "Maps": the same list, the map drawn from its descriptor
+with where the firmware is on it, where each input comes from and where the result goes,
+the sensors found by moving them, and an opendash profile or map labels read from the
+phone's storage.
+
+| A map | As a surface |
+|---|---|
+| <img src="docs/img/app-maps.png" width="300" alt="The app's maps tab: a map read at engine speed and coolant temperature, as a heat map"> | <img src="docs/img/app-maps-surface.png" width="300" alt="The same map as a surface"> |
+| Read at engine speed (the firmware's own routine) and coolant temperature (found by moving the sensor), the firmware at 750 rpm and 77 °C. | The same map as a surface, turned with a finger. |
+
 Building it needs the Android SDK with NDK 29.0.14206865, JDK 21 (Gradle provisions
 Corretto 21 for Kotlin), [cargo-ndk](https://github.com/bbqsrc/cargo-ndk) and the two Rust
 targets; Gradle runs `cargo ndk` before it packs the native libraries:

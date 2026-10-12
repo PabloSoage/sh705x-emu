@@ -28,6 +28,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -230,6 +231,22 @@ private fun Engine(frame: Frame, window: Int, onWindow: (Int) -> Unit, onOff: ()
                 label = { Text(if (s == 1.0) stringResource(R.string.real_time) else "×$s") },
             )
         }
+    }
+
+    // The engine, or the maps it reads (traced only while shown: about 6 % slower).
+    var tab by remember { mutableIntStateOf(0) }
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(selected = tab == 0, onClick = { tab = 0 }, label = { Text(stringResource(R.string.tab_engine)) })
+        FilterChip(selected = tab == 1, onClick = { tab = 1 }, label = { Text(stringResource(R.string.tab_maps)) })
+    }
+    DisposableEffect(tab) {
+        if (tab == 1) Native.traceMaps(true)
+        onDispose { if (tab == 1) Native.traceMaps(false) }
+    }
+    if (tab == 1) {
+        MapsScreen()
+        Spacer(Modifier.height(24.dp))
+        return
     }
 
     Text(stringResource(R.string.plants), style = MaterialTheme.typography.labelLarge)

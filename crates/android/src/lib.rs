@@ -5,11 +5,15 @@
 //! `com.varuna.sh705x.Native`.
 
 mod exports;
+mod maps;
 
 use bridge::link::CYCLES_PER_US;
+use session::maps::MapTrace;
+use session::names::{Name, Profile};
 use session::scope::{Scope, TRACES};
 use session::{Engine, PlantMode, Session};
 use sh7059::Stop;
+use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -35,9 +39,20 @@ pub enum Order {
     NextTooth,
     /// Paused, run to the next edge on the input pins.
     NextEdge,
+    /// Trace the maps the firmware reads, or stop.
+    TraceMaps(bool),
+    /// Stop at the next lookup of this map (its descriptor), or no longer.
+    BreakOnMap(Option<u32>),
+    /// Name the variables: the sensors, and a profile's parameters if given.
+    NameVariables(Option<Profile>),
+    /// Map labels, by descriptor.
+    LabelMaps(BTreeMap<u32, Name>),
     /// End the thread.
     Quit,
 }
+
+/// The maps being traced, as the thread publishes them.
+type MapSlot = Arc<Mutex<Option<Arc<Mutex<MapTrace>>>>>;
 
 /// What the thread published last.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -70,6 +85,7 @@ pub struct Live {
     orders: Sender<Order>,
     status: Arc<Mutex<Status>>,
     scope: Arc<Mutex<Scope>>,
+    maps: MapSlot,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -94,14 +110,17 @@ impl Live {
         }));
         let scope = Arc::new(Mutex::new(Scope::default()));
         let (s2, sc2) = (status.clone(), scope.clone());
+        let maps: MapSlot = Arc::default();
+        let m2 = maps.clone();
         let thread = std::thread::Builder::new()
             .name("ecu".into())
-            .spawn(move || run(ecu, rx, s2, sc2))
+            .spawn(move || run(ecu, rx, s2, sc2, m2))
             .map_err(|e| e.to_string())?;
         Ok(Self {
             orders,
             status,
             scope,
+            maps,
             thread: Some(thread),
         })
     }
@@ -200,6 +219,7 @@ fn run(
     orders: Receiver<Order>,
     status: Arc<Mutex<Status>>,
     scope: Arc<Mutex<Scope>>,
+    maps: MapSlot,
 ) {
     let mut running = false;
     let mut speed = 1.0f64;
@@ -246,6 +266,16 @@ fn run(
                     running = false;
                     stop = ecu.next_edge();
                 }
+                Order::TraceMaps(on) => {
+                    ecu.trace_maps(on);
+                    *lock(&maps) = ecu.maps.clone();
+                }
+                Order::BreakOnMap(d) => ecu.break_on_map(d),
+                Order::NameVariables(p) => {
+                    ecu.name_variables(p.as_ref());
+                    (pace_cycle, pace_wall) = (ecu.m.cpu.cycles, Instant::now());
+                }
+                Order::LabelMaps(l) => ecu.label_maps(l),
                 Order::Quit => return,
             }
             next = orders.try_recv().ok();
@@ -364,5 +394,33 @@ mod tests {
         let b = wait_for(&live, |s| s.crank != a).crank;
         let turned = (b - a).rem_euclid(720.0);
         assert!(turned > 0.0 && turned < 12.0, "{a} -> {b}");
+    }
+
+    #[test]
+    fn the_maps_read_as_the_app_lays_them_out() {
+        let Some(img) = flash() else { return };
+        let live = Live::open(&img, None).unwrap();
+        live.send(Order::Preset(true));
+        live.send(Order::TraceMaps(true));
+        live.send(Order::Speed(1.0));
+        live.send(Order::Run(true));
+        // The boost target (resultados fase 7) among the maps read.
+        let t = Instant::now();
+        while !live.map_list("09DADC").starts_with("09DADC") {
+            assert!(t.elapsed() < Duration::from_secs(60), "timed out");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(live.maps_status().contains("routines 3D 7128, 2D 70B4"));
+        let d = live.map_data(0x9DADC);
+        let (nx, ny, trail) = (d[1] as usize, d[2] as usize, d[7] as usize);
+        assert_eq!((d[0], nx, ny), (3.0, 20, 20));
+        assert_eq!(
+            d.len(),
+            crate::maps::MAP_HEADER + nx + ny + nx * ny + 3 * trail
+        );
+        let text = live.map_text(0x9DADC);
+        assert!(text.contains("from 03D852"), "{text}");
+        assert!(text.contains("engine speed (routine 00D432)"), "{text}");
+        assert!(live.map_data(0x1234).is_empty());
     }
 }

@@ -13,6 +13,7 @@ use jni::refs::Reference;
 use jni::sys::{jboolean, jdouble, jint, jstring};
 use jni::{EnvUnowned, Outcome};
 use session::PlantMode;
+use session::names::{read_labels, read_profiles};
 use std::sync::Mutex;
 
 /// The ECU the app is running, if any.
@@ -238,4 +239,172 @@ pub extern "system" fn Java_com_varuna_sh705x_Native_nextEdge<'l>(
         send(Order::NextEdge);
         Ok(())
     })
+}
+
+/// Traces the maps the firmware reads, or stops.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_traceMaps<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    on: jboolean,
+) {
+    unit(&mut env, |_| {
+        send(Order::TraceMaps(on));
+        Ok(())
+    })
+}
+
+/// Stops at the next lookup of the map `desc`, or no longer (negative).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_breakOnMap<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    desc: jint,
+) {
+    unit(&mut env, |_| {
+        send(Order::BreakOnMap((desc >= 0).then_some(desc as u32)));
+        Ok(())
+    })
+}
+
+/// How the map trace stands, in one line; empty while the maps are not traced.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_mapsStatus<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+) -> jstring {
+    string(&mut env, |_| {
+        Ok(lock(&LIVE)
+            .as_ref()
+            .map(Live::maps_status)
+            .unwrap_or_default())
+    })
+}
+
+/// [`Live::map_list`].
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_mapList<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    filter: JString<'l>,
+) -> jstring {
+    string(&mut env, |env| {
+        let f = filter.try_to_string(env)?;
+        Ok(lock(&LIVE)
+            .as_ref()
+            .map(|l| l.map_list(&f))
+            .unwrap_or_default())
+    })
+}
+
+/// [`Live::map_data`].
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_mapData<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    desc: jint,
+) -> JDoubleArray<'l> {
+    env.with_env(|env| -> jni::errors::Result<JDoubleArray<'l>> {
+        let d = lock(&LIVE)
+            .as_ref()
+            .map(|l| l.map_data(desc as u32))
+            .unwrap_or_default();
+        let a = env.new_double_array(d.len())?;
+        a.set_region(env, 0, &d)?;
+        Ok(a)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// [`Live::map_text`].
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_mapText<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    desc: jint,
+) -> jstring {
+    string(&mut env, |_| {
+        Ok(lock(&LIVE)
+            .as_ref()
+            .map(|l| l.map_text(desc as u32))
+            .unwrap_or_default())
+    })
+}
+
+/// [`Live::map_sources`].
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_mapSources<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    desc: jint,
+) -> jstring {
+    string(&mut env, |_| {
+        Ok(lock(&LIVE)
+            .as_ref()
+            .map(|l| l.map_sources(desc as u32))
+            .unwrap_or_default())
+    })
+}
+
+/// Names the variables the maps read by moving the sensors.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_nameSensors<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+) {
+    unit(&mut env, |_| {
+        send(Order::NameVariables(None));
+        Ok(())
+    })
+}
+
+/// The profiles in an opendash profile file, one name per line.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_profileNames<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    text: JString<'l>,
+) -> jstring {
+    string(&mut env, |env| {
+        let t = text.try_to_string(env)?;
+        Ok(read_profiles(&t)
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<Vec<_>>()
+            .join("\n"))
+    })
+}
+
+/// Names the variables from profile `index` of an opendash profile file (and the
+/// sensors).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_nameFromProfile<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    text: JString<'l>,
+    index: jint,
+) {
+    unit(&mut env, |env| {
+        let t = text.try_to_string(env)?;
+        if let Some(p) = read_profiles(&t).into_iter().nth(index.max(0) as usize) {
+            send(Order::NameVariables(Some(p)));
+        }
+        Ok(())
+    })
+}
+
+/// Adds the map labels in a label file (transferred-tags format); returns how many.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_labelMaps<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    text: JString<'l>,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let l = read_labels(&text.try_to_string(env)?);
+        let n = l.len() as jint;
+        send(Order::LabelMaps(l));
+        Ok(n)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
 }

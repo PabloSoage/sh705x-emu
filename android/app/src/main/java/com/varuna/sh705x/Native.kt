@@ -51,4 +51,40 @@ object Native {
 
     /** Paused, runs to the next edge on the input pins (crank, cam or MAF). */
     external fun nextEdge()
+
+    /** Traces the calibration maps the firmware reads, or stops (about 6 % slower while on). */
+    external fun traceMaps(on: Boolean)
+
+    /** Stops at the next lookup of map [desc], or no longer (negative). */
+    external fun breakOnMap(desc: Int)
+
+    /** How the map trace stands, in one line; empty while the maps are not traced. */
+    external fun mapsStatus(): String
+
+    /**
+     * The maps read, the latest first, those [filter] matches: one per line,
+     * `desc dims nx ny lookups last name`, tab-separated.
+     */
+    external fun mapList(filter: String): String
+
+    /** One map's numbers: see [MapData]. Empty if the map is not known. */
+    external fun mapData(desc: Int): DoubleArray
+
+    /** What is known about a map, in words, one fact per line. */
+    external fun mapText(desc: Int): String
+
+    /** The maps a map's inputs come from and that read its result, one hex descriptor per line. */
+    external fun mapSources(desc: Int): String
+
+    /** Names the variables the maps read by moving the sensors (a few seconds). */
+    external fun nameSensors()
+
+    /** The profiles in an opendash profile file, one name per line. */
+    external fun profileNames(text: String): String
+
+    /** Names the variables from profile [index] of an opendash profile file, and the sensors. */
+    external fun nameFromProfile(text: String, index: Int)
+
+    /** Adds the map labels in a label file; returns how many. */
+    external fun labelMaps(text: String): Int
 }

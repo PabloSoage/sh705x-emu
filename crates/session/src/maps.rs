@@ -408,6 +408,54 @@ impl MapTrace {
         }
     }
 
+    /// What a map is called: its label, else what its result is stored as, if named.
+    pub fn title(&self, desc: u32) -> Option<String> {
+        if let Some(n) = self.names.maps.get(&desc) {
+            return Some(n.text.clone());
+        }
+        self.seen.get(&desc)?.sites.keys().find_map(|r| {
+            let a = self.sites.get(r)?.out?;
+            self.names.vars.get(&a).map(|n| format!("gives {}", n.text))
+        })
+    }
+
+    /// A variable: its name if known (with a ? if matched in one state only), its unit,
+    /// and its address.
+    pub fn var_name(&self, a: u32) -> String {
+        match self.names.vars.get(&a) {
+            Some(n) => {
+                let unsure = matches!(n.how, crate::names::How::Identifier { sure: false, .. });
+                let unit = if n.unit.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {}", n.unit)
+                };
+                format!(
+                    "{}{unit}{} ({a:08X})",
+                    n.text,
+                    if unsure { "?" } else { "" }
+                )
+            }
+            None => format!("{a:08X}"),
+        }
+    }
+
+    /// Where an input comes from, in words.
+    pub fn source_text(&self, src: Source) -> String {
+        match src {
+            Source::Ram(a) => self.var_name(a),
+            Source::Map(d) => {
+                let t = self.title(d).map_or(String::new(), |t| format!(" ({t})"));
+                format!("map {d:06X}{t}")
+            }
+            Source::Call(t) => match self.names.routines.get(&t) {
+                Some(n) => format!("{} (routine {t:06X})", n.text),
+                None => format!("routine {t:06X}"),
+            },
+            Source::Unknown => "computed in the caller".into(),
+        }
+    }
+
     /// The maps whose result an input of a lookup is, or that read a variable a map's
     /// result is stored in: who reads what `desc` gives (by the sites seen so far).
     pub fn readers(&self, desc: u32) -> Vec<u32> {
