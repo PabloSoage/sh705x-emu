@@ -60,6 +60,12 @@ pub enum Cmd {
     NameVariables(Option<session::names::Profile>),
     /// Map labels, by descriptor.
     LabelMaps(std::collections::BTreeMap<u32, session::names::Name>),
+    /// Stop at the next test of this fault code (its index), or no longer.
+    BreakOnTest(Option<u16>),
+    /// Ask the ECU for its confirmed and pending codes.
+    ReadCodes,
+    /// Descriptions of fault codes, by code.
+    DescribeCodes(std::collections::BTreeMap<String, String>),
     /// End the thread.
     Quit,
 }
@@ -129,8 +135,8 @@ pub struct Snapshot {
     pub scope: Arc<Mutex<Scope>>,
     /// The maps the firmware reads, while they are traced.
     pub maps: Option<Arc<Mutex<session::maps::MapTrace>>>,
-    /// The map a map break waits for.
-    pub map_break: Option<u32>,
+    /// What the next stop waits for.
+    pub watch: Option<session::Watch>,
 }
 
 /// Frames kept for the CAN view.
@@ -189,6 +195,12 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
                     (pace_cycle, pace_wall) = (ecu.m.cpu.cycles, Instant::now());
                 }
                 Cmd::LabelMaps(l) => ecu.label_maps(l),
+                Cmd::BreakOnTest(i) => ecu.break_on_test(i),
+                Cmd::ReadCodes => {
+                    ecu.read_codes();
+                    (pace_cycle, pace_wall) = (ecu.m.cpu.cycles, Instant::now());
+                }
+                Cmd::DescribeCodes(t) => ecu.describe_codes(t),
                 Cmd::Adc(c, v) => ecu.m.chip.adc.input[c] = v,
                 Cmd::Sensor(k, v) => {
                     let _ = ecu.set_sensor(k, v);
@@ -319,7 +331,7 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
                 plant: ecu.plant,
                 scope: scope.clone(),
                 maps: ecu.maps.clone(),
-                map_break: ecu.map_break(),
+                watch: ecu.watching(),
             };
             *shared.lock().expect("snapshot lock") = snap;
             published = Instant::now();
@@ -383,6 +395,6 @@ pub fn first_snapshot(m: &Machine, engine: &Engine) -> Snapshot {
         plant: None,
         scope: Arc::default(),
         maps: None,
-        map_break: None,
+        watch: None,
     }
 }

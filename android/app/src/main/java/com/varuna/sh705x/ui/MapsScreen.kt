@@ -121,7 +121,7 @@ private suspend fun readText(context: Context, uri: Uri): String = withContext(D
 /** The calibration maps the firmware reads, as it reads them. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun MapsScreen() {
+fun MapsScreen(open: Int? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var filter by remember { mutableStateOf("") }
@@ -141,6 +141,14 @@ fun MapsScreen() {
     // While naming: the names part of the status it started from; the note goes when it changes.
     var namingFrom by remember { mutableStateOf<String?>(null) }
     val namesOf = { st: String -> st.substringAfter("names:", "") }
+
+    // A map asked for from elsewhere (a fault code's test).
+    LaunchedEffect(open) {
+        if (open != null) {
+            selected = open
+            follow = false
+        }
+    }
 
     LaunchedEffect(Unit) {
         var tick = 0

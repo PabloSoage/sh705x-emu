@@ -60,6 +60,18 @@
     <string name="filter">Filtro (dirección, nombre, 2D/3D)</string>
     <string name="follow">Seguir</string>
 
+    <string name="tab_faults">Averías</string>
+    <string name="codes_unknown">Las tablas de códigos de avería sólo se conocen para la calibración del Astra J (NCLSW420AX36).</string>
+    <string name="read_codes">Leer los códigos</string>
+    <string name="read_texts">Descripciones…</string>
+    <string name="texts_read">%1$d descripciones leídas</string>
+    <string name="its_maps">Mapas que lee su prueba</string>
+    <string name="stop_at_test">Parar en su próxima prueba</string>
+    <string name="stop_test_cancel">Parando en su próxima prueba · cancelar</string>
+    <string name="code_filter">Filtro (código o descripción)</string>
+    <string name="only_failing">Fallando</string>
+    <string name="only_disabled">Anulados</string>
+
     <string name="theme">Tema</string>
     <string name="theme_dark">Oscuro</string>
     <string name="theme_light">Claro</string>

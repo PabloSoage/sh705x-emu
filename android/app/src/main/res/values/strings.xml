@@ -60,6 +60,18 @@
     <string name="filter">Filter (address, name, 2D/3D)</string>
     <string name="follow">Follow</string>
 
+    <string name="tab_faults">Faults</string>
+    <string name="codes_unknown">The fault codes\' tables are known for the Astra J\'s calibration (NCLSW420AX36) only.</string>
+    <string name="read_codes">Read the codes</string>
+    <string name="read_texts">Descriptions…</string>
+    <string name="texts_read">%1$d descriptions read</string>
+    <string name="its_maps">Maps its test reads</string>
+    <string name="stop_at_test">Stop at its next test</string>
+    <string name="stop_test_cancel">Stopping at its next test · cancel</string>
+    <string name="code_filter">Filter (code or description)</string>
+    <string name="only_failing">Failing</string>
+    <string name="only_disabled">Disabled</string>
+
     <string name="theme">Theme</string>
     <string name="theme_dark">Dark</string>
     <string name="theme_light">Light</string>

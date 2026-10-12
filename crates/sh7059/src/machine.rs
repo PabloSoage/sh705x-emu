@@ -27,6 +27,8 @@ pub struct Call {
     pub ret: u32,
     /// R4 on entry (a Denso map routine's descriptor).
     pub r4: u32,
+    /// R5 on entry (a second argument).
+    pub r5: u32,
     /// FR4 and FR5 on entry (its inputs).
     pub fr4: f32,
     /// See [`Call::fr4`].
@@ -101,6 +103,7 @@ impl Probes {
                 routine: pc,
                 ret: cpu.pr,
                 r4: cpu.r[4],
+                r5: cpu.r[5],
                 fr4: f32::from_bits(cpu.fr[4]),
                 fr5: f32::from_bits(cpu.fr[5]),
                 fr0: f32::NAN,

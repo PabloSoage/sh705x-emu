@@ -13,6 +13,7 @@ use jni::refs::Reference;
 use jni::sys::{jboolean, jdouble, jint, jstring};
 use jni::{EnvUnowned, Outcome};
 use session::PlantMode;
+use session::dtcs::read_texts;
 use session::names::{read_labels, read_profiles};
 use std::sync::Mutex;
 
@@ -404,6 +405,109 @@ pub extern "system" fn Java_com_varuna_sh705x_Native_labelMaps<'l>(
         let l = read_labels(&text.try_to_string(env)?);
         let n = l.len() as jint;
         send(Order::LabelMaps(l));
+        Ok(n)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// The fault codes in one line; empty while they are not traced or not known.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_codesStatus<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+) -> jstring {
+    string(&mut env, |_| {
+        Ok(lock(&LIVE)
+            .as_ref()
+            .map(Live::codes_status)
+            .unwrap_or_default())
+    })
+}
+
+/// [`Live::code_list`].
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_codeList<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    filter: JString<'l>,
+    failing: jboolean,
+    disabled: jboolean,
+) -> jstring {
+    string(&mut env, |env| {
+        let f = filter.try_to_string(env)?;
+        Ok(lock(&LIVE)
+            .as_ref()
+            .map(|l| l.code_list(&f, failing, disabled))
+            .unwrap_or_default())
+    })
+}
+
+/// [`Live::code_text`].
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_codeText<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    index: jint,
+) -> jstring {
+    string(&mut env, |_| {
+        Ok(lock(&LIVE)
+            .as_ref()
+            .map(|l| l.code_text(index.max(0) as u16))
+            .unwrap_or_default())
+    })
+}
+
+/// [`Live::code_maps`].
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_codeMaps<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    index: jint,
+) -> jstring {
+    string(&mut env, |_| {
+        Ok(lock(&LIVE)
+            .as_ref()
+            .map(|l| l.code_maps(index.max(0) as u16))
+            .unwrap_or_default())
+    })
+}
+
+/// Stops at the next test of fault code `index`, or no longer (negative).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_breakOnTest<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    index: jint,
+) {
+    unit(&mut env, |_| {
+        send(Order::BreakOnTest((index >= 0).then_some(index as u16)));
+        Ok(())
+    })
+}
+
+/// Asks the ECU for its confirmed and pending codes.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_readCodes<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+) {
+    unit(&mut env, |_| {
+        send(Order::ReadCodes);
+        Ok(())
+    })
+}
+
+/// Adds code descriptions from a file (a code, then its text, per line); returns how many.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_describeCodes<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    text: JString<'l>,
+) -> jint {
+    env.with_env(|env| -> jni::errors::Result<jint> {
+        let t = read_texts(&text.try_to_string(env)?);
+        let n = t.len() as jint;
+        send(Order::DescribeCodes(t));
         Ok(n)
     })
     .resolve::<ThrowRuntimeExAndDefault>()

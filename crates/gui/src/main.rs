@@ -15,6 +15,7 @@
 
 mod app;
 mod emu;
+mod faultview;
 mod load;
 mod mapview;
 mod view;

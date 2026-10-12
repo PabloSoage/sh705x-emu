@@ -238,13 +238,25 @@ private fun Engine(frame: Frame, window: Int, onWindow: (Int) -> Unit, onOff: ()
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         FilterChip(selected = tab == 0, onClick = { tab = 0 }, label = { Text(stringResource(R.string.tab_engine)) })
         FilterChip(selected = tab == 1, onClick = { tab = 1 }, label = { Text(stringResource(R.string.tab_maps)) })
+        FilterChip(selected = tab == 2, onClick = { tab = 2 }, label = { Text(stringResource(R.string.tab_faults)) })
     }
-    DisposableEffect(tab) {
-        if (tab == 1) Native.traceMaps(true)
-        onDispose { if (tab == 1) Native.traceMaps(false) }
+    // The maps and the codes' tests are traced together, while either tab is open.
+    val tracing = tab != 0
+    DisposableEffect(tracing) {
+        if (tracing) Native.traceMaps(true)
+        onDispose { if (tracing) Native.traceMaps(false) }
     }
+    var openMap by remember { mutableStateOf<Int?>(null) }
     if (tab == 1) {
-        MapsScreen()
+        MapsScreen(openMap)
+        Spacer(Modifier.height(24.dp))
+        return
+    }
+    if (tab == 2) {
+        FaultsScreen { d ->
+            openMap = d
+            tab = 1
+        }
         Spacer(Modifier.height(24.dp))
         return
     }

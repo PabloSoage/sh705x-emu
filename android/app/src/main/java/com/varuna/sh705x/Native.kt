@@ -87,4 +87,28 @@ object Native {
 
     /** Adds the map labels in a label file; returns how many. */
     external fun labelMaps(text: String): Int
+
+    /** The fault codes in one line; empty while they are not traced (with the maps) or not known. */
+    external fun codesStatus(): String
+
+    /**
+     * The codes [filter] matches, only failing or disabled ones if asked: one per line,
+     * `index code enabled fails tests last status text`, tab-separated.
+     */
+    external fun codeList(filter: String, failing: Boolean, disabled: Boolean): String
+
+    /** One code in words, one fact per line. */
+    external fun codeText(index: Int): String
+
+    /** The maps a code's tests read, one hex descriptor per line. */
+    external fun codeMaps(index: Int): String
+
+    /** Stops at the next test of code [index], or no longer (negative). */
+    external fun breakOnTest(index: Int)
+
+    /** Asks the ECU for its confirmed and pending codes. */
+    external fun readCodes()
+
+    /** Adds code descriptions from a file (a code, then its text, per line); returns how many. */
+    external fun describeCodes(text: String): Int
 }

@@ -4,7 +4,10 @@
 //! has just been: as a heat map, a surface to turn, a table, or a curve. Its call sites
 //! open in the code view, and the ECU can stop at its next lookup.
 
-use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2};
+use eframe::egui::{
+    self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2,
+};
+use session::Watch;
 use session::maps::{Map, MapTrace, Seen};
 use session::names::{Name, Profile, read_labels, read_profiles};
 use session::sites::Source;
@@ -19,6 +22,16 @@ enum Sort {
     Calls,
     /// By descriptor address.
     Address,
+}
+
+/// Which page of the window is shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Page {
+    /// The maps.
+    #[default]
+    Maps,
+    /// The fault codes.
+    Faults,
 }
 
 /// How a map is drawn.
@@ -47,6 +60,10 @@ pub struct MapView {
     profile: usize,
     /// What the last file read said.
     note: Option<String>,
+    /// The page shown.
+    pub(crate) page: Page,
+    /// The fault codes page.
+    pub(crate) faults: crate::faultview::FaultView,
 }
 
 impl Default for MapView {
@@ -62,6 +79,8 @@ impl Default for MapView {
             profiles: Vec::new(),
             profile: 0,
             note: None,
+            page: Page::Maps,
+            faults: Default::default(),
         }
     }
 }
@@ -77,6 +96,12 @@ pub enum Action {
     Name(Option<Profile>),
     /// Map labels to add, by descriptor.
     Labels(BTreeMap<u32, Name>),
+    /// Stop at the next test of this fault code, or no longer.
+    BreakTest(Option<u16>),
+    /// Ask the ECU for its codes.
+    ReadCodes,
+    /// Descriptions of fault codes to add, by code.
+    Texts(BTreeMap<String, String>),
 }
 
 /// Lookups shown as the trail of where the firmware has been on a map.
@@ -144,9 +169,32 @@ pub fn show(
     ui: &mut egui::Ui,
     trace: &MapTrace,
     v: &mut MapView,
-    map_break: Option<u32>,
+    watch: Option<Watch>,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
+    let map_break = match watch {
+        Some(Watch::Map(d)) => Some(d),
+        _ => None,
+    };
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut v.page, Page::Maps, RichText::new("Maps").strong());
+        ui.selectable_value(
+            &mut v.page,
+            Page::Faults,
+            RichText::new("Fault codes").strong(),
+        )
+        .on_hover_text("The calibration's fault codes, their tests live, and the maps they read");
+    });
+    if v.page == Page::Faults {
+        let mut go = None;
+        crate::faultview::show(ui, trace, &mut v.faults, watch, &mut actions, &mut go);
+        if let Some(d) = go {
+            v.page = Page::Maps;
+            v.selected = Some(d);
+            v.follow = false;
+        }
+        return actions;
+    }
     if v.follow
         && let Some(c) = trace.recent.back()
     {

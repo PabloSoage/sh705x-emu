@@ -5,6 +5,7 @@
 //! `com.varuna.sh705x.Native`.
 
 mod exports;
+mod faults;
 mod maps;
 
 use bridge::link::CYCLES_PER_US;
@@ -47,6 +48,12 @@ pub enum Order {
     NameVariables(Option<Profile>),
     /// Map labels, by descriptor.
     LabelMaps(BTreeMap<u32, Name>),
+    /// Stop at the next test of this fault code (its index), or no longer.
+    BreakOnTest(Option<u16>),
+    /// Ask the ECU for its confirmed and pending codes.
+    ReadCodes,
+    /// Descriptions of fault codes, by code.
+    DescribeCodes(BTreeMap<String, String>),
     /// End the thread.
     Quit,
 }
@@ -276,6 +283,12 @@ fn run(
                     (pace_cycle, pace_wall) = (ecu.m.cpu.cycles, Instant::now());
                 }
                 Order::LabelMaps(l) => ecu.label_maps(l),
+                Order::BreakOnTest(i) => ecu.break_on_test(i),
+                Order::ReadCodes => {
+                    ecu.read_codes();
+                    (pace_cycle, pace_wall) = (ecu.m.cpu.cycles, Instant::now());
+                }
+                Order::DescribeCodes(t) => ecu.describe_codes(t),
                 Order::Quit => return,
             }
             next = orders.try_recv().ok();
@@ -422,5 +435,14 @@ mod tests {
         assert!(text.contains("from 03D852"), "{text}");
         assert!(text.contains("engine speed (routine 00D432)"), "{text}");
         assert!(live.map_data(0x1234).is_empty());
+        // The codes, traced with the maps.
+        assert!(
+            live.codes_status().starts_with("202 codes"),
+            "{}",
+            live.codes_status()
+        );
+        assert!(live.code_list("P0101", false, false).contains("	P0101	"));
+        let p0101 = live.code_text(2);
+        assert!(p0101.contains("which reads 09A13C"), "{p0101}");
     }
 }

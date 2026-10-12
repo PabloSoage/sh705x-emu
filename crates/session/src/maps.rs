@@ -395,6 +395,8 @@ pub struct MapTrace {
     pub sites: HashMap<u32, Site>,
     /// What is known by name.
     pub names: Names,
+    /// The fault codes and their tests, where the calibration's layout is known.
+    pub dtcs: Option<crate::dtcs::DtcTrace>,
 }
 
 impl MapTrace {
@@ -495,6 +497,12 @@ impl MapTrace {
         let chip = &m.chip;
         let read = |a: u32| chip.peek(a);
         for c in calls {
+            if let Some(d) = self.dtcs.as_mut()
+                && c.routine == d.layout.reporter
+            {
+                d.add(&c);
+                continue;
+            }
             self.total += 1;
             let three = Some(c.routine) == self.masters.d3;
             let s = self.seen.entry(c.r4).or_insert_with(|| Seen {

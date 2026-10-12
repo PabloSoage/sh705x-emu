@@ -215,7 +215,7 @@ impl App {
                 .show(root.ctx(), |ui| match &s.maps {
                     Some(t) => {
                         let t = t.lock().expect("map trace lock");
-                        actions = crate::mapview::show(ui, &t, &mut self.maps, s.map_break);
+                        actions = crate::mapview::show(ui, &t, &mut self.maps, s.watch);
                     }
                     None => {
                         ui.label("Finding the interpolation routines in the flash…");
@@ -236,6 +236,14 @@ impl App {
                     }
                     crate::mapview::Action::Name(p) => self.send(Cmd::NameVariables(p)),
                     crate::mapview::Action::Labels(l) => self.send(Cmd::LabelMaps(l)),
+                    crate::mapview::Action::BreakTest(i) => {
+                        self.send(Cmd::BreakOnTest(i));
+                        if i.is_some() {
+                            self.send(Cmd::Run);
+                        }
+                    }
+                    crate::mapview::Action::ReadCodes => self.send(Cmd::ReadCodes),
+                    crate::mapview::Action::Texts(t) => self.send(Cmd::DescribeCodes(t)),
                 }
             }
             if !open {
@@ -901,6 +909,45 @@ mod tests {
         Some((app, t))
     }
 
+    /// Idling with the maps and codes traced, the DPF sensor at the top of its range, and
+    /// the codes read: P2455 among them.
+    fn with_a_fault() -> Option<(App, std::thread::JoinHandle<()>)> {
+        let (app, t) = tracing_maps()?;
+        app.send(Cmd::Adc(11, 1023));
+        let start = app.shared.lock().unwrap().cpu.cycles;
+        wait_for(&app.shared, |s| s.cpu.cycles > start + 300_000_000);
+        app.send(Cmd::ReadCodes);
+        wait_for(&app.shared, |s| {
+            s.maps.as_ref().is_some_and(|m| {
+                m.lock()
+                    .unwrap()
+                    .dtcs
+                    .as_ref()
+                    .is_some_and(|d| d.confirmed.contains(&0x2455) || d.pending.contains(&0x2455))
+            })
+        });
+        Some((app, t))
+    }
+
+    #[test]
+    fn the_fault_codes_page_draws() {
+        let Some((mut app, t)) = with_a_fault() else {
+            return;
+        };
+        app.maps_view = true;
+        app.maps.page = crate::mapview::Page::Faults;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+        // A code with maps in its test, one provoked, one never tested.
+        for i in [2u16, 120, 197] {
+            h.state_mut().maps.faults.selected = Some(i);
+            h.run_steps(2);
+        }
+        h.state().send(Cmd::Quit);
+        t.join().unwrap();
+    }
+
     #[test]
     fn the_maps_window_draws_every_view() {
         let Some((mut app, t)) = tracing_maps() else {
@@ -1022,6 +1069,23 @@ mod tests {
             h.render().unwrap().save(&path).unwrap();
             eprintln!("{}", path.display());
         }
+        h.state().send(Cmd::Quit);
+        t.join().unwrap();
+        // The fault codes page: the DPF sensor at the top of its range, the codes read,
+        // and P0101, whose test reads two maps.
+        let Some((mut app, t)) = with_a_fault() else {
+            return;
+        };
+        app.maps_view = true;
+        app.maps.page = crate::mapview::Page::Faults;
+        app.maps.faults.selected = Some(2);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+        h.run_steps(3);
+        let path = dir.join("gui-faults.png");
+        h.render().unwrap().save(&path).unwrap();
+        eprintln!("{}", path.display());
         h.state().send(Cmd::Quit);
         t.join().unwrap();
     }

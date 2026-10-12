@@ -255,6 +255,21 @@ Names come from three places:
   "Read map labels…" takes labels by descriptor. Neither is kept with the emulator: such
   catalogues are often someone else's data, and stay on your disk.
 
+The same window has the calibration's fault codes, on the Astra's: the 202 codes as the
+flash holds them, enabled or disabled (tables A and C both 0 disable one, as a workshop
+file does), what the ECU does while one is active, and their tests live. Every test reports
+through one routine with the code's index and its result, so the emulator probes it too:
+how often each code is tested, how often its test fails, which codes the ECU reports
+(modes 03 and 07), where each is tested, which maps that test reads, and "Stop at its next
+test". At idle 193 of the 202 are tested; with the DPF sensor at the top
+of its range, P2455's test starts failing and the ECU reports the code. Descriptions come
+with the emulator for the codes this project has met; your own file can add the rest.
+
+![The fault codes page: P0101, whose test reads two maps](docs/img/gui-faults.png)
+
+*The DPF sensor at the top of its range and the codes read (P2455 pending, further down);
+P0101's test reads two maps, each a link to the map.*
+
 | CAN traffic | Memory |
 |---|---|
 | ![The CAN tab](docs/img/gui-can.png) | ![The memory tab](docs/img/gui-memory.png) |
@@ -312,6 +327,10 @@ The maps are there too, under "Maps": the same list, the map drawn from its desc
 with where the firmware is on it, where each input comes from and where the result goes,
 the sensors found by moving them, and an opendash profile or map labels read from the
 phone's storage.
+
+| Fault codes |  |
+|---|---|
+| <img src="docs/img/app-faults.png" width="300" alt="The app's faults tab: P0101, its tables, its tests live and the maps its test reads"> | The "Faults" tab: every code of the calibration with its tests live, which the ECU reports, and for each one its tables, where it is tested and the maps its test reads. |
 
 | A map | As a surface |
 |---|---|

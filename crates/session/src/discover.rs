@@ -76,19 +76,23 @@ impl Session {
             let (hi, lo) = ((p.pid >> 8) as u8, p.pid as u8);
             (vec![0x22, hi, lo], vec![0x62, hi, lo])
         };
+        self.request(&payload)?
+            .strip_prefix(head.as_slice())
+            .and_then(|d| p.value(d))
+    }
+
+    /// Sends `payload` to the engine ECU (7E0) on the emulated CAN bus; its answer.
+    pub(crate) fn request(&mut self, payload: &[u8]) -> Option<Vec<u8>> {
         let timing = Timing {
             answer_us: 100_000,
             more_us: 0,
         };
         let answers = {
             let mut link = VirtualLink::new(&mut self.m, 0);
-            request(&mut link, 0x7E0, &payload, &|id| id == 0x7E8, timing)
+            request(&mut link, 0x7E0, payload, &|id| id == 0x7E8, timing)
         };
         self.resync();
-        let a = answers.first()?;
-        a.payload
-            .strip_prefix(head.as_slice())
-            .and_then(|d| p.value(d))
+        answers.into_iter().next().map(|a| a.payload)
     }
 
     /// Runs `n` instructions in short slices, as the window does, so that the plants

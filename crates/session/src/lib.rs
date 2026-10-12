@@ -5,6 +5,7 @@
 //! Android app (`android`) both drive it; the command line has its own rig.
 
 mod discover;
+pub mod dtcs;
 pub mod maps;
 pub mod names;
 pub mod scope;
@@ -146,22 +147,32 @@ pub struct Session {
     pub maps: Option<Arc<Mutex<MapTrace>>>,
     /// The breakpoints asked for (the machine's may add the masters, for `map_break`).
     breakpoints: Vec<u32>,
-    /// Stop at the next lookup of this map (its descriptor).
-    map_break: Option<u32>,
+    /// Stop at the next lookup of a map, or the next test of a fault code.
+    watch: Option<Watch>,
 }
 
-/// Passes the masters' breakpoints set for a map break when another map is looked up.
+/// What to stop at next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Watch {
+    /// A lookup of this map (its descriptor).
+    Map(u32),
+    /// A test of this fault code (its index).
+    Test(u16),
+}
+
+/// Passes the breakpoints set for a stop when another map is looked up, or another code
+/// tested.
 struct MapBreak {
-    /// The map stopped for.
+    /// The map (descriptor) or code (index) stopped for: R4 at the routine.
     want: u32,
-    /// The masters.
+    /// The routines.
     entries: Vec<u32>,
     /// The breakpoints asked for, which always stop.
     user: Vec<u32>,
 }
 
 impl MapBreak {
-    /// Whether a stop at a breakpoint should go on: at a master, for another map.
+    /// Whether a stop at a breakpoint should go on: at a routine, for another map or code.
     fn passes(&self, m: &Machine) -> bool {
         let pc = m.cpu.pc;
         self.entries.contains(&pc) && !self.user.contains(&pc) && m.cpu.r[4] != self.want
@@ -198,7 +209,7 @@ impl Session {
             plant_cycle,
             maps: None,
             breakpoints: Vec::new(),
-            map_break: None,
+            watch: None,
         }
     }
 
@@ -208,13 +219,22 @@ impl Session {
         if on && self.maps.is_none() {
             let chip = &self.m.chip;
             let flash: Vec<u8> = (0..sh7059::ROM_SIZE as u32).map(|a| chip.peek(a)).collect();
+            let flash = Arc::new(flash);
             let mut t = MapTrace::attach(&mut self.m, maps::find_masters(&flash));
-            t.names = names::Names::builtin(names::calibration(&flash));
+            let id = names::calibration(&flash);
+            t.names = names::Names::builtin(id);
+            // The fault codes' tests are probed with the maps, where the layout is known.
+            if let Some(l) = dtcs::layout(id) {
+                if let Some(p) = self.m.probes.as_mut() {
+                    p.routines.push(l.reporter);
+                }
+                t.dtcs = Some(dtcs::DtcTrace::new(flash.clone(), l));
+            }
             self.maps = Some(Arc::new(Mutex::new(t)));
         } else if !on {
             self.m.probes = None;
             self.maps = None;
-            self.map_break = None;
+            self.watch = None;
             self.apply_breakpoints();
         }
     }
@@ -264,33 +284,101 @@ impl Session {
     /// Stops at the next lookup of the map whose descriptor is `desc` (with the maps
     /// traced), or no longer.
     pub fn break_on_map(&mut self, desc: Option<u32>) {
-        self.map_break = desc.filter(|_| self.maps.is_some());
+        self.stop_at(desc.map(Watch::Map));
+    }
+
+    /// Stops at the next test of the fault code `index` (with the maps traced and the
+    /// calibration's codes known), or no longer.
+    pub fn break_on_test(&mut self, index: Option<u16>) {
+        self.stop_at(index.map(Watch::Test));
+    }
+
+    /// Stops at the next lookup of a map or test of a code, or no longer.
+    pub fn stop_at(&mut self, w: Option<Watch>) {
+        self.watch = w.filter(|w| !self.entries(*w).is_empty());
         self.apply_breakpoints();
     }
 
     /// The map stopped for, if a map break is set.
     pub fn map_break(&self) -> Option<u32> {
-        self.map_break
+        match self.watch {
+            Some(Watch::Map(d)) => Some(d),
+            _ => None,
+        }
     }
 
-    /// The machine's breakpoints: those asked for, and the masters for a map break.
+    /// What the next stop is set for, if anything.
+    pub fn watching(&self) -> Option<Watch> {
+        self.watch
+    }
+
+    /// The routines a stop at `w` waits at: the masters for a map, the reporter for a
+    /// code's test; none while they are not traced.
+    fn entries(&self, w: Watch) -> Vec<u32> {
+        let Some(t) = &self.maps else {
+            return Vec::new();
+        };
+        let t = t.lock().unwrap_or_else(PoisonError::into_inner);
+        match w {
+            Watch::Map(_) => [t.masters.d3, t.masters.d2].into_iter().flatten().collect(),
+            Watch::Test(_) => t
+                .dtcs
+                .as_ref()
+                .map(|d| d.layout.reporter)
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    /// The machine's breakpoints: those asked for, and the routines a stop waits at.
     fn apply_breakpoints(&mut self) {
         let mut b = self.breakpoints.clone();
-        if self.map_break.is_some() {
-            let m = self.masters();
-            b.extend([m.d3, m.d2].into_iter().flatten());
+        if let Some(w) = self.watch {
+            b.extend(self.entries(w));
         }
         self.m.breakpoints = b;
     }
 
-    /// What a map break passes, if one is set.
+    /// What a stop passes, if one is set.
     fn skip(&self) -> Option<MapBreak> {
-        let m = self.masters();
-        self.map_break.map(|want| MapBreak {
-            want,
-            entries: [m.d3, m.d2].into_iter().flatten().collect(),
+        self.watch.map(|w| MapBreak {
+            want: match w {
+                Watch::Map(d) => d,
+                Watch::Test(i) => i as u32,
+            },
+            entries: self.entries(w),
             user: self.breakpoints.clone(),
         })
+    }
+
+    /// Sets the descriptions of fault codes read from the user's own file (by code).
+    pub fn describe_codes(&mut self, texts: std::collections::BTreeMap<String, String>) {
+        if let Some(t) = &self.maps
+            && let Some(d) = t
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .dtcs
+                .as_mut()
+        {
+            d.texts.extend(texts);
+        }
+    }
+
+    /// Asks the ECU which fault codes it has confirmed (mode 03) and pending (07), and
+    /// keeps them with the codes traced.
+    pub fn read_codes(&mut self) {
+        let confirmed = self.request(&[0x03]).unwrap_or_default();
+        let pending = self.request(&[0x07]).unwrap_or_default();
+        if let Some(t) = &self.maps
+            && let Some(d) = t
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .dtcs
+                .as_mut()
+        {
+            d.confirmed = dtcs::codes_in(&confirmed);
+            d.pending = dtcs::codes_in(&pending);
+        }
     }
 
     /// Takes the lookups made since the last time into the trace.
