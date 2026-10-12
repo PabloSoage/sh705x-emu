@@ -234,6 +234,8 @@ impl App {
                             self.send(Cmd::Run);
                         }
                     }
+                    crate::mapview::Action::Name(p) => self.send(Cmd::NameVariables(p)),
+                    crate::mapview::Action::Labels(l) => self.send(Cmd::LabelMaps(l)),
                 }
             }
             if !open {
@@ -873,7 +875,8 @@ mod tests {
     /// plants, an OBD exchange on the console, its CAN traffic and the torque in RAM.
     /// `cargo test -p gui --release -- --ignored screenshots` with `SH705X_FLASH` set
     /// and no EEPROM (no VIN in the pictures).
-    /// Idling, with the maps traced and the boost target (0x9DADC) among them.
+    /// Idling, with the maps traced and the boost target (0x9DADC) among them, and the
+    /// sensors named.
     fn tracing_maps() -> Option<(App, std::thread::JoinHandle<()>)> {
         let (app, t) = idling(2)?;
         app.send(Cmd::TraceMaps(true));
@@ -882,6 +885,18 @@ mod tests {
                 let m = m.lock().unwrap();
                 m.seen.len() > 300 && m.seen.contains_key(&0x9DADC)
             })
+        });
+        let builtin = {
+            let s = app.shared.lock().unwrap();
+            let n = s.maps.as_ref().unwrap().lock().unwrap().names.vars.len();
+            drop(s);
+            n
+        };
+        app.send(Cmd::NameVariables(None));
+        wait_for(&app.shared, |s| {
+            s.maps
+                .as_ref()
+                .is_some_and(|m| m.lock().unwrap().names.vars.len() > builtin)
         });
         Some((app, t))
     }
@@ -981,7 +996,7 @@ mod tests {
         eprintln!("{}", path.display());
         h.state().send(Cmd::Quit);
         t.join().unwrap();
-        // The maps window, on the boost target, while idling: as a heat map and a surface.
+        // The maps window while idling, the sensors named.
         let Some((mut app, t)) = tracing_maps() else {
             return;
         };
@@ -990,10 +1005,17 @@ mod tests {
         let mut h = egui_kittest::Harness::builder()
             .with_size(egui::vec2(1400.0, 900.0))
             .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
-        for (mode, name) in [
-            (crate::mapview::Mode::Heat, "gui-maps.png"),
-            (crate::mapview::Mode::Surface, "gui-maps-surface.png"),
+        // A map read at engine speed and coolant temperature, both named; and the boost
+        // target as a surface.
+        for (desc, mode, name) in [
+            (0x9DE14, crate::mapview::Mode::Heat, "gui-maps.png"),
+            (
+                0x9DADC,
+                crate::mapview::Mode::Surface,
+                "gui-maps-surface.png",
+            ),
         ] {
+            h.state_mut().maps.selected = Some(desc);
             h.state_mut().maps.mode = mode;
             h.run_steps(3);
             let path = dir.join(name);

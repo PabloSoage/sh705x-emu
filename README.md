@@ -81,6 +81,10 @@ second, which makes it a reference oracle rather than an emulator.
 - **Debugging:** memory watchpoints, PC breakpoints and single stepping in the core,
   and a disassembler; in the window, a step at a time, a crank tooth or an input edge at
   a time, and slow motion down to a thousandth of real time.
+- **The maps, as the firmware reads them:** every lookup traced without stopping the
+  ECU, each map drawn from its own descriptor with where the firmware is on it, where its
+  inputs come from and where its result goes; checked on every lookup against the
+  firmware's own result.
 - **On a phone:** an Android app (Kotlin, Compose) runs the same core and draws the
   engine view: the Astra's flash idles on its own torque there as on the desktop.
 - **Checked against the car:** the 204 answers of a diagnostic sweep of the car's engine
@@ -117,7 +121,7 @@ second, which makes it a reference oracle rather than an emulator.
 | `crates/engine` | The simulated engine: crank and cam wheels, sensors with the firmware's A/D curves, the MAF, periodic frames of other CAN nodes |
 | `crates/bridge` | The CAN bus as a diagnostic tool sees it, in virtual or real time; ISO-TP; an ELM327; a TCP server; an emulated Scanmatik SM3 |
 | `crates/sh705x` | Command-line front end |
-| `crates/session` | The ECU as an interactive front end drives it: wired into its car, the plants around it, run a slice, a tooth or an edge at a time, and the history the engine view draws |
+| `crates/session` | The ECU as an interactive front end drives it: wired into its car, the plants around it, run a slice, a tooth or an edge at a time, the history the engine view draws, and the maps it reads (traced, decoded, their call sites read, their inputs named) |
 | `crates/gui` | `sh705x-gui`: a load screen for the images, then registers, code with breakpoints, memory, CAN, interrupts, the engine (speed, sensors in physical units, and the plants) and an ELM327 console, live (egui) |
 | `crates/android` | The Android app's native side: the ECU on its own thread behind a JNI bridge (`libsh705x_jni.so`) |
 | `android/` | The Android app: Kotlin and Compose, the engine view on a phone |
@@ -213,6 +217,43 @@ the fast moves show, such as each step of the EGR's drive.
 
 *50 ms at idle: the 60-4 crank wheel with its gap, the cam's sync and main pulses, the EGR
 held at a third open by a drive that steps every few milliseconds, boost and rail.*
+
+"Maps" opens the calibration maps the firmware reads, as it reads them. Denso firmware
+looks its maps up through a few interpolation routines that take the map's descriptor in
+R4; the emulator finds those routines in the flash by itself (0x7128 and 0x70B4 on the
+Astra, as Ghidra found them), probes them without stopping the ECU (about 6 % slower
+while the window is open), and draws each map whole from its own descriptor, in physical
+units: as a heat map, a surface to turn, a table, or a curve, with where the firmware is
+on it now and where it has just been. On the Astra at idle it reads 594 maps, 18 352 times
+in half a second, and on every lookup the result the firmware gets is the decoded map's
+interpolation.
+
+For each map it shows where it is read from (a link to the code), where each input comes
+from and where the result goes, read from the code around the call: a variable, the
+result of a routine (the engine speed), or another map, which is a link to that map; and
+which maps read its result. "Stop at its next lookup" runs the ECU and stops where the
+firmware next reads that map, to go on an instruction or a tooth at a time.
+
+![The maps window: a map read at engine speed and coolant temperature](docs/img/gui-maps.png)
+
+*A 16×11 map read at engine speed (from the firmware's own engine speed routine) and
+coolant temperature (found by moving the sensor), with the lookups as they come on the
+left. The list names a map by what its result becomes: "gives torque asked".*
+
+![The boost target as a surface](docs/img/gui-maps-surface.png)
+
+*The boost target (20×20) as a surface, at idle.*
+
+Names come from three places:
+
+- **With the emulator:** what this project found in the Astra's calibration, used only
+  when the flash is that calibration, and "Find the sensors", which moves every sensor and
+  names the variables that follow it.
+- **From your own files, at run time:** "Read an opendash profile…" takes a parameter
+  profile (opendash's `profiles.txt`); the emulated ECU is asked for each identifier in
+  three engine states, and the variable that holds the answer every time takes its name.
+  "Read map labels…" takes labels by descriptor. Neither is kept with the emulator: such
+  catalogues are often someone else's data, and stay on your disk.
 
 | CAN traffic | Memory |
 |---|---|

@@ -4,8 +4,11 @@
 //! the history the engine view draws ([`scope`]). The desktop window (`gui`) and the
 //! Android app (`android`) both drive it; the command line has its own rig.
 
+mod discover;
 pub mod maps;
+pub mod names;
 pub mod scope;
+pub mod sites;
 
 use bridge::link::CYCLES_PER_US;
 use engine::crank::Crank;
@@ -205,13 +208,43 @@ impl Session {
         if on && self.maps.is_none() {
             let chip = &self.m.chip;
             let flash: Vec<u8> = (0..sh7059::ROM_SIZE as u32).map(|a| chip.peek(a)).collect();
-            let t = MapTrace::attach(&mut self.m, maps::find_masters(&flash));
+            let mut t = MapTrace::attach(&mut self.m, maps::find_masters(&flash));
+            t.names = names::Names::builtin(names::calibration(&flash));
             self.maps = Some(Arc::new(Mutex::new(t)));
         } else if !on {
             self.m.probes = None;
             self.maps = None;
             self.map_break = None;
             self.apply_breakpoints();
+        }
+    }
+
+    /// Names the variables the maps read and give: the sensors, and with `profile` its
+    /// parameters (see [`Session::find_names`]); kept with the maps traced, after the
+    /// names already there.
+    pub fn name_variables(&mut self, profile: Option<&names::Profile>) {
+        if self.maps.is_none() {
+            return;
+        }
+        let found = self.find_names(profile);
+        if let Some(t) = &self.maps {
+            t.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .names
+                .merge(found);
+        }
+    }
+
+    /// Adds map labels (by descriptor) to the maps traced, after those already there.
+    pub fn label_maps(&mut self, labels: std::collections::BTreeMap<u32, names::Name>) {
+        if let Some(t) = &self.maps {
+            t.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .names
+                .merge(names::Names {
+                    maps: labels,
+                    ..Default::default()
+                });
         }
     }
 

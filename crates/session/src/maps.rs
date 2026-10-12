@@ -16,6 +16,8 @@
 //! [`MapTrace`] probes them ([`sh7059::Probes`]: the machine does not stop) and gathers
 //! every lookup: which map, from where, with what inputs, what it gave.
 
+use crate::names::Names;
+use crate::sites::{self, Site, Source};
 use sh7059::{Call, Machine};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -389,6 +391,10 @@ pub struct MapTrace {
     pub total: u64,
     /// Lookups lost because nobody took them in time.
     pub dropped: u64,
+    /// Each call site (by return address), read from its code when first seen.
+    pub sites: HashMap<u32, Site>,
+    /// What is known by name.
+    pub names: Names,
 }
 
 impl MapTrace {
@@ -400,6 +406,35 @@ impl MapTrace {
             masters,
             ..Self::default()
         }
+    }
+
+    /// The maps whose result an input of a lookup is, or that read a variable a map's
+    /// result is stored in: who reads what `desc` gives (by the sites seen so far).
+    pub fn readers(&self, desc: u32) -> Vec<u32> {
+        let outs: Vec<u32> = self.seen[&desc]
+            .sites
+            .keys()
+            .filter_map(|r| self.sites.get(r).and_then(|s| s.out))
+            .collect();
+        let mut out: Vec<u32> = self
+            .seen
+            .iter()
+            .filter(|&(&d, s)| {
+                d != desc
+                    && s.sites.keys().any(|r| {
+                        self.sites.get(r).is_some_and(|site| {
+                            [site.x, site.y].iter().any(|src| match *src {
+                                Source::Map(m) => m == desc,
+                                Source::Ram(a) => outs.contains(&a),
+                                _ => false,
+                            })
+                        })
+                    })
+            })
+            .map(|(&d, _)| d)
+            .collect();
+        out.dedup();
+        out
     }
 
     /// Takes the lookups `m` has made since the last time.
@@ -430,6 +465,17 @@ impl MapTrace {
             s.last = (c.fr4, if three { c.fr5 } else { f32::NAN }, c.fr0);
             s.at = c.cycles;
             *s.sites.entry(c.ret).or_default() += 1;
+            if !self.sites.contains_key(&c.ret) {
+                let site = sites::read(
+                    &read,
+                    c.ret,
+                    [
+                        self.masters.d3.unwrap_or(u32::MAX),
+                        self.masters.d2.unwrap_or(u32::MAX),
+                    ],
+                );
+                self.sites.insert(c.ret, site);
+            }
             if let Some(map) = &s.map {
                 let (lo, hi) = map
                     .z
@@ -553,6 +599,53 @@ mod tests {
         // The firmware's interpolation and ours agree on nearly every lookup.
         assert!(bad * 100 <= calls, "{bad} of {calls}");
         assert_eq!(t.dropped, 0);
+    }
+
+    #[test]
+    fn the_variables_the_sites_name_hold_the_inputs_the_firmware_passes() {
+        use crate::sites::{Source, read};
+        let Some(f) = flash() else { return };
+        let mut m = crate::machine(&f, None, board::DEFAULT_LAYOUT).unwrap();
+        crate::Engine::idle().apply(&mut m);
+        let masters = find_masters(&f);
+        let both = [masters.d3.unwrap(), masters.d2.unwrap()];
+        m.run(8_000_000);
+        m.breakpoints = both.to_vec();
+        let (mut named, mut held, mut inputs, mut sites) =
+            (0, 0, 0, std::collections::HashSet::new());
+        let (mut maps, mut calls) = (0, 0);
+        for _ in 0..5000 {
+            assert_eq!(m.run_until(10_000_000), sh7059::Stop::Breakpoint);
+            let three = Some(m.cpu.pc) == masters.d3;
+            let ret = m.cpu.pr;
+            sites.insert(ret);
+            let chip = &m.chip;
+            let site = read(&|a| chip.peek(a), ret, both);
+            let f32_at =
+                |a: u32| f32::from_bits((0..4).fold(0, |v, k| v << 8 | chip.peek(a + k) as u32));
+            for (src, fr) in [(site.x, 4), (site.y, 5)]
+                .into_iter()
+                .take(if three { 2 } else { 1 })
+            {
+                inputs += 1;
+                match src {
+                    Source::Map(_) => maps += 1,
+                    Source::Call(_) => calls += 1,
+                    _ => {}
+                }
+                if let Source::Ram(a) = src {
+                    named += 1;
+                    if f32_at(a).to_bits() == m.cpu.fr[fr] {
+                        held += 1;
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "{} sites; {inputs} inputs: {named} a variable ({held} holding the input), {maps} another map, {calls} a routine",
+            sites.len()
+        );
+        assert!(held * 100 >= named * 97, "{held} of {named}");
     }
 
     #[test]

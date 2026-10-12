@@ -6,6 +6,9 @@
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 use session::maps::{Map, MapTrace, Seen};
+use session::names::{How, Name, Profile, read_labels, read_profiles};
+use session::sites::Source;
+use std::collections::BTreeMap;
 
 /// How the list is ordered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +42,11 @@ pub struct MapView {
     follow: bool,
     yaw: f32,
     pitch: f32,
+    /// Profiles read from an opendash profile file, and the one chosen.
+    profiles: Vec<Profile>,
+    profile: usize,
+    /// What the last file read said.
+    note: Option<String>,
 }
 
 impl Default for MapView {
@@ -51,23 +59,32 @@ impl Default for MapView {
             follow: false,
             yaw: -0.6,
             pitch: 0.55,
+            profiles: Vec::new(),
+            profile: 0,
+            note: None,
         }
     }
 }
 
 /// What the window asks the rest of the interface to do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     /// Show the code at this address.
     GoTo(u32),
     /// Stop at the next lookup of this map, or no longer.
     Break(Option<u32>),
+    /// Name the variables: the sensors, and a profile's parameters if given.
+    Name(Option<Profile>),
+    /// Map labels to add, by descriptor.
+    Labels(BTreeMap<u32, Name>),
 }
 
 /// Lookups shown as the trail of where the firmware has been on a map.
 const TRAIL: usize = 64;
 /// Lookups listed as the latest.
 const LATEST: usize = 14;
+/// Characters of a map's name shown in the list.
+const ROW_NAME: usize = 14;
 
 /// A short number: few decimals for big values.
 fn num(v: f32) -> String {
@@ -155,6 +172,7 @@ pub fn show(
         );
         return actions;
     }
+    names_row(ui, trace, v, &mut actions);
     ui.separator();
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
@@ -182,7 +200,7 @@ fn list(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView) {
     ui.horizontal(|ui| {
         ui.label("Filter");
         ui.add(egui::TextEdit::singleline(&mut v.filter).desired_width(90.0))
-            .on_hover_text("Part of the descriptor's address, in hex, or 2D / 3D");
+            .on_hover_text("Part of the descriptor's address (hex), of a name, or 2D / 3D");
         egui::ComboBox::from_id_salt("map_sort")
             .selected_text(match v.sort {
                 Sort::Recent => "latest",
@@ -206,7 +224,10 @@ fn list(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView) {
                 .map
                 .as_ref()
                 .map_or("", |m| if m.dims() == 3 { "3D" } else { "2D" });
-            f.is_empty() || format!("{d:06X}").contains(&f) || dims == f
+            f.is_empty()
+                || format!("{d:06X}").contains(&f)
+                || dims == f
+                || title(trace, **d).is_some_and(|t| t.to_uppercase().contains(&f))
         })
         .map(|(&d, s)| (d, s))
         .collect();
@@ -230,7 +251,16 @@ fn list(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView) {
                         format!("{}", m.nx())
                     }
                 });
-                let text = format!("{d:06X} {size:>6} {:>8} → {}", s.calls, num(s.last.2));
+                let mut text = format!("{d:06X} {size:>6} {:>8} → {}", s.calls, num(s.last.2));
+                if let Some(t) = title(trace, *d) {
+                    // One line a map: the name cut short (whole in the detail).
+                    text.push_str("  ");
+                    let mut t: String = t.chars().take(ROW_NAME).collect();
+                    if t.chars().count() == ROW_NAME {
+                        t.push('…');
+                    }
+                    text.push_str(&t);
+                }
                 let r = ui.selectable_label(
                     v.selected == Some(*d),
                     egui::RichText::new(text).monospace(),
@@ -289,6 +319,9 @@ fn detail(
     } else {
         format!("Curve {desc:06X} · {} points", map.nx())
     });
+    if let Some(t) = title(trace, desc) {
+        ui.label(egui::RichText::new(t).strong());
+    }
     let stored = if map.cell == session::maps::Cell::Float {
         "float".to_string()
     } else {
@@ -334,18 +367,45 @@ fn detail(
             ),
         );
     }
-    ui.horizontal_wrapped(|ui| {
-        ui.label("Read from");
-        for (&ret, &n) in &s.sites {
+    // Each call site: where its inputs come from and where its result goes.
+    for (&ret, &n) in &s.sites {
+        let site = trace.sites.get(&ret);
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .link(format!("{:06X}", ret.wrapping_sub(4)))
-                .on_hover_text(format!("{n} lookups; open in the code view"))
+                .on_hover_text(format!("{n} lookups from here; open in the code view"))
                 .clicked()
             {
                 actions.push(Action::GoTo(ret.wrapping_sub(4)));
             }
-        }
-    });
+            let Some(site) = site else { return };
+            let inputs: &[(&str, Source)] = if map.dims() == 3 {
+                &[("X", site.x), ("Y", site.y)]
+            } else {
+                &[("X", site.x)]
+            };
+            for &(axis, src) in inputs {
+                ui.label(format!("{axis} from"));
+                source_link(ui, trace, src, v);
+            }
+            ui.label(match site.out {
+                Some(a) => format!("· result into {}", var_name(trace, a)),
+                None => "· result used in the caller".into(),
+            });
+        });
+    }
+    let readers = trace.readers(desc);
+    if !readers.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Its result is read by");
+            for d in readers {
+                if ui.link(format!("map {d:06X}")).clicked() {
+                    v.selected = Some(d);
+                    v.follow = false;
+                }
+            }
+        });
+    }
     ui.horizontal(|ui| {
         if map_break == Some(desc) {
             if ui.button("Stopping at its next lookup · cancel").clicked() {
@@ -388,6 +448,141 @@ fn detail(
         (Mode::Surface, _) => surface(ui, map, now, v),
         _ => heat_map(ui, map, now, &trail),
     }
+}
+
+/// What a map is called: its label, else what its result is stored as, if named.
+fn title(trace: &MapTrace, desc: u32) -> Option<String> {
+    if let Some(n) = trace.names.maps.get(&desc) {
+        return Some(n.text.clone());
+    }
+    trace.seen.get(&desc)?.sites.keys().find_map(|r| {
+        let a = trace.sites.get(r)?.out?;
+        trace
+            .names
+            .vars
+            .get(&a)
+            .map(|n| format!("gives {}", n.text))
+    })
+}
+
+/// A variable: its name if known (with a ? if matched in one state only), and its address.
+fn var_name(trace: &MapTrace, a: u32) -> String {
+    match trace.names.vars.get(&a) {
+        Some(n) => {
+            let unsure = matches!(n.how, How::Identifier { sure: false, .. });
+            let unit = if n.unit.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", n.unit)
+            };
+            format!(
+                "{}{unit}{} ({a:08X})",
+                n.text,
+                if unsure { "?" } else { "" }
+            )
+        }
+        None => format!("{a:08X}"),
+    }
+}
+
+/// Where an input comes from; another map is a link to it.
+fn source_link(ui: &mut egui::Ui, trace: &MapTrace, src: Source, v: &mut MapView) {
+    match src {
+        Source::Ram(a) => {
+            ui.label(egui::RichText::new(var_name(trace, a)).strong());
+        }
+        Source::Map(d) => {
+            let t = title(trace, d).map_or(String::new(), |t| format!(" ({t})"));
+            if ui.link(format!("map {d:06X}{t}")).clicked() {
+                v.selected = Some(d);
+                v.follow = false;
+            }
+        }
+        Source::Call(t) => {
+            ui.label(match trace.names.routines.get(&t) {
+                Some(n) => format!("{} (routine {t:06X})", n.text),
+                None => format!("routine {t:06X}"),
+            });
+        }
+        Source::Unknown => {
+            ui.label("computed in the caller");
+        }
+    }
+}
+
+/// What is known by name, and the ways to know more.
+fn names_row(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView, actions: &mut Vec<Action>) {
+    let n = &trace.names;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(format!(
+            "Names: {} variables, {} routines, {} maps",
+            n.vars.len(),
+            n.routines.len(),
+            n.maps.len()
+        ));
+        if ui
+            .button("Find the sensors")
+            .on_hover_text(
+                "Move every sensor for a moment and see which variables follow (about 3 s \
+                 of ECU time)",
+            )
+            .clicked()
+        {
+            actions.push(Action::Name(None));
+        }
+        if ui
+            .button("Read an opendash profile…")
+            .on_hover_text(
+                "A parameter profile (opendash's profiles.txt): the ECU is asked for each \
+                 identifier and the variable holding the answer takes its name. Read from \
+                 your disk; nothing is kept with the emulator.",
+            )
+            .clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .set_title("opendash parameter profiles")
+                .pick_file()
+        {
+            match std::fs::read_to_string(&path) {
+                Ok(t) => {
+                    v.profiles = read_profiles(&t);
+                    v.profile = 0;
+                    v.note = Some(format!("{} profiles read", v.profiles.len()));
+                }
+                Err(e) => v.note = Some(e.to_string()),
+            }
+        }
+        if !v.profiles.is_empty() {
+            let k = v.profile.min(v.profiles.len() - 1);
+            egui::ComboBox::from_id_salt("profile")
+                .selected_text(v.profiles[k].name.clone())
+                .show_ui(ui, |ui| {
+                    for (i, p) in v.profiles.iter().enumerate() {
+                        ui.selectable_value(&mut v.profile, i, &p.name);
+                    }
+                });
+            if ui.button("Name from it").clicked() {
+                actions.push(Action::Name(Some(v.profiles[k].clone())));
+            }
+        }
+        if ui
+            .button("Read map labels…")
+            .on_hover_text("Labels by descriptor, in the transferred-tags format")
+            .clicked()
+            && let Some(path) = rfd::FileDialog::new().set_title("Map labels").pick_file()
+        {
+            match std::fs::read_to_string(&path) {
+                Ok(t) => {
+                    let l = read_labels(&t);
+                    v.note = Some(format!("{} labels read", l.len()));
+                    actions.push(Action::Labels(l));
+                }
+                Err(e) => v.note = Some(e.to_string()),
+            }
+        }
+        if let Some(note) = &v.note {
+            ui.label(egui::RichText::new(note).weak());
+        }
+    });
 }
 
 /// The cells coloured by value, with where the firmware is and has been.

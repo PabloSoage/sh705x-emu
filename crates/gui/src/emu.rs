@@ -55,6 +55,11 @@ pub enum Cmd {
     TraceMaps(bool),
     /// Stop at the next lookup of this map (its descriptor), or no longer.
     BreakOnMap(Option<u32>),
+    /// Name the variables the maps read and give: the sensors, and a profile's
+    /// parameters if given.
+    NameVariables(Option<session::names::Profile>),
+    /// Map labels, by descriptor.
+    LabelMaps(std::collections::BTreeMap<u32, session::names::Name>),
     /// End the thread.
     Quit,
 }
@@ -179,6 +184,11 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
                 Cmd::Breakpoints(b) => ecu.set_breakpoints(b),
                 Cmd::TraceMaps(on) => ecu.trace_maps(on),
                 Cmd::BreakOnMap(d) => ecu.break_on_map(d),
+                Cmd::NameVariables(p) => {
+                    ecu.name_variables(p.as_ref());
+                    (pace_cycle, pace_wall) = (ecu.m.cpu.cycles, Instant::now());
+                }
+                Cmd::LabelMaps(l) => ecu.label_maps(l),
                 Cmd::Adc(c, v) => ecu.m.chip.adc.input[c] = v,
                 Cmd::Sensor(k, v) => {
                     let _ = ecu.set_sensor(k, v);
