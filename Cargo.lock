@@ -48,7 +48,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "android"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "board",
  "bridge",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "board"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "sh2e",
  "sh7059",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "bridge"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "sh7059",
 ]
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "engine"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "sh7059",
 ]
@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "gui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "board",
  "bridge",
@@ -2190,7 +2190,7 @@ dependencies = [
 
 [[package]]
 name = "session"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "board",
  "bridge",
@@ -2201,18 +2201,18 @@ dependencies = [
 
 [[package]]
 name = "sh2e"
-version = "0.3.0"
+version = "0.3.1"
 
 [[package]]
 name = "sh7059"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "sh2e",
 ]
 
 [[package]]
 name = "sh705x"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "board",
  "bridge",
