@@ -72,6 +72,16 @@
     <string name="only_failing">Fallando</string>
     <string name="only_disabled">Anulados</string>
 
+    <string name="tab_scope">Osciloscopio</string>
+    <string name="osc_channels">Canales</string>
+    <string name="osc_timebase">Base de tiempos (por división)</string>
+    <string name="osc_trigger">Disparo</string>
+    <string name="osc_rising">Subida</string>
+    <string name="osc_falling">Bajada</string>
+    <string name="osc_hold">Congelar</string>
+    <string name="osc_triggered">Sujeto al disparo (la línea blanca)</string>
+    <string name="osc_free">Sin disparo: en libre</string>
+
     <string name="theme">Tema</string>
     <string name="theme_dark">Oscuro</string>
     <string name="theme_light">Claro</string>

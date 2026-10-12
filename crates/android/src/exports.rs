@@ -512,3 +512,48 @@ pub extern "system" fn Java_com_varuna_sh705x_Native_describeCodes<'l>(
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
+
+/// Watches the pins as waveforms (the oscilloscope), or stops.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_scopePins<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    on: jboolean,
+) {
+    unit(&mut env, |_| {
+        send(Order::ScopePins(on));
+        Ok(())
+    })
+}
+
+/// The oscilloscope's channels, one name per line.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_oscChannels<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+) -> jstring {
+    string(&mut env, |_| Ok(Live::osc_channels()))
+}
+
+/// [`Live::osc_frame`].
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_oscFrame<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    span_us: jdouble,
+    trigger: jint,
+    rising: jboolean,
+    pre: jdouble,
+    mask: jint,
+) -> JDoubleArray<'l> {
+    env.with_env(|env| -> jni::errors::Result<JDoubleArray<'l>> {
+        let f = lock(&LIVE)
+            .as_ref()
+            .map(|l| l.osc_frame(span_us, trigger.max(0) as usize, rising, pre, mask as u32))
+            .unwrap_or_default();
+        let a = env.new_double_array(f.len())?;
+        a.set_region(env, 0, &f)?;
+        Ok(a)
+    })
+    .resolve::<ThrowRuntimeExAndDefault>()
+}

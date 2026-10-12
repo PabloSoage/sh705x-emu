@@ -218,6 +218,21 @@ the fast moves show, such as each step of the EGR's drive.
 *50 ms at idle: the 60-4 crank wheel with its gap, the cam's sync and main pulses, the EGR
 held at a third open by a drive that steps every few milliseconds, boost and rail.*
 
+"Scope" is an oscilloscope on the ECU's pins: the crank, cam and MAF inputs, the PWM
+outputs of ATU-II channels 6 and 7 (SCV, throttle, VGT, swirl flaps, EGR), and the one-shot
+outputs of channel 8, where the injectors are. An input edge is drawn at the cycle the chip
+took it, and a PWM output from its timer's counter, period and duty: exact between register
+changes, which are placed when the emulator next looks (half a millisecond at most in real
+time). Time base from 10 µs to 50 ms a division, a trigger on either edge of any channel
+(auto, normal or single, with how much of the window comes before it), hold, a cursor that
+reads the time from the trigger, and each channel's frequency, period and duty.
+
+![The oscilloscope at idle: crank, SCV, VGT and EGR held on the crank's rising edge](docs/img/gui-scope.png)
+
+*At idle, 1 ms a division, held on the crank's rising edge: the crank at 750 Hz (60 teeth at
+750 rpm), the SCV's PWM at 250 Hz, the VGT's at 300 Hz and the EGR's opening drive at
+200 Hz, each with its duty.*
+
 "Maps" opens the calibration maps the firmware reads, as it reads them. Denso firmware
 looks its maps up through a few interpolation routines that take the map's descriptor in
 R4; the emulator finds those routines in the flash by itself (0x7128 and 0x70B4 on the
@@ -328,9 +343,10 @@ with where the firmware is on it, where each input comes from and where the resu
 the sensors found by moving them, and an opendash profile or map labels read from the
 phone's storage.
 
-| Fault codes |  |
+| Fault codes | Oscilloscope |
 |---|---|
-| <img src="docs/img/app-faults.png" width="300" alt="The app's faults tab: P0101, its tables, its tests live and the maps its test reads"> | The "Faults" tab: every code of the calibration with its tests live, which the ECU reports, and for each one its tables, where it is tested and the maps its test reads. |
+| <img src="docs/img/app-faults.png" width="300" alt="The app's faults tab: P0101, its tables, its tests live and the maps its test reads"> | <img src="docs/img/app-scope.png" width="300" alt="The app's oscilloscope tab: crank, SCV, VGT and EGR at idle"> |
+| The "Faults" tab: every code with its tests live, which the ECU reports, its tables, where it is tested and the maps its test reads. | The "Scope" tab: the pins as waveforms, held on an edge, with each channel's frequency and duty. |
 
 | A map | As a surface |
 |---|---|

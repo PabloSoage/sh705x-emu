@@ -111,4 +111,17 @@ object Native {
 
     /** Adds code descriptions from a file (a code, then its text, per line); returns how many. */
     external fun describeCodes(text: String): Int
+
+    /** Watches the pins as waveforms (the oscilloscope), or stops. */
+    external fun scopePins(on: Boolean)
+
+    /** The oscilloscope's channels, one name per line. */
+    external fun oscChannels(): String
+
+    /**
+     * A frame [spanUs] wide of the channels whose bits are set in [mask], held on the last
+     * edge of channel [trigger] with [pre] of the window before it, or running free: see
+     * [OscFrame].
+     */
+    external fun oscFrame(spanUs: Double, trigger: Int, rising: Boolean, pre: Double, mask: Int): DoubleArray
 }

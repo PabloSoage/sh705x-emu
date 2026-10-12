@@ -8,6 +8,7 @@ mod discover;
 pub mod dtcs;
 pub mod maps;
 pub mod names;
+pub mod osc;
 pub mod scope;
 pub mod sites;
 
@@ -145,6 +146,8 @@ pub struct Session {
     plant_cycle: u64,
     /// The maps the firmware reads, while they are traced.
     pub maps: Option<Arc<Mutex<MapTrace>>>,
+    /// The pins as waveforms, while the oscilloscope is on.
+    pub osc: Option<Arc<Mutex<osc::Osc>>>,
     /// The breakpoints asked for (the machine's may add the masters, for `map_break`).
     breakpoints: Vec<u32>,
     /// Stop at the next lookup of a map, or the next test of a fault code.
@@ -208,6 +211,7 @@ impl Session {
             plants: None,
             plant_cycle,
             maps: None,
+            osc: None,
             breakpoints: Vec::new(),
             watch: None,
         }
@@ -381,8 +385,23 @@ impl Session {
         }
     }
 
-    /// Takes the lookups made since the last time into the trace.
+    /// Watches the pins as waveforms (inputs, PWM and one-shot outputs), or stops.
+    pub fn scope_pins(&mut self, on: bool) {
+        if on && self.osc.is_none() {
+            self.osc = Some(Arc::new(Mutex::new(osc::Osc::attach(&mut self.m))));
+        } else if !on {
+            self.m.chip.edge_log = None;
+            self.osc = None;
+        }
+    }
+
+    /// Takes the lookups made and what the pins did since the last time.
     fn take_maps(&mut self) {
+        if let Some(o) = &self.osc {
+            o.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(&mut self.m);
+        }
         if let Some(t) = &self.maps {
             t.lock()
                 .unwrap_or_else(PoisonError::into_inner)

@@ -99,6 +99,9 @@ pub fn region(addr: u32) -> Region {
 /// them; later ones are dropped.
 pub const HEARD_KEPT: usize = 4096;
 
+/// Input edges kept in [`Sh7059::edge_log`].
+pub const EDGES_KEPT: usize = 1 << 18;
+
 /// One access to the peripheral register area, for tracing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IoAccess {
@@ -270,6 +273,9 @@ pub struct Sh7059 {
     wires: Vec<Wire>,
     /// What drives the input pins from outside, if anything.
     pub stimulus: Option<Box<dyn pins::Stimulus>>,
+    /// The input pin edges taken, each at its cycle, while someone keeps them (an
+    /// oscilloscope); the oldest go past [`EDGES_KEPT`].
+    pub edge_log: Option<std::collections::VecDeque<pins::Edge>>,
     /// Other nodes on the CAN bus of HCAN channel 0, if any.
     pub can_source: Option<Box<dyn hcan::CanSource>>,
     /// Frames the nodes of [`Sh7059::can_source`] have put on the bus, for tools that
@@ -315,6 +321,7 @@ impl Sh7059 {
             dma_busy: false,
             wires: Vec::new(),
             stimulus: None,
+            edge_log: None,
             can_source: None,
             heard: Vec::new(),
             pending: (0, 0),
@@ -387,7 +394,13 @@ impl Sh7059 {
     }
 
     /// The PWM output of ATU-II channel 6 or 7 (`ch` = 0 or 1), timer `k` (0 = A .. 3 =
-    /// D), as a duty fraction, if that timer is running.
+    /// D), as a waveform, if that timer is running.
+    pub fn pwm_wave(&self, ch: usize, k: usize) -> Option<atu::Wave> {
+        self.atu.wave(&self.io, ch, k)
+    }
+
+    /// The duty of a PWM output of channel 6 or 7 (`ch` = 0 or 1), timer `k` (0 = A .. 3
+    /// = D), if that timer is running.
     pub fn pwm_duty(&self, ch: usize, k: usize) -> Option<f64> {
         self.atu.duty(&self.io, ch, k)
     }
@@ -655,6 +668,12 @@ impl Sh7059 {
                 break;
             }
             let e = s.take().expect("peeked");
+            if let Some(log) = self.edge_log.as_mut() {
+                if log.len() == EDGES_KEPT {
+                    log.pop_front();
+                }
+                log.push_back(e);
+            }
             match e.pin {
                 pins::Pin::Ti0(k) => {
                     self.atu.capture(&mut self.io, e.at, k as usize & 3, e.high);

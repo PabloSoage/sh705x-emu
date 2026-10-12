@@ -7,6 +7,7 @@
 mod exports;
 mod faults;
 mod maps;
+mod osc;
 
 use bridge::link::CYCLES_PER_US;
 use session::maps::MapTrace;
@@ -42,6 +43,8 @@ pub enum Order {
     NextEdge,
     /// Trace the maps the firmware reads, or stop.
     TraceMaps(bool),
+    /// Watch the pins as waveforms (the oscilloscope), or stop.
+    ScopePins(bool),
     /// Stop at the next lookup of this map (its descriptor), or no longer.
     BreakOnMap(Option<u32>),
     /// Name the variables: the sensors, and a profile's parameters if given.
@@ -60,6 +63,8 @@ pub enum Order {
 
 /// The maps being traced, as the thread publishes them.
 type MapSlot = Arc<Mutex<Option<Arc<Mutex<MapTrace>>>>>;
+/// The pins being watched, as the thread publishes them.
+type OscSlot = Arc<Mutex<Option<Arc<Mutex<session::osc::Osc>>>>>;
 
 /// What the thread published last.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -93,6 +98,7 @@ pub struct Live {
     status: Arc<Mutex<Status>>,
     scope: Arc<Mutex<Scope>>,
     maps: MapSlot,
+    osc: OscSlot,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -119,15 +125,18 @@ impl Live {
         let (s2, sc2) = (status.clone(), scope.clone());
         let maps: MapSlot = Arc::default();
         let m2 = maps.clone();
+        let osc: OscSlot = Arc::default();
+        let o2 = osc.clone();
         let thread = std::thread::Builder::new()
             .name("ecu".into())
-            .spawn(move || run(ecu, rx, s2, sc2, m2))
+            .spawn(move || run(ecu, rx, s2, sc2, m2, o2))
             .map_err(|e| e.to_string())?;
         Ok(Self {
             orders,
             status,
             scope,
             maps,
+            osc,
             thread: Some(thread),
         })
     }
@@ -227,6 +236,7 @@ fn run(
     status: Arc<Mutex<Status>>,
     scope: Arc<Mutex<Scope>>,
     maps: MapSlot,
+    osc: OscSlot,
 ) {
     let mut running = false;
     let mut speed = 1.0f64;
@@ -276,6 +286,10 @@ fn run(
                 Order::TraceMaps(on) => {
                     ecu.trace_maps(on);
                     *lock(&maps) = ecu.maps.clone();
+                }
+                Order::ScopePins(on) => {
+                    ecu.scope_pins(on);
+                    *lock(&osc) = ecu.osc.clone();
                 }
                 Order::BreakOnMap(d) => ecu.break_on_map(d),
                 Order::NameVariables(p) => {
@@ -444,5 +458,18 @@ mod tests {
         assert!(live.code_list("P0101", false, false).contains("	P0101	"));
         let p0101 = live.code_text(2);
         assert!(p0101.contains("which reads 09A13C"), "{p0101}");
+        // The oscilloscope: crank and SCV over 10 ms, held on the crank.
+        live.send(Order::ScopePins(true));
+        let t = Instant::now();
+        let f = loop {
+            let f = live.osc_frame(10_000.0, 0, true, 0.2, 0b1001);
+            if f.get(3) == Some(&1.0) {
+                break f;
+            }
+            assert!(t.elapsed() < Duration::from_secs(60), "no trigger");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!((f[0], f[2]), (10_000.0, 2.0));
+        assert!(Live::osc_channels().starts_with("crank (TI0A)"));
     }
 }

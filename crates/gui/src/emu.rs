@@ -53,6 +53,8 @@ pub enum Cmd {
     Plants(PlantMode),
     /// Trace the maps the firmware reads, or stop.
     TraceMaps(bool),
+    /// Watch the pins as waveforms (the oscilloscope), or stop.
+    ScopePins(bool),
     /// Stop at the next lookup of this map (its descriptor), or no longer.
     BreakOnMap(Option<u32>),
     /// Name the variables the maps read and give: the sensors, and a profile's
@@ -137,6 +139,8 @@ pub struct Snapshot {
     pub maps: Option<Arc<Mutex<session::maps::MapTrace>>>,
     /// What the next stop waits for.
     pub watch: Option<session::Watch>,
+    /// The pins as waveforms, while the oscilloscope is on.
+    pub osc: Option<Arc<Mutex<session::osc::Osc>>>,
 }
 
 /// Frames kept for the CAN view.
@@ -189,6 +193,7 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
                 }
                 Cmd::Breakpoints(b) => ecu.set_breakpoints(b),
                 Cmd::TraceMaps(on) => ecu.trace_maps(on),
+                Cmd::ScopePins(on) => ecu.scope_pins(on),
                 Cmd::BreakOnMap(d) => ecu.break_on_map(d),
                 Cmd::NameVariables(p) => {
                     ecu.name_variables(p.as_ref());
@@ -332,6 +337,7 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
                 scope: scope.clone(),
                 maps: ecu.maps.clone(),
                 watch: ecu.watching(),
+                osc: ecu.osc.clone(),
             };
             *shared.lock().expect("snapshot lock") = snap;
             published = Instant::now();
@@ -396,5 +402,6 @@ pub fn first_snapshot(m: &Machine, engine: &Engine) -> Snapshot {
         scope: Arc::default(),
         maps: None,
         watch: None,
+        osc: None,
     }
 }

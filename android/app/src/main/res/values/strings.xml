@@ -72,6 +72,16 @@
     <string name="only_failing">Failing</string>
     <string name="only_disabled">Disabled</string>
 
+    <string name="tab_scope">Scope</string>
+    <string name="osc_channels">Channels</string>
+    <string name="osc_timebase">Time base (a division)</string>
+    <string name="osc_trigger">Trigger</string>
+    <string name="osc_rising">Rising</string>
+    <string name="osc_falling">Falling</string>
+    <string name="osc_hold">Hold</string>
+    <string name="osc_triggered">Held on the trigger (the white line)</string>
+    <string name="osc_free">No trigger: running free</string>
+
     <string name="theme">Theme</string>
     <string name="theme_dark">Dark</string>
     <string name="theme_light">Light</string>

@@ -239,12 +239,24 @@ private fun Engine(frame: Frame, window: Int, onWindow: (Int) -> Unit, onOff: ()
         FilterChip(selected = tab == 0, onClick = { tab = 0 }, label = { Text(stringResource(R.string.tab_engine)) })
         FilterChip(selected = tab == 1, onClick = { tab = 1 }, label = { Text(stringResource(R.string.tab_maps)) })
         FilterChip(selected = tab == 2, onClick = { tab = 2 }, label = { Text(stringResource(R.string.tab_faults)) })
+        FilterChip(selected = tab == 3, onClick = { tab = 3 }, label = { Text(stringResource(R.string.tab_scope)) })
     }
     // The maps and the codes' tests are traced together, while either tab is open.
-    val tracing = tab != 0
+    val tracing = tab == 1 || tab == 2
     DisposableEffect(tracing) {
         if (tracing) Native.traceMaps(true)
         onDispose { if (tracing) Native.traceMaps(false) }
+    }
+    // The pins, while the oscilloscope tab is open.
+    val scoping = tab == 3
+    DisposableEffect(scoping) {
+        if (scoping) Native.scopePins(true)
+        onDispose { if (scoping) Native.scopePins(false) }
+    }
+    if (tab == 3) {
+        ScopeScreen()
+        Spacer(Modifier.height(24.dp))
+        return
     }
     var openMap by remember { mutableStateOf<Int?>(null) }
     if (tab == 1) {

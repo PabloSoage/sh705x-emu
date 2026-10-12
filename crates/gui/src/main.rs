@@ -18,6 +18,7 @@ mod emu;
 mod faultview;
 mod load;
 mod mapview;
+mod oscview;
 mod view;
 
 use std::sync::mpsc::{self, Sender};

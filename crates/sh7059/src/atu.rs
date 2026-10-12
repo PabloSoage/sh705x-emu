@@ -163,6 +163,26 @@ impl Counter {
     }
 }
 
+/// A PWM output of channel 6 or 7 as a waveform, in CPU cycles: high for `high` at the
+/// start of each `period`, the periods starting at `origin` (and every `period` before and
+/// after it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Wave {
+    /// Cycles per period (CYLR counts).
+    pub period: u64,
+    /// Cycles high at the start of each (DTR counts).
+    pub high: u64,
+    /// A cycle a period starts at, below `period`.
+    pub origin: u64,
+}
+
+impl Wave {
+    /// The level at cycle `t`.
+    pub fn level(&self, t: u64) -> bool {
+        (t + self.period - self.origin) % self.period < self.high
+    }
+}
+
 /// Channel 0's 32-bit counter: its value at `base` and CPU cycles per count (0 when
 /// stopped).
 #[derive(Clone, Copy, Debug, Default)]
@@ -809,6 +829,27 @@ impl Atu {
         } else {
             0
         }
+    }
+
+    /// The PWM output of channel 6 or 7 (`ch` = 0 or 1), timer `k` (0 = A .. 3 = D), as a
+    /// waveform, if that timer is running: the counter runs from 0 to CYLR, the output is
+    /// high below DTR (as [`Atu::duty`] reads it).
+    pub fn wave(&self, io: &[u8], ch: usize, k: usize) -> Option<Wave> {
+        let c = &self.cnt[4 + 4 * ch + k];
+        if c.cpc == 0 {
+            return None;
+        }
+        let regs = CH67[ch];
+        let cylr = r16(io, regs + 8 + 2 * k as u32).max(1) as u64;
+        let dtr = (r16(io, regs + 0x18 + 2 * k as u32) as u64).min(cylr);
+        let period = cylr * c.cpc;
+        // The counter was 0 at base - value × cpc (before power-on, maybe: taken modulo).
+        let zero = (c.base as i128 - c.value as i128 * c.cpc as i128).rem_euclid(period as i128);
+        Some(Wave {
+            period,
+            high: dtr * c.cpc,
+            origin: zero as u64,
+        })
     }
 
     /// The PWM output of channel 6 or 7 (`ch` = 0 or 1), timer `k` (0 = A .. 3 = D), as a

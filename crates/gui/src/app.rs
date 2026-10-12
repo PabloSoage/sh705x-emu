@@ -40,6 +40,10 @@ pub struct App {
     maps_view: bool,
     /// What it shows.
     maps: crate::mapview::MapView,
+    /// The oscilloscope window is open (and the pins watched).
+    scope_view: bool,
+    /// What it shows.
+    scope: crate::oscview::OscView,
 }
 
 impl App {
@@ -62,6 +66,8 @@ impl App {
             back: false,
             maps_view: false,
             maps: Default::default(),
+            scope_view: false,
+            scope: Default::default(),
         }
     }
 
@@ -154,6 +160,13 @@ impl App {
                 ui.toggle_value(&mut self.engine_view, "Engine view")
                     .on_hover_text("The wheels, the cylinders and the history of what the firmware asks for and gets");
                 if ui
+                    .toggle_value(&mut self.scope_view, "Scope")
+                    .on_hover_text("The pins as waveforms: crank, cam, MAF, PWM and one-shot outputs")
+                    .changed()
+                {
+                    self.send(Cmd::ScopePins(self.scope_view));
+                }
+                if ui
                     .toggle_value(&mut self.maps_view, "Maps")
                     .on_hover_text("The calibration maps the firmware reads, as it reads them")
                     .changed()
@@ -203,6 +216,27 @@ impl App {
                     crate::view::show(ui, &scope, &mut self.view, now_us);
                 });
             self.engine_view = open;
+        }
+
+        if self.scope_view {
+            let mut open = true;
+            egui::Window::new("Oscilloscope")
+                .open(&mut open)
+                .default_size([1150.0, 620.0])
+                .default_pos([140.0, 70.0])
+                .show(root.ctx(), |ui| match &s.osc {
+                    Some(o) => {
+                        let o = o.lock().expect("oscilloscope lock");
+                        crate::oscview::show(ui, &o, &mut self.scope);
+                    }
+                    None => {
+                        ui.label("Starting…");
+                    }
+                });
+            if !open {
+                self.scope_view = false;
+                self.send(Cmd::ScopePins(false));
+            }
         }
 
         if self.maps_view {
@@ -948,6 +982,30 @@ mod tests {
         t.join().unwrap();
     }
 
+    /// Idling with the pins watched for a third of a second.
+    fn scoping() -> Option<(App, std::thread::JoinHandle<()>)> {
+        let (app, t) = idling(2)?;
+        app.send(Cmd::ScopePins(true));
+        wait_for(&app.shared, |s| s.osc.is_some());
+        let start = app.shared.lock().unwrap().cpu.cycles;
+        wait_for(&app.shared, |s| s.cpu.cycles > start + 25_000_000);
+        Some((app, t))
+    }
+
+    #[test]
+    fn the_oscilloscope_draws() {
+        let Some((mut app, t)) = scoping() else {
+            return;
+        };
+        app.scope_view = true;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+        h.run_steps(3);
+        h.state().send(Cmd::Quit);
+        t.join().unwrap();
+    }
+
     #[test]
     fn the_maps_window_draws_every_view() {
         let Some((mut app, t)) = tracing_maps() else {
@@ -1084,6 +1142,20 @@ mod tests {
             .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
         h.run_steps(3);
         let path = dir.join("gui-faults.png");
+        h.render().unwrap().save(&path).unwrap();
+        eprintln!("{}", path.display());
+        h.state().send(Cmd::Quit);
+        t.join().unwrap();
+        // The oscilloscope at idle: 1 ms a division, held on the crank's rising edge.
+        let Some((mut app, t)) = scoping() else {
+            return;
+        };
+        app.scope_view = true;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+        h.run_steps(3);
+        let path = dir.join("gui-scope.png");
         h.render().unwrap().save(&path).unwrap();
         eprintln!("{}", path.display());
         h.state().send(Cmd::Quit);
