@@ -674,10 +674,20 @@ impl DtcTrace {
 
     /// What a condition is, where this project has read it (the Astra's only).
     pub fn condition_text(&self, id: u16) -> Option<&'static str> {
-        (self.layout == ASTRA_LAYOUT && id == 1).then_some(
-            "engine speed between 1500 and 4000 rpm, five other quantities under their \
-             limits and condition 0 met, 125 times in a row",
-        )
+        if self.layout != ASTRA_LAYOUT {
+            return None;
+        }
+        match id {
+            0 => Some(
+                "ignition on (AN14), the battery between 10 and 16 V (in from 11 to 15 V) \
+                 and the start-up over, about 0.8 s after it",
+            ),
+            1 => Some(
+                "engine speed between 1500 and 4000 rpm, five other quantities under their \
+                 limits and condition 0 met, 125 times in a row",
+            ),
+            _ => None,
+        }
     }
 
     /// The code's text: the user's, else the emulator's, else none.
@@ -860,6 +870,25 @@ mod tests {
         assert_eq!(d.conditions(2)[0].met, None);
     }
 
+    /// Condition 0 needs the battery between 10 and 16 V: at 9.5 V it is never met.
+    #[test]
+    fn condition_0_needs_the_battery() {
+        let Some(f) = flash() else { return };
+        let mut m = crate::machine(&f, None, board::DEFAULT_LAYOUT).unwrap();
+        crate::Engine::idle().apply(&mut m);
+        let mut s = crate::Session::new(m, crate::Engine::idle());
+        s.set_sensor("battery", 9.5).unwrap();
+        s.trace_maps(true);
+        for _ in 0..3000 {
+            s.run(40_000);
+        }
+        let t = s.maps.clone().unwrap();
+        let g = t.lock().unwrap();
+        let d = g.dtcs.as_ref().unwrap();
+        assert_eq!(d.conditions(120)[0].met, Some(false));
+        assert!(d.condition_text(0).is_some());
+    }
+
     /// The Astra's table: the indices this project has seen (P060E at 0x6F, P160D at 197,
     /// resultados fase 9), and the reports found where fase 9 found them.
     #[test]
@@ -929,6 +958,9 @@ mod tests {
             let d = g.dtcs.as_ref().unwrap();
             assert!(d.tested[&p2455].fails > 0);
             assert!(d.tested[&p2455].counted_fails > 0);
+            // Its only condition, 0: ignition on, battery right, start-up over (it is not
+            // yet half a second in, above).
+            assert_eq!(d.conditions(p2455)[0].met, Some(true));
             let raw = d.table[p2455 as usize].raw;
             assert!(
                 d.confirmed.contains(&raw) || d.pending.contains(&raw),
