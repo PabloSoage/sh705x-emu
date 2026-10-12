@@ -7,10 +7,19 @@
 //! test reports its result through one routine, with the code's index in R4 and the result
 //! in R5: [`report_sites`] finds the places that report each index, [`function_around`]
 //! the function they are in, and [`maps_in`] the maps that function reads.
+//!
+//! The reporter only counts a result when the code's conditions are met: each code lists
+//! up to three conditions, each a flag in RAM, and the routine that counts the result (the
+//! one that reads tables A, B and C) is called only when all of them are set (resultados
+//! fase 20). A test can fail at every run and never become a code: P0101's runs at idle,
+//! but its results count only between 1500 and 4000 rpm.
+//!
+//! [`discover`] finds all this in a flash from its code, for calibrations other than the
+//! Astra's.
 
 use crate::names::ASTRA;
 use sh7059::Call;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 /// Where one calibration keeps its fault codes.
@@ -22,24 +31,268 @@ pub struct Layout {
     pub codes: u32,
     /// Tables A, B and C, one word per code.
     pub enable: [u32; 3],
-    /// The three tables of reaction masks, one word per code.
-    pub reactions: [u32; 3],
+    /// The three tables of reaction masks, one word per code, if found.
+    pub reactions: Option<[u32; 3]>,
     /// The routine every test reports through: index in R4, result in R5.
     pub reporter: u32,
+    /// The routine the reporter counts a result with, called only when the code's
+    /// conditions are met: index in R4, result in R5. It reads tables A, B and C.
+    pub counter: u32,
+    /// The conditions a code's results need, if found.
+    pub gate: Option<Gate>,
 }
 
-/// The Astra J's (resultados fases 9, 10 and 13).
+/// The conditions each code's results need before they count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gate {
+    /// Per code, three words: its conditions, up to the first [`Gate::end`].
+    pub conditions: u32,
+    /// Per condition, the address of its flag: a byte, 1 when met.
+    pub flags: u32,
+    /// The condition number that ends a code's list; also how many there are.
+    pub end: u16,
+}
+
+/// The Astra J's (resultados fases 9, 10, 13 and 20).
 pub const ASTRA_LAYOUT: Layout = Layout {
     count: 202,
     codes: 0x0012_40C4,
     enable: [0x0012_374C, 0x0012_38E0, 0x0012_3A74],
-    reactions: [0x0012_4258, 0x0012_43EC, 0x0012_4580],
+    reactions: Some([0x0012_4258, 0x0012_43EC, 0x0012_4580]),
     reporter: 0x0003_378A,
+    counter: 0x0003_3C34,
+    gate: Some(Gate {
+        conditions: 0x0009_3CF2,
+        flags: 0x0009_4E3C,
+        end: 0x76,
+    }),
 };
 
-/// The layout for calibration `id`, if known.
-pub fn layout(id: Option<&str>) -> Option<Layout> {
-    (id == Some(ASTRA)).then_some(ASTRA_LAYOUT)
+/// The layout for calibration `id`: the Astra's as this project found it, else the one
+/// [`discover`] finds in `flash`.
+pub fn layout(id: Option<&str>, flash: &[u8]) -> Option<Layout> {
+    if id == Some(ASTRA) {
+        Some(ASTRA_LAYOUT)
+    } else {
+        discover(flash)
+    }
+}
+
+/// Places a reporter must be called from with a constant index, at least, to be taken
+/// for one.
+const MIN_REPORTED: usize = 8;
+
+/// Finds where `flash` keeps its fault codes, from its code:
+///
+/// - **The counter and the reporter:** a function that loads three tables of n words one
+///   after another (A, B and C, in the order of their addresses), called from a routine
+///   that many places call with a constant index under n in R4. The routine called with
+///   the most indices is the reporter.
+/// - **The codes:** the table of n words loaded from most places among those that look
+///   like codes: none zero, the third digit decimal, most distinct, not counting up.
+/// - **The reactions:** three more tables of n words loaded by a routine the reporter
+///   calls.
+/// - **The conditions:** a routine the reporter calls that loads a table of n entries of
+///   three condition numbers and a table of addresses in RAM, one per condition, and
+///   compares a number with the one that ends a list.
+///
+/// Checked on the one calibration this project has (it finds [`ASTRA_LAYOUT`]); on others
+/// it may find nothing, or find wrong.
+pub fn discover(flash: &[u8]) -> Option<Layout> {
+    let loads = rom_loads(flash);
+    let calls = calls_by_target(flash);
+    let loads_in = |r: (u32, u32)| {
+        let lo = loads.partition_point(|x| x.0 < r.0);
+        let hi = loads.partition_point(|x| x.0 < r.1);
+        &loads[lo..hi]
+    };
+    // (indices, reporter, counter, tables, n)
+    let mut best: Option<(usize, u32, u32, [u32; 3], usize)> = None;
+    let mut scores: HashMap<(u32, usize), usize> = HashMap::new();
+    let mut done = BTreeSet::new();
+    for &(a, _) in &loads {
+        let range = function_around(flash, a);
+        if !done.insert(range) {
+            continue;
+        }
+        let found = triples(loads_in(range));
+        if found.is_empty() {
+            continue;
+        }
+        let Some(counter) = entry(&calls, range, a) else {
+            continue;
+        };
+        for (tables, n) in found {
+            for &site in &calls[&counter] {
+                let Some(r) = entry(&calls, function_around(flash, site), site) else {
+                    continue;
+                };
+                let k = *scores
+                    .entry((r, n))
+                    .or_insert_with(|| constant_indices(flash, &calls[&r], n).len());
+                if best.is_none_or(|b| k > b.0) {
+                    best = Some((k, r, counter, tables, n));
+                }
+            }
+        }
+    }
+    let (k, reporter, counter, enable, n) = best?;
+    if k < MIN_REPORTED {
+        return None;
+    }
+    let codes = code_table(flash, &loads, n, &enable)?;
+    let callees: Vec<(u32, u32)> = {
+        let (_, end) = function_around(flash, reporter);
+        let mut t: Vec<u32> = (reporter..end)
+            .step_by(2)
+            .filter_map(|a| call_target(flash, a))
+            .collect();
+        t.sort_unstable();
+        t.dedup();
+        t.into_iter()
+            .map(|c| (c, function_around(flash, c).1))
+            .collect()
+    };
+    let reactions = callees.iter().find_map(|&r| {
+        triples(loads_in(r))
+            .into_iter()
+            .find(|&(t, m)| m == n && t != enable)
+            .map(|(t, _)| t)
+    });
+    let gate = callees
+        .iter()
+        .find_map(|&r| find_gate(flash, loads_in(r), r, n));
+    Some(Layout {
+        count: n,
+        codes,
+        enable,
+        reactions,
+        reporter,
+        counter,
+        gate,
+    })
+}
+
+/// The loads of a flash address by `MOV.L @(disp,PC)`: (instruction, value), in order.
+fn rom_loads(flash: &[u8]) -> Vec<(u32, u32)> {
+    (0..flash.len().saturating_sub(2) as u32)
+        .step_by(2)
+        .filter_map(|a| {
+            let op = word(flash, a);
+            (op >> 12 == 0xD).then(|| (a, long(flash, (a & !3) + 4 + (op & 0xFF) as u32 * 4)))
+        })
+        .filter(|&(_, v)| (v as usize) < flash.len())
+        .collect()
+}
+
+/// Every call (or jump) in `flash` to a constant target, by target.
+fn calls_by_target(flash: &[u8]) -> BTreeMap<u32, Vec<u32>> {
+    let mut out: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for a in (0..flash.len().saturating_sub(4) as u32).step_by(2) {
+        if let Some(t) = call_target(flash, a) {
+            out.entry(t).or_default().push(a);
+        }
+    }
+    out
+}
+
+/// The entry of the function `at` is in: the last place called in `range` up to `at` (the
+/// range can start early, over the literals before the function).
+fn entry(calls: &BTreeMap<u32, Vec<u32>>, range: (u32, u32), at: u32) -> Option<u32> {
+    calls.range(range.0..=at).next_back().map(|(&t, _)| t)
+}
+
+/// The constant indices under `n` that `sites` call with in R4.
+fn constant_indices(flash: &[u8], sites: &[u32], n: usize) -> BTreeSet<u32> {
+    sites
+        .iter()
+        .filter_map(|&s| constant(flash, s, 4, Some(s + 2)))
+        .filter(|&i| (i as usize) < n)
+        .collect()
+}
+
+/// Shortest and longest tables taken for a code table, codes.
+const TABLE_CODES: (u32, u32) = (16, 2048);
+
+/// Three tables of n words one after another among the values `loads` loads: their
+/// addresses and n, for every n.
+fn triples(loads: &[(u32, u32)]) -> Vec<([u32; 3], usize)> {
+    let values: BTreeSet<u32> = loads.iter().map(|&(_, v)| v).collect();
+    let mut out = Vec::new();
+    for &v in &values {
+        for &v2 in values.range(v + 2 * TABLE_CODES.0..=v + 2 * TABLE_CODES.1) {
+            let d = v2 - v;
+            if d % 2 == 0 && values.contains(&(v2 + d)) {
+                out.push(([v, v2, v2 + d], d as usize / 2));
+            }
+        }
+    }
+    out
+}
+
+/// The table of `n` codes: among the tables `loads` loads (not `enable`), those whose `n`
+/// words look like codes, the one loaded from most places.
+fn code_table(flash: &[u8], loads: &[(u32, u32)], n: usize, enable: &[u32; 3]) -> Option<u32> {
+    let mut refs: BTreeMap<u32, usize> = BTreeMap::new();
+    for &(_, v) in loads {
+        if v % 2 == 0 && !enable.contains(&v) && v as usize + 2 * n <= flash.len() {
+            *refs.entry(v).or_default() += 1;
+        }
+    }
+    refs.into_iter()
+        .filter(|&(t, _)| {
+            let w: Vec<u16> = (0..n as u32).map(|k| word(flash, t + 2 * k)).collect();
+            let distinct = w.iter().collect::<BTreeSet<_>>().len();
+            let rising = w.windows(2).filter(|p| p[1] > p[0]).count();
+            w.iter().all(|&c| c != 0 && (c >> 8) & 0xF <= 9)
+                && 5 * distinct >= 4 * n
+                && 4 * rising <= 3 * n
+        })
+        .max_by_key(|&(t, r)| (r, std::cmp::Reverse(t)))
+        .map(|(t, _)| t)
+}
+
+/// Where a RAM flag can be.
+const RAM: u32 = 0xFFFE_0000;
+
+/// The conditions, if the function in `range` (whose loads are `loads`) reads them: a
+/// table of `n` entries of three condition numbers, each under or at the end, a table of
+/// a RAM address per condition, and a comparison with the end.
+fn find_gate(flash: &[u8], loads: &[(u32, u32)], range: (u32, u32), n: usize) -> Option<Gate> {
+    let ends: BTreeSet<u16> = (range.0..range.1)
+        .step_by(2)
+        .map(|a| word(flash, a))
+        .filter(|op| op >> 8 == 0x88)
+        .map(|op| op & 0xFF)
+        .filter(|&e| e > 0)
+        .collect();
+    let values: BTreeSet<u32> = loads.iter().map(|&(_, v)| v).collect();
+    for &e in &ends {
+        let Some(conditions) = values.iter().copied().find(|&c| {
+            (c as usize) + 6 * n <= flash.len()
+                && (0..3 * n as u32).all(|k| word(flash, c + 2 * k) <= e)
+                && (0..n as u32).any(|i| word(flash, c + 6 * i) < e)
+        }) else {
+            continue;
+        };
+        let used: BTreeSet<u32> = (0..3 * n as u32)
+            .map(|k| word(flash, conditions + 2 * k) as u32)
+            .filter(|&id| id < e as u32)
+            .collect();
+        // The conditions used have a flag each (the table may be longer).
+        let flags = values.iter().copied().find(|&f| {
+            (f as usize) + 4 * e as usize <= flash.len()
+                && used.iter().all(|&id| long(flash, f + 4 * id) >= RAM)
+        });
+        if let Some(flags) = flags {
+            return Some(Gate {
+                conditions,
+                flags,
+                end: e,
+            });
+        }
+    }
+    None
 }
 
 /// One fault code.
@@ -51,8 +304,10 @@ pub struct Dtc {
     pub raw: u16,
     /// Tables A, B and C.
     pub enable: [u16; 3],
-    /// Its reaction masks.
-    pub reactions: [u16; 3],
+    /// Its reaction masks, if their tables were found.
+    pub reactions: Option<[u16; 3]>,
+    /// Its conditions, if their table was found.
+    pub conditions: Vec<u16>,
 }
 
 impl Dtc {
@@ -86,6 +341,27 @@ pub fn reactions_known(m: [u16; 3]) -> Vec<&'static str> {
     out
 }
 
+/// A code's reaction masks in words.
+pub fn reactions_text(x: &Dtc) -> String {
+    match x.reactions {
+        Some(m) => {
+            let known = reactions_known(m);
+            format!(
+                "While active: masks {:04X} {:04X} {:04X}{}",
+                m[0],
+                m[1],
+                m[2],
+                if known.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", known.join(", "))
+                }
+            )
+        }
+        None => "While active: its masks were not found".into(),
+    }
+}
+
 /// The fault codes in `flash` as `l` lays them out.
 pub fn read_table(flash: &[u8], l: &Layout) -> Vec<Dtc> {
     (0..l.count as u32)
@@ -93,7 +369,13 @@ pub fn read_table(flash: &[u8], l: &Layout) -> Vec<Dtc> {
             index: k as u16,
             raw: word(flash, l.codes + 2 * k),
             enable: l.enable.map(|t| word(flash, t + 2 * k)),
-            reactions: l.reactions.map(|t| word(flash, t + 2 * k)),
+            reactions: l.reactions.map(|r| r.map(|t| word(flash, t + 2 * k))),
+            conditions: l.gate.map_or(Vec::new(), |g| {
+                (0..3)
+                    .map(|j| word(flash, g.conditions + 6 * k + 2 * j))
+                    .take_while(|&c| c < g.end)
+                    .collect()
+            }),
         })
         .collect()
 }
@@ -240,6 +522,21 @@ pub struct Tested {
     /// Tests per return address seen (the caller of the reporter, or, when the test
     /// jumps to it, the caller of the test).
     pub callers: BTreeMap<u32, u64>,
+    /// Of the tests, those the ECU counted: its conditions were met.
+    pub counted: u64,
+    /// Of those, failed.
+    pub counted_fails: u64,
+}
+
+/// One of a code's conditions, as last read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Condition {
+    /// Its number.
+    pub id: u16,
+    /// Its flag's address.
+    pub flag: u32,
+    /// Met (the flag is 1), as last read; `None` before the first read.
+    pub met: Option<bool>,
 }
 
 /// The fault codes of a calibration, and what its tests do while traced.
@@ -260,12 +557,21 @@ pub struct DtcTrace {
     /// Descriptions by code (P0400) from the user's own file; [`describe`] has the ones
     /// that come with the emulator.
     pub texts: BTreeMap<String, String>,
+    /// Per condition, its flag's address.
+    pub flags: Vec<u32>,
+    /// Per condition, its flag as last read.
+    pub now: Vec<u8>,
     flash: Arc<Vec<u8>>,
 }
 
 impl DtcTrace {
     /// The codes of `flash`, laid out as `layout`.
     pub fn new(flash: Arc<Vec<u8>>, layout: Layout) -> Self {
+        let flags = layout.gate.map_or(Vec::new(), |g| {
+            (0..g.end as u32)
+                .map(|k| long(&flash, g.flags + 4 * k))
+                .collect()
+        });
         Self {
             layout,
             table: read_table(&flash, &layout),
@@ -274,23 +580,104 @@ impl DtcTrace {
             confirmed: Vec::new(),
             pending: Vec::new(),
             texts: BTreeMap::new(),
+            flags,
+            now: Vec::new(),
             flash,
         }
     }
 
-    /// Takes one call to the reporter.
+    /// Takes one call to the reporter, or to the counter.
     pub fn add(&mut self, c: &Call) {
         if c.r4 as usize >= self.layout.count {
             return;
         }
         let t = self.tested.entry(c.r4 as u16).or_default();
-        t.tests += 1;
-        if c.r5 == 1 {
-            t.fails += 1;
+        let failed = c.r5 & 0xFF == 1;
+        if c.routine == self.layout.counter {
+            t.counted += 1;
+            t.counted_fails += failed as u64;
+            return;
         }
+        t.tests += 1;
+        t.fails += failed as u64;
         t.last = c.r5;
         t.at = c.cycles;
         *t.callers.entry(c.ret).or_default() += 1;
+    }
+
+    /// Reads the conditions' flags.
+    pub fn read_conditions(&mut self, read: &dyn Fn(u32) -> u8) {
+        self.now = self.flags.iter().map(|&a| read(a)).collect();
+    }
+
+    /// A code's conditions, as last read.
+    pub fn conditions(&self, index: u16) -> Vec<Condition> {
+        let Some(x) = self.table.get(index as usize) else {
+            return Vec::new();
+        };
+        x.conditions
+            .iter()
+            .map(|&id| Condition {
+                id,
+                flag: self.flags.get(id as usize).copied().unwrap_or(0),
+                met: self.now.get(id as usize).map(|&b| b == 1),
+            })
+            .collect()
+    }
+
+    /// What the ECU has done with a code's tests, in words: how many ran and failed, and
+    /// how many it counted.
+    pub fn tested_text(&self, index: u16) -> String {
+        match self.tested.get(&index) {
+            Some(t) => format!(
+                "Tested {} times while traced, failed {}; the last test {}. The ECU counted {} \
+                 of them ({} failed){}",
+                t.tests,
+                t.fails,
+                if t.last == 1 { "failed" } else { "passed" },
+                t.counted,
+                t.counted_fails,
+                if t.counted < t.tests {
+                    "; the rest came while its conditions were not met"
+                } else {
+                    ""
+                }
+            ),
+            None => "Not tested while traced: its test needs other conditions.".into(),
+        }
+    }
+
+    /// A code's conditions in words, one per line; none if it has none or they were not
+    /// found.
+    pub fn conditions_text(&self, index: u16) -> Vec<String> {
+        let c = self.conditions(index);
+        if c.is_empty() {
+            return Vec::new();
+        }
+        let mut out = vec!["Its results count only while these conditions are met:".to_string()];
+        for x in c {
+            out.push(format!(
+                "condition {} (flag {:08X}): {}{}",
+                x.id,
+                x.flag,
+                match x.met {
+                    Some(true) => "met",
+                    Some(false) => "NOT met",
+                    None => "not read yet",
+                },
+                self.condition_text(x.id)
+                    .map_or(String::new(), |t| format!(" · {t}"))
+            ));
+        }
+        out
+    }
+
+    /// What a condition is, where this project has read it (the Astra's only).
+    pub fn condition_text(&self, id: u16) -> Option<&'static str> {
+        (self.layout == ASTRA_LAYOUT && id == 1).then_some(
+            "engine speed between 1500 and 4000 rpm, five other quantities under their \
+             limits and condition 0 met, 125 times in a row",
+        )
     }
 
     /// The code's text: the user's, else the emulator's, else none.
@@ -438,6 +825,41 @@ mod tests {
         assert_eq!(code(0x160D), "P160D");
     }
 
+    /// Found from the code, the Astra's layout is the one this project found by hand; and
+    /// still is with codes disabled, as a workshop file disables them. A flash without
+    /// the code has none.
+    #[test]
+    fn the_layout_is_found_from_the_code() {
+        let Some(mut f) = flash() else { return };
+        assert_eq!(discover(&f), Some(ASTRA_LAYOUT));
+        for k in (0..202).step_by(2) {
+            for t in [ASTRA_LAYOUT.enable[0], ASTRA_LAYOUT.enable[2]] {
+                let a = (t + 2 * k) as usize;
+                f[a..a + 2].fill(0);
+            }
+        }
+        assert_eq!(discover(&f), Some(ASTRA_LAYOUT));
+        let a = ASTRA_LAYOUT.reporter as usize;
+        assert_eq!(discover(&f[..a]), None);
+        assert_eq!(discover(&vec![0; 0x10_0000]), None);
+    }
+
+    /// The Astra's conditions: P0101 lists 1 and 2, and P2455 the one 65 codes share.
+    #[test]
+    fn the_astra_conditions() {
+        let Some(f) = flash() else { return };
+        let t = read_table(&f, &ASTRA_LAYOUT);
+        assert_eq!(t[2].code(), "P0101");
+        assert_eq!(t[2].conditions, [1, 2]);
+        assert_eq!(t[120].code(), "P2455");
+        assert_eq!(t[120].conditions, [0]);
+        assert_eq!(t.iter().filter(|x| x.conditions == [0]).count(), 36);
+        let d = DtcTrace::new(Arc::new(f), ASTRA_LAYOUT);
+        assert_eq!(d.flags.len(), 0x76);
+        assert_eq!(d.flags[1], 0xFFFF_295C);
+        assert_eq!(d.conditions(2)[0].met, None);
+    }
+
     /// The Astra's table: the indices this project has seen (P060E at 0x6F, P160D at 197,
     /// resultados fase 9), and the reports found where fase 9 found them.
     #[test]
@@ -466,7 +888,8 @@ mod tests {
     }
 
     /// Traced on the Astra: the tests run, a provoked fault fails its test and becomes a
-    /// code the ECU reports, and a stop at that code's next test lands on it.
+    /// code the ECU reports, and a stop at that code's next test lands on it. P0101's test
+    /// fails at idle, but the ECU does not count it: its condition 1 is not met.
     #[test]
     fn a_provoked_fault_is_seen_tested_reported_and_stopped_at() {
         let Some(f) = flash() else { return };
@@ -484,10 +907,17 @@ mod tests {
             assert!(d.tested.len() > 150, "{}", d.tested.len());
             d.table.iter().position(|x| x.code() == "P2455").unwrap() as u16
         };
-        assert_eq!(
-            t.lock().unwrap().dtcs.as_ref().unwrap().tested[&p2455].fails,
-            0
-        );
+        {
+            let g = t.lock().unwrap();
+            let d = g.dtcs.as_ref().unwrap();
+            assert_eq!(d.tested[&p2455].fails, 0);
+            let p0101 = &d.tested[&2];
+            assert!(p0101.tests > 0 && p0101.fails == p0101.tests, "{p0101:?}");
+            assert_eq!(p0101.counted, 0);
+            let c = d.conditions(2);
+            assert_eq!((c[0].id, c[0].met), (1, Some(false)), "{c:?}");
+            assert_eq!((c[1].id, c[1].met), (2, Some(true)), "{c:?}");
+        }
         // The DPF sensor at the top of its range.
         s.m.chip.adc.input[11] = 1023;
         for _ in 0..12_000 {
@@ -498,6 +928,7 @@ mod tests {
             let g = t.lock().unwrap();
             let d = g.dtcs.as_ref().unwrap();
             assert!(d.tested[&p2455].fails > 0);
+            assert!(d.tested[&p2455].counted_fails > 0);
             let raw = d.table[p2455 as usize].raw;
             assert!(
                 d.confirmed.contains(&raw) || d.pending.contains(&raw),

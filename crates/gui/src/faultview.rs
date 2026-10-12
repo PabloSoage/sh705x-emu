@@ -6,7 +6,7 @@
 use crate::mapview::Action;
 use eframe::egui::{self, Color32, RichText};
 use session::Watch;
-use session::dtcs::{Dtc, DtcTrace, reactions_known, read_texts};
+use session::dtcs::{Dtc, DtcTrace, reactions_text, read_texts};
 use session::maps::MapTrace;
 
 /// What the page has chosen.
@@ -42,8 +42,8 @@ pub fn show(
 ) {
     let Some(d) = &trace.dtcs else {
         ui.label(
-            "The fault codes' tables are known for the Astra J's calibration (NCLSW420AX36) \
-             only; this flash is another.",
+            "No fault code table was found in this flash: its code is not laid out as the \
+             Astra J's (NCLSW420AX36), the one calibration the search was checked on.",
         );
         return;
     };
@@ -198,27 +198,18 @@ fn detail(
             "Disabled (A = 0 and C = 0)"
         }
     ));
-    let [r1, r2, r3] = x.reactions;
-    let known = reactions_known(x.reactions);
-    ui.label(format!(
-        "While active: masks {r1:04X} {r2:04X} {r3:04X}{}",
-        if known.is_empty() {
-            String::new()
+    ui.label(reactions_text(x));
+    ui.label(d.tested_text(i));
+    for (k, line) in d.conditions_text(i).into_iter().enumerate() {
+        if k == 0 {
+            ui.label(line);
         } else {
-            format!(" · {}", known.join(", "))
-        }
-    ));
-    match d.tested.get(&i) {
-        Some(t) => {
-            ui.label(format!(
-                "Tested {} times while traced, failed {}; the last test {}",
-                t.tests,
-                t.fails,
-                if t.last == 1 { "failed" } else { "passed" }
-            ));
-        }
-        None => {
-            ui.label("Not tested while traced: its test needs other conditions.");
+            let met = !line.contains("NOT met");
+            ui.label(RichText::new(format!("  {line}")).color(if met {
+                Color32::from_rgb(120, 200, 120)
+            } else {
+                Color32::from_rgb(230, 210, 110)
+            }));
         }
     }
     ui.horizontal(|ui| {

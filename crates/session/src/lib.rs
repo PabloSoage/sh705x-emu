@@ -227,10 +227,11 @@ impl Session {
             let mut t = MapTrace::attach(&mut self.m, maps::find_masters(&flash));
             let id = names::calibration(&flash);
             t.names = names::Names::builtin(id);
-            // The fault codes' tests are probed with the maps, where the layout is known.
-            if let Some(l) = dtcs::layout(id) {
+            // The fault codes' tests are probed with the maps, where the layout is known
+            // or found.
+            if let Some(l) = dtcs::layout(id, &flash) {
                 if let Some(p) = self.m.probes.as_mut() {
-                    p.routines.push(l.reporter);
+                    p.routines.extend([l.reporter, l.counter]);
                 }
                 t.dtcs = Some(dtcs::DtcTrace::new(flash.clone(), l));
             }

@@ -280,10 +280,24 @@ test". At idle 193 of the 202 are tested; with the DPF sensor at the top
 of its range, P2455's test starts failing and the ECU reports the code. Descriptions come
 with the emulator for the codes this project has met; your own file can add the rest.
 
-![The fault codes page: P0101, whose test reads two maps](docs/img/gui-faults.png)
+A failed test is not yet a fault. Each code lists up to three conditions, each a flag in
+RAM, and the ECU counts a result only while they are all met: the routine that counts it is
+probed as well, so the page says how many results counted and which conditions are met now.
+P0101's test runs at idle and fails there, but its results count only between 1500 and
+4000 rpm, so at idle it never becomes a code.
 
-*The DPF sensor at the top of its range and the codes read (P2455 pending, further down);
-P0101's test reads two maps, each a link to the map.*
+The tables are not looked up by calibration: they are found in the flash from the code
+that reads them (the routine that counts a result loads tables A, B and C; the one that
+calls it is the reporter; the codes are the table of that length that looks like codes
+and is loaded from the most places). On the
+Astra's flash the search finds what this project found by hand; on other calibrations it
+has not been tried.
+
+![The fault codes page: P0101, its tests failing at idle and not counted](docs/img/gui-faults.png)
+
+*The DPF sensor at the top of its range and the codes read (P2455 pending, further down).
+P0101's test reads two maps, each a link to the map; it has failed 115 times and none
+counted, because its condition 1 (1500 to 4000 rpm among others) is not met at idle.*
 
 | CAN traffic | Memory |
 |---|---|
@@ -346,7 +360,7 @@ phone's storage.
 | Fault codes | Oscilloscope |
 |---|---|
 | <img src="docs/img/app-faults.png" width="300" alt="The app's faults tab: P0101, its tables, its tests live and the maps its test reads"> | <img src="docs/img/app-scope.png" width="300" alt="The app's oscilloscope tab: crank, SCV, VGT and EGR at idle"> |
-| The "Faults" tab: every code with its tests live, which the ECU reports, its tables, where it is tested and the maps its test reads. | The "Scope" tab: the pins as waveforms, held on an edge, with each channel's frequency and duty. |
+| The "Faults" tab: every code with its tests live, how many the ECU counted and which of its conditions are met, which codes the ECU reports, its tables, where it is tested and the maps its test reads. | The "Scope" tab: the pins as waveforms, held on an edge, with each channel's frequency and duty. |
 
 | A map | As a surface |
 |---|---|

@@ -61,7 +61,7 @@
     <string name="follow">Seguir</string>
 
     <string name="tab_faults">Averías</string>
-    <string name="codes_unknown">Las tablas de códigos de avería sólo se conocen para la calibración del Astra J (NCLSW420AX36).</string>
+    <string name="codes_unknown">No se ha encontrado tabla de códigos de avería en esta flash: la búsqueda sólo se ha comprobado con la calibración del Astra J (NCLSW420AX36).</string>
     <string name="read_codes">Leer los códigos</string>
     <string name="read_texts">Descripciones…</string>
     <string name="texts_read">%1$d descripciones leídas</string>

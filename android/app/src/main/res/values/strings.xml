@@ -61,7 +61,7 @@
     <string name="follow">Follow</string>
 
     <string name="tab_faults">Faults</string>
-    <string name="codes_unknown">The fault codes\' tables are known for the Astra J\'s calibration (NCLSW420AX36) only.</string>
+    <string name="codes_unknown">No fault code table was found in this flash: the search was checked on the Astra J\'s calibration (NCLSW420AX36) only.</string>
     <string name="read_codes">Read the codes</string>
     <string name="read_texts">Descriptions…</string>
     <string name="texts_read">%1$d descriptions read</string>

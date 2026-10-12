@@ -2,7 +2,7 @@
 //! They are traced with the maps (see [`crate::maps`]).
 
 use crate::{Live, lock};
-use session::dtcs::{Dtc, DtcTrace, reactions_known};
+use session::dtcs::{Dtc, DtcTrace, reactions_text};
 use session::maps::MapTrace;
 
 impl Live {
@@ -90,25 +90,9 @@ impl Live {
                     "Disabled (A = 0 and C = 0)"
                 }
             ));
-            let [r1, r2, r3] = x.reactions;
-            let known = reactions_known(x.reactions);
-            l.push(format!(
-                "While active: masks {r1:04X} {r2:04X} {r3:04X}{}",
-                if known.is_empty() {
-                    String::new()
-                } else {
-                    format!(" · {}", known.join(", "))
-                }
-            ));
-            l.push(match d.tested.get(&index) {
-                Some(t) => format!(
-                    "Tested {} times while traced, failed {}; the last test {}",
-                    t.tests,
-                    t.fails,
-                    if t.last == 1 { "failed" } else { "passed" }
-                ),
-                None => "Not tested while traced: its test needs other conditions.".into(),
-            });
+            l.push(reactions_text(x));
+            l.push(d.tested_text(index));
+            l.extend(d.conditions_text(index));
             let m = t.masters;
             for mo in d.monitors(index, [m.d3.unwrap_or(u32::MAX), m.d2.unwrap_or(u32::MAX)]) {
                 let maps: Vec<String> = mo.maps.iter().map(|d| format!("{d:06X}")).collect();

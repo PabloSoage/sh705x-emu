@@ -496,9 +496,12 @@ impl MapTrace {
         self.dropped = p.dropped;
         let chip = &m.chip;
         let read = |a: u32| chip.peek(a);
+        if let Some(d) = self.dtcs.as_mut() {
+            d.read_conditions(&read);
+        }
         for c in calls {
             if let Some(d) = self.dtcs.as_mut()
-                && c.routine == d.layout.reporter
+                && (c.routine == d.layout.reporter || c.routine == d.layout.counter)
             {
                 d.add(&c);
                 continue;
