@@ -124,4 +124,46 @@ object Native {
      * [OscFrame].
      */
     external fun oscFrame(spanUs: Double, trigger: Int, rising: Boolean, pre: Double, mask: Int): DoubleArray
+
+    /**
+     * The plugins running: per plugin a line `P index name version file heard sent error`,
+     * a line `L text` per log line, and `N text` for what the last load did.
+     */
+    external fun pluginsText(): String
+
+    /** Loads the plugins the library in [dir] loads at power-on: what could not be read. */
+    external fun pluginsLoadEnabled(dir: String): String
+
+    /** Loads the installed plugin [file] now: empty, or why not. */
+    external fun pluginLoad(dir: String, file: String): String
+
+    /** Unloads the running plugin at [index]. */
+    external fun pluginUnload(index: Int)
+
+    /** The plugins installed in [dir]: `file name version enabled description error` a line. */
+    external fun pluginsInstalled(dir: String): String
+
+    /** Installs [wasm] as [file] in [dir]: what happened. */
+    external fun pluginAdd(dir: String, file: String, wasm: ByteArray): String
+
+    /** Removes [file] from [dir]: empty, or what went wrong. */
+    external fun pluginRemove(dir: String, file: String): String
+
+    /** Loads [file] at power-on, or not: empty, or what went wrong. */
+    external fun pluginEnable(dir: String, file: String, on: Boolean): String
+
+    /** The sources in [dir], without their tokens: `name kind location ref hasToken` a line. */
+    external fun sourcesList(dir: String): String
+
+    /** Adds a source to [dir]: empty, or what is wrong with it. */
+    external fun sourceAdd(dir: String, name: String, kind: String, location: String, ref: String, token: String): String
+
+    /** Removes source [index] from [dir]: empty, or what went wrong. */
+    external fun sourceRemove(dir: String, index: Int): String
+
+    /** Source [index]'s plugins, `file name version description` a line, or `!` and why not. Network: not on the main thread. */
+    external fun sourceIndex(dir: String, index: Int): String
+
+    /** Installs [file] from source [index] into [dir]: what happened. Network: not on the main thread. */
+    external fun sourceInstall(dir: String, index: Int, file: String): String
 }

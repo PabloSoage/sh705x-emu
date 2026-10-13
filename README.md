@@ -85,6 +85,9 @@ second, which makes it a reference oracle rather than an emulator.
   ECU, each map drawn from its own descriptor with where the firmware is on it, where its
   inputs come from and where its result goes; checked on every lookup against the
   firmware's own result.
+- **Plugins:** WebAssembly modules beside the ECU, in a sandbox: nodes on its bus,
+  readers of its memory; installed from a file or from a repository of your own with
+  its token (see [Plugins](#plugins)).
 - **On a phone:** an Android app (Kotlin, Compose) runs the same core and draws the
   engine view: the Astra's flash idles on its own torque there as on the desktop.
 - **Checked against the car:** the 204 answers of a diagnostic sweep of the car's engine
@@ -123,6 +126,8 @@ second, which makes it a reference oracle rather than an emulator.
 | `crates/sh705x` | Command-line front end |
 | `crates/session` | The ECU as an interactive front end drives it: wired into its car, the plants around it, run a slice, a tooth or an edge at a time, the history the engine view draws, and the maps it reads (traced, decoded, their call sites read, their inputs named) |
 | `crates/gui` | `sh705x-gui`: a load screen for the images, then registers, code with breakpoints, memory, CAN, interrupts, the engine (speed, sensors in physical units, and the plants) and an ELM327 console, live (egui) |
+| `crates/plugins` | Plugins: WebAssembly modules in a sandbox, on the ECU's bus and in its memory; installed from a file or from a source with its own token |
+| `plugins/` | Writing plugins: the Rust SDK (`sh705x-plugin`), an example, and the guide |
 | `crates/android` | The Android app's native side: the ECU on its own thread behind a JNI bridge (`libsh705x_jni.so`) |
 | `android/` | The Android app: Kotlin and Compose, the engine view on a phone |
 | `tools/bench.py` | Interleaved speed comparison of builds |
@@ -299,6 +304,28 @@ has not been tried.
 P0101's test reads two maps, each a link to the map; it has failed 115 times and none
 counted, because its condition 1 (1500 to 4000 rpm among others) is not met at idle.*
 
+### Plugins
+
+The emulator runs plugins beside the ECU: WebAssembly modules, each in a sandbox with a
+budget of work per call. A plugin hears every frame the ECU sends on its CAN bus and can
+put frames of its own on it, as another node of the car would. It reads the memory its
+manifest names and can write RAM. It cannot reach the network or the disk.
+
+The same `.wasm` runs in the Windows program and the Android app. Install it from a file,
+or from a source: a repository of your own (GitHub, GitLab, Gitea) with a token scoped to
+it, or any HTTPS directory, each with its own token, as opendash does with its catalogues.
+A plugin can stay in a private repository and never be published.
+
+How to write one, the API and how to publish them: [`plugins/README.md`](plugins/README.md).
+`plugins/abs-node` is an example: it stands in for the ABS on the bus. On the Astra's
+flash and EEPROM with no other node, the ECU reports U0121 (no ABS) after seven seconds;
+with the plugin loaded it does not, and the plugin reads its engine speed.
+
+![The plugins window: the example running, installed, and a private source](docs/img/gui-plugins.png)
+
+*The example plugin running at idle (5 s in, the ECU has sent it 1968 frames, and it
+reads 750 rpm), installed and loaded at power-on, and a private source on GitHub.*
+
 | CAN traffic | Memory |
 |---|---|
 | ![The CAN tab](docs/img/gui-can.png) | ![The memory tab](docs/img/gui-memory.png) |
@@ -341,8 +368,9 @@ off the bus.
 The engine view also runs on a phone: `android/` is an app in Kotlin and Compose over the
 same core, built into `libsh705x_jni.so` (`crates/android`) and driven as the window
 drives it, on a thread of its own. Pick the flash dump (and the EEPROM, if you have it)
-with the system's file picker; the app ships no firmware, asks for no permissions, and
-keeps the dumps in memory only. "Idle on its torque" sets the car's warm idle, puts the
+with the system's file picker; the app ships no firmware and keeps the dumps in memory
+only. Its one network permission is for the plugin sources you add and for looking up a
+new release. "Idle on its torque" sets the car's warm idle, puts the
 plants around the ECU and lets the engine turn on the firmware's torque; slow motion,
 "Next tooth" and "Next edge" work as in the window. It starts in a dark theme; light, or
 the system's, is a tap away.
@@ -361,6 +389,11 @@ phone's storage.
 |---|---|
 | <img src="docs/img/app-faults.png" width="300" alt="The app's faults tab: P0101, its tables, its tests live and the maps its test reads"> | <img src="docs/img/app-scope.png" width="300" alt="The app's oscilloscope tab: crank, SCV, VGT and EGR at idle"> |
 | The "Faults" tab: every code with its tests live, how many the ECU counted and which of its conditions are met, which codes the ECU reports, its tables, where it is tested and the maps its test reads. | The "Scope" tab: the pins as waveforms, held on an edge, with each channel's frequency and duty. |
+
+| Plugins | Updates |
+|---|---|
+| <img src="docs/img/app-plugins.png" width="300" alt="The app's plugins tab: the example plugin running, installed from a source"> | <img src="docs/img/app-updates.png" width="300" alt="The app's load screen with its updates section"> |
+| The "Plugins" tab: the same `.wasm` as on Windows, installed from a file or from a source with its token, loaded now or at every power-on, with its log. | As opendash does: the app looks up the newest release on GitHub when it opens (that can be turned off), shows its notes, downloads the APK for the phone's ABI and hands it to an installer you choose. |
 
 | A map | As a surface |
 |---|---|

@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Plugins are built for wasm32 on their own (see plugins/README.md).
+exclude = ["plugins"]
 
 [workspace.package]
 version = "0.3.2"
@@ -17,6 +19,7 @@ board = { path = "crates/board" }
 engine = { path = "crates/engine" }
 bridge = { path = "crates/bridge" }
 session = { path = "crates/session" }
+plugins = { path = "crates/plugins" }
 
 [profile.release]
 lto = "fat"

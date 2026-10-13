@@ -123,4 +123,47 @@
         <item>Combustible pedido (mm³)</item>
         <item>Par pedido (N·m)</item>
     </string-array>
+    <string name="tab_plugins">Plugins</string>
+    <string name="plugins_intro">Un plugin es un fichero .wasm que corre aislado junto a la centralita: oye las tramas que la centralita envía por su bus CAN y puede enviar las suyas, lee la memoria que nombra su manifiesto y puede escribir RAM.</string>
+    <string name="plugins_running">En marcha</string>
+    <string name="plugins_installed">Instalados</string>
+    <string name="none">Ninguno.</string>
+    <string name="plugin_counts">%1$s · oídas %2$s, enviadas %3$s</string>
+    <string name="plugin_unload">Descargar</string>
+    <string name="plugin_load">Cargar ahora</string>
+    <string name="plugin_remove">Quitar</string>
+    <string name="plugin_at_power_on">Al encender</string>
+    <string name="plugin_from_file">Instalar desde un fichero…</string>
+    <string name="plugin_sources">Fuentes</string>
+    <string name="plugin_sources_intro">Un repositorio o directorio web con un índice plugins.txt (fichero, nombre, versión, descripción, separados por tabuladores) y los ficheros al lado. Cada una guarda su propio token, en el almacenamiento de la app.</string>
+    <string name="with_token">con token</string>
+    <string name="public_source">pública</string>
+    <string name="source_list">Listar</string>
+    <string name="source_empty">Su índice no lista nada.</string>
+    <string name="source_install">Instalar</string>
+    <string name="fetching">Descargando…</string>
+    <string name="source_add">Añadir una fuente</string>
+    <string name="source_name">Nombre</string>
+    <string name="source_location">Ubicación</string>
+    <string name="source_ref">Rama o etiqueta</string>
+    <string name="source_token">Token (vacío para una fuente pública)</string>
+    <string name="source_add_button">Añadir</string>
+    <string name="updates">Actualizaciones</string>
+    <string name="update_version">Versión %1$s</string>
+    <string name="update_available_title">Actualización: %1$s</string>
+    <string name="update_new">Disponible: %1$s</string>
+    <string name="update_see">Ver las novedades</string>
+    <string name="update_check">Buscar actualizaciones</string>
+    <string name="update_checking">Buscando…</string>
+    <string name="update_up_to_date">Es la versión más reciente.</string>
+    <string name="update_check_failed">No se pudo llegar a GitHub.</string>
+    <string name="update_check_on_start">Buscar al abrir la app</string>
+    <string name="update_download">Descargar</string>
+    <string name="update_install">Instalar</string>
+    <string name="update_retry">Reintentar</string>
+    <string name="update_later">Más tarde</string>
+    <string name="update_open_github">Abrir en GitHub</string>
+    <string name="update_download_failed">La descarga falló.</string>
+    <string name="update_choose_installer">Instalar con</string>
+    <string name="update_other_installer">Otro instalador…</string>
 </resources>

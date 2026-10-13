@@ -39,6 +39,11 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.Alignment
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.material3.Checkbox
+import com.varuna.sh705x.update.AppUpdate
+import com.varuna.sh705x.update.UpdateDialog
 import androidx.compose.ui.res.stringArrayResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -138,7 +143,11 @@ fun App(theme: ThemeChoice, onTheme: (ThemeChoice) -> Unit) {
                         scope.launch {
                             val e = withContext(Dispatchers.Default) { Native.open(f.bytes, eeprom?.bytes) }
                             if (e.isEmpty()) {
-                                error = null
+                                // The plugins set to load at power-on.
+                                val bad = withContext(Dispatchers.IO) {
+                                    Native.pluginsLoadEnabled(context.filesDir.absolutePath + "/plugins-library")
+                                }
+                                error = bad.ifEmpty { null }
                                 on = true
                             } else {
                                 error = e
@@ -154,7 +163,67 @@ fun App(theme: ThemeChoice, onTheme: (ThemeChoice) -> Unit) {
                 })
             }
             ThemeRow(theme, onTheme)
+            Updates()
         }
+    }
+
+    // Once per process, and only offered, never forced; not over a running ECU.
+    var updateDismissed by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        if (loadCheckUpdates(context)) AppUpdate.checkOnStart(context.applicationContext)
+    }
+    (AppUpdate.status as? AppUpdate.Status.Available)?.let { available ->
+        if (!updateDismissed && !on) UpdateDialog(available.update, onDismiss = { updateDismissed = true })
+    }
+}
+
+/** The version, a new release if there is one, a check by hand, and the check at start switched off. */
+@Composable
+private fun Updates() {
+    val context = LocalContext.current
+    var showing by remember { mutableStateOf(false) }
+    var onStart by remember { mutableStateOf(loadCheckUpdates(context)) }
+    Text(stringResource(R.string.updates), style = MaterialTheme.typography.labelLarge)
+    Text(
+        stringResource(R.string.update_version, AppUpdate.installedVersion(context).ifEmpty { "?" }),
+        style = MaterialTheme.typography.bodySmall,
+    )
+    when (val s = AppUpdate.status) {
+        is AppUpdate.Status.Available -> {
+            Text(
+                stringResource(R.string.update_new, s.update.title),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            OutlinedButton(onClick = { showing = true }) { Text(stringResource(R.string.update_see)) }
+            if (showing) UpdateDialog(s.update, onDismiss = { showing = false })
+        }
+        AppUpdate.Status.UpToDate -> Text(stringResource(R.string.update_up_to_date), style = MaterialTheme.typography.bodySmall)
+        AppUpdate.Status.Failed -> Text(
+            stringResource(R.string.update_check_failed),
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        else -> Unit
+    }
+    if (AppUpdate.status !is AppUpdate.Status.Available) {
+        OutlinedButton(
+            onClick = { AppUpdate.check(context.applicationContext) },
+            enabled = AppUpdate.status != AppUpdate.Status.Checking,
+        ) {
+            Text(
+                stringResource(
+                    if (AppUpdate.status == AppUpdate.Status.Checking) R.string.update_checking else R.string.update_check,
+                ),
+            )
+        }
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(checked = onStart, onCheckedChange = {
+            onStart = it
+            saveCheckUpdates(context, it)
+        })
+        Text(stringResource(R.string.update_check_on_start), style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -240,6 +309,7 @@ private fun Engine(frame: Frame, window: Int, onWindow: (Int) -> Unit, onOff: ()
         FilterChip(selected = tab == 1, onClick = { tab = 1 }, label = { Text(stringResource(R.string.tab_maps)) })
         FilterChip(selected = tab == 2, onClick = { tab = 2 }, label = { Text(stringResource(R.string.tab_faults)) })
         FilterChip(selected = tab == 3, onClick = { tab = 3 }, label = { Text(stringResource(R.string.tab_scope)) })
+        FilterChip(selected = tab == 4, onClick = { tab = 4 }, label = { Text(stringResource(R.string.tab_plugins)) })
     }
     // The maps and the codes' tests are traced together, while either tab is open.
     val tracing = tab == 1 || tab == 2
@@ -252,6 +322,11 @@ private fun Engine(frame: Frame, window: Int, onWindow: (Int) -> Unit, onOff: ()
     DisposableEffect(scoping) {
         if (scoping) Native.scopePins(true)
         onDispose { if (scoping) Native.scopePins(false) }
+    }
+    if (tab == 4) {
+        PluginsScreen()
+        Spacer(Modifier.height(24.dp))
+        return
     }
     if (tab == 3) {
         ScopeScreen()

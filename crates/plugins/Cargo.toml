@@ -1,0 +1,20 @@
+[package]
+name = "plugins"
+description = "Plugins for the emulated ECU: WebAssembly modules that join its CAN bus and read its memory, run in a sandbox, installed from a file or from a repository of your own"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+sh7059.workspace = true
+wasmi = { version = "0.46.0", default-features = false, features = ["std"] }
+serde_json = "1.0.140"
+ureq = "3.4.2"
+
+[dev-dependencies]
+wat = "1.261.0"
+
+[lints]
+workspace = true

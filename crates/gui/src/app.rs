@@ -44,6 +44,10 @@ pub struct App {
     scope_view: bool,
     /// What it shows.
     scope: crate::oscview::OscView,
+    /// The plugins window is open.
+    pub plugins_view: bool,
+    /// Its state.
+    plugins: crate::pluginview::PluginView,
 }
 
 impl App {
@@ -68,6 +72,8 @@ impl App {
             maps: Default::default(),
             scope_view: false,
             scope: Default::default(),
+            plugins_view: false,
+            plugins: Default::default(),
         }
     }
 
@@ -166,6 +172,8 @@ impl App {
                 {
                     self.send(Cmd::ScopePins(self.scope_view));
                 }
+                ui.toggle_value(&mut self.plugins_view, "Plugins")
+                    .on_hover_text("Plugins: WebAssembly modules beside the ECU, on its bus and in its memory");
                 if ui
                     .toggle_value(&mut self.maps_view, "Maps")
                     .on_hover_text("The calibration maps the firmware reads, as it reads them")
@@ -216,6 +224,25 @@ impl App {
                     crate::view::show(ui, &scope, &mut self.view, now_us);
                 });
             self.engine_view = open;
+        }
+
+        if self.plugins_view {
+            let mut open = true;
+            egui::Window::new("Plugins")
+                .open(&mut open)
+                .default_size([760.0, 560.0])
+                .default_pos([260.0, 80.0])
+                .vscroll(true)
+                .show(root.ctx(), |ui| {
+                    crate::pluginview::show(
+                        ui,
+                        &s.plugins,
+                        s.plugin_note.as_deref(),
+                        &mut self.plugins,
+                        &self.cmds,
+                    );
+                });
+            self.plugins_view = open;
         }
 
         if self.scope_view {
@@ -992,6 +1019,59 @@ mod tests {
         Some((app, t))
     }
 
+    /// Idling with the example plugin (`SH705X_PLUGIN`) running until it has logged, and
+    /// the plugins window open on a library of its own: the plugin installed and loaded at
+    /// power-on, and a private source (with a made-up token).
+    fn with_a_plugin() -> Option<(App, std::thread::JoinHandle<()>)> {
+        let Some(wasm) = std::env::var("SH705X_PLUGIN")
+            .ok()
+            .and_then(|p| std::fs::read(p).ok())
+        else {
+            eprintln!("SH705X_PLUGIN not set: skipped");
+            return None;
+        };
+        let (mut app, t) = idling(2)?;
+        let dir = std::env::temp_dir().join(format!("sh705x-gui-plugins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lib = plugins::Library::new(&dir);
+        lib.add("abs-node.wasm", &wasm).unwrap();
+        lib.set_enabled("abs-node.wasm", true).unwrap();
+        lib.save_sources(&[plugins::Source {
+            name: "My plugins".into(),
+            kind: plugins::Kind::GitHub,
+            location: "me/sh705x-plugins".into(),
+            reference: "main".into(),
+            token: "made-up".into(),
+        }])
+        .unwrap();
+        app.send(Cmd::LoadPlugin(wasm, "abs-node.wasm".into()));
+        wait_for(&app.shared, |s| {
+            s.plugins.first().is_some_and(|p| p.log.len() >= 2)
+        });
+        app.plugins = crate::pluginview::PluginView::with_library(lib);
+        app.plugins_view = true;
+        Some((app, t))
+    }
+
+    #[test]
+    fn the_plugins_window_draws() {
+        let Some((app, t)) = with_a_plugin() else {
+            return;
+        };
+        let st = app.shared.lock().unwrap().plugins[0].clone();
+        assert_eq!(st.error, None);
+        assert!(st.heard > 0 && st.sent > 0, "{st:?}");
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+        h.run_steps(3);
+        // Unloaded, it is gone.
+        h.state().send(Cmd::UnloadPlugin(0));
+        wait_for(&h.state().shared, |s| s.plugins.is_empty());
+        h.state().send(Cmd::Quit);
+        t.join().unwrap();
+    }
+
     #[test]
     fn the_oscilloscope_draws() {
         let Some((mut app, t)) = scoping() else {
@@ -1156,6 +1236,19 @@ mod tests {
             .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
         h.run_steps(3);
         let path = dir.join("gui-scope.png");
+        h.render().unwrap().save(&path).unwrap();
+        eprintln!("{}", path.display());
+        h.state().send(Cmd::Quit);
+        t.join().unwrap();
+        // The plugins window: the example plugin running, installed, and a source.
+        let Some((app, t)) = with_a_plugin() else {
+            return;
+        };
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+        h.run_steps(3);
+        let path = dir.join("gui-plugins.png");
         h.render().unwrap().save(&path).unwrap();
         eprintln!("{}", path.display());
         h.state().send(Cmd::Quit);

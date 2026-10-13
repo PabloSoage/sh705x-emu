@@ -124,4 +124,47 @@
         <item>Fuel asked (mm³)</item>
         <item>Torque asked (N·m)</item>
     </string-array>
+    <string name="tab_plugins">Plugins</string>
+    <string name="plugins_intro">A plugin is one .wasm file that runs in a sandbox beside the ECU: it hears the frames the ECU sends on its CAN bus and can send its own, reads the memory its manifest names and can write RAM.</string>
+    <string name="plugins_running">Running</string>
+    <string name="plugins_installed">Installed</string>
+    <string name="none">None.</string>
+    <string name="plugin_counts">%1$s · heard %2$s, sent %3$s</string>
+    <string name="plugin_unload">Unload</string>
+    <string name="plugin_load">Load now</string>
+    <string name="plugin_remove">Remove</string>
+    <string name="plugin_at_power_on">At power-on</string>
+    <string name="plugin_from_file">Install from a file…</string>
+    <string name="plugin_sources">Sources</string>
+    <string name="plugin_sources_intro">A repository or web directory with a plugins.txt index (file, name, version, description, tab-separated) and the files beside it. Each keeps its own token, in the app\'s own storage.</string>
+    <string name="with_token">with a token</string>
+    <string name="public_source">public</string>
+    <string name="source_list">List</string>
+    <string name="source_empty">Its index lists nothing.</string>
+    <string name="source_install">Install</string>
+    <string name="fetching">Fetching…</string>
+    <string name="source_add">Add a source</string>
+    <string name="source_name">Name</string>
+    <string name="source_location">Location</string>
+    <string name="source_ref">Branch or tag</string>
+    <string name="source_token">Token (empty for a public source)</string>
+    <string name="source_add_button">Add</string>
+    <string name="updates">Updates</string>
+    <string name="update_version">Version %1$s</string>
+    <string name="update_available_title">Update: %1$s</string>
+    <string name="update_new">%1$s is available</string>
+    <string name="update_see">See what is new</string>
+    <string name="update_check">Check for updates</string>
+    <string name="update_checking">Checking…</string>
+    <string name="update_up_to_date">This is the newest release.</string>
+    <string name="update_check_failed">GitHub could not be reached.</string>
+    <string name="update_check_on_start">Check when the app opens</string>
+    <string name="update_download">Download</string>
+    <string name="update_install">Install</string>
+    <string name="update_retry">Try again</string>
+    <string name="update_later">Later</string>
+    <string name="update_open_github">Open on GitHub</string>
+    <string name="update_download_failed">The download failed.</string>
+    <string name="update_choose_installer">Install with</string>
+    <string name="update_other_installer">Another installer…</string>
 </resources>

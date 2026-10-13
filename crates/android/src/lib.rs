@@ -8,6 +8,7 @@ mod exports;
 mod faults;
 mod maps;
 mod osc;
+mod plugins;
 
 use bridge::link::CYCLES_PER_US;
 use session::maps::MapTrace;
@@ -57,6 +58,10 @@ pub enum Order {
     ReadCodes,
     /// Descriptions of fault codes, by code.
     DescribeCodes(BTreeMap<String, String>),
+    /// Load a plugin: its module, and the file it came from.
+    LoadPlugin(Vec<u8>, String),
+    /// Unload the plugin at this index.
+    UnloadPlugin(usize),
     /// End the thread.
     Quit,
 }
@@ -65,6 +70,8 @@ pub enum Order {
 type MapSlot = Arc<Mutex<Option<Arc<Mutex<MapTrace>>>>>;
 /// The pins being watched, as the thread publishes them.
 type OscSlot = Arc<Mutex<Option<Arc<Mutex<session::osc::Osc>>>>>;
+/// The plugins loaded, and what the last load did, as the thread publishes them.
+type PluginSlot = Arc<Mutex<(Vec<::plugins::Status>, Option<String>)>>;
 
 /// What the thread published last.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -99,6 +106,7 @@ pub struct Live {
     scope: Arc<Mutex<Scope>>,
     maps: MapSlot,
     osc: OscSlot,
+    plugins: PluginSlot,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -127,9 +135,11 @@ impl Live {
         let m2 = maps.clone();
         let osc: OscSlot = Arc::default();
         let o2 = osc.clone();
+        let plugins: PluginSlot = Arc::default();
+        let p2 = plugins.clone();
         let thread = std::thread::Builder::new()
             .name("ecu".into())
-            .spawn(move || run(ecu, rx, s2, sc2, m2, o2))
+            .spawn(move || run(ecu, rx, s2, sc2, m2, o2, p2))
             .map_err(|e| e.to_string())?;
         Ok(Self {
             orders,
@@ -137,6 +147,7 @@ impl Live {
             scope,
             maps,
             osc,
+            plugins,
             thread: Some(thread),
         })
     }
@@ -237,6 +248,7 @@ fn run(
     scope: Arc<Mutex<Scope>>,
     maps: MapSlot,
     osc: OscSlot,
+    plugins: PluginSlot,
 ) {
     let mut running = false;
     let mut speed = 1.0f64;
@@ -303,6 +315,16 @@ fn run(
                     (pace_cycle, pace_wall) = (ecu.m.cpu.cycles, Instant::now());
                 }
                 Order::DescribeCodes(t) => ecu.describe_codes(t),
+                Order::LoadPlugin(wasm, file) => {
+                    let note = match ecu.plugins.load(&wasm, &file) {
+                        Ok(i) => {
+                            format!("{file}: loaded ({})", ecu.plugins.plugins[i].manifest.name)
+                        }
+                        Err(e) => format!("{file}: {e}"),
+                    };
+                    lock(&plugins).1 = Some(note);
+                }
+                Order::UnloadPlugin(i) => ecu.plugins.unload(i),
                 Order::Quit => return,
             }
             next = orders.try_recv().ok();
@@ -347,6 +369,7 @@ fn run(
                 },
                 stop: stop.filter(|s| *s != Stop::Count).map(|s| format!("{s:?}")),
             };
+            lock(&plugins).0 = ecu.plugins.status();
             published = Instant::now();
         }
     }

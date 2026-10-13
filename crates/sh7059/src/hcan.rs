@@ -42,6 +42,9 @@ pub trait CanSource: Send {
     fn take(&mut self) -> Option<(u64, Frame)>;
 }
 
+/// Frames a channel's [`Channel::tap`] keeps.
+pub const TAP_KEPT: usize = 4096;
+
 /// First HCAN register (MCR_0).
 pub const BASE: u32 = 0xFFFF_D000;
 /// One past the last HCAN register (end of channel 1's mailbox 31).
@@ -138,6 +141,9 @@ pub struct Channel {
     sending: Option<(usize, u64)>,
     /// Frames transmitted, with the cycle each ended.
     pub outbox: VecDeque<(u64, Frame)>,
+    /// A second copy of the frames transmitted, while some tool wants one of its own (the
+    /// outbox is drained by the diagnostic link): at most [`TAP_KEPT`], oldest dropped.
+    pub tap: Option<VecDeque<(u64, Frame)>>,
     /// Frames received and stored, rejected for want of a mailbox, and lost to NMC = 0.
     pub received: u64,
     /// Frames from the bus that no mailbox took.
@@ -432,6 +438,12 @@ impl Hcan {
                 self.ch[ch].sending = None;
                 let f = Self::frame_of(io, ch, m);
                 self.ch[ch].outbox.push_back((end, f));
+                if let Some(t) = self.ch[ch].tap.as_mut() {
+                    if t.len() == TAP_KEPT {
+                        t.pop_front();
+                    }
+                    t.push_back((end, f));
+                }
                 let txpr = r32(io, ch, TXPR) & !(1 << m);
                 w32(io, ch, TXPR, txpr);
                 let ack = r32(io, ch, TXACK) | (1 << m);

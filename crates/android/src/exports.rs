@@ -557,3 +557,207 @@ pub extern "system" fn Java_com_varuna_sh705x_Native_oscFrame<'l>(
     })
     .resolve::<ThrowRuntimeExAndDefault>()
 }
+
+/// The plugins running ([`Live::plugins_text`]); empty with no ECU running.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_pluginsText<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+) -> jstring {
+    string(&mut env, |_| {
+        Ok(lock(&LIVE)
+            .as_ref()
+            .map(Live::plugins_text)
+            .unwrap_or_default())
+    })
+}
+
+/// Loads the plugins the library in `dir` loads at power-on: what could not be read.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_pluginsLoadEnabled<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    dir: JString<'l>,
+) -> jstring {
+    string(&mut env, |env| {
+        let dir = dir.try_to_string(env)?;
+        Ok(lock(&LIVE)
+            .as_ref()
+            .map(|l| l.load_enabled(&dir))
+            .unwrap_or_default())
+    })
+}
+
+/// Loads the installed plugin `file` now: empty, or why not.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_pluginLoad<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    dir: JString<'l>,
+    file: JString<'l>,
+) -> jstring {
+    string(&mut env, |env| {
+        let (dir, file) = (dir.try_to_string(env)?, file.try_to_string(env)?);
+        Ok(match crate::plugins::read(&dir, &file) {
+            Ok(w) => {
+                send(Order::LoadPlugin(w, file));
+                String::new()
+            }
+            Err(e) => e,
+        })
+    })
+}
+
+/// Unloads the running plugin at `index`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_pluginUnload<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    index: jint,
+) {
+    unit(&mut env, |_| {
+        send(Order::UnloadPlugin(index.max(0) as usize));
+        Ok(())
+    })
+}
+
+/// The plugins installed in `dir` ([`crate::plugins::installed`]).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_pluginsInstalled<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    dir: JString<'l>,
+) -> jstring {
+    string(&mut env, |env| {
+        Ok(crate::plugins::installed(&dir.try_to_string(env)?))
+    })
+}
+
+/// Installs `wasm` as `file` in `dir`: what happened.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_pluginAdd<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    dir: JString<'l>,
+    file: JString<'l>,
+    wasm: JByteArray<'l>,
+) -> jstring {
+    string(&mut env, |env| {
+        let (dir, file) = (dir.try_to_string(env)?, file.try_to_string(env)?);
+        let wasm = env.convert_byte_array(&wasm)?;
+        Ok(crate::plugins::add(&dir, &file, &wasm))
+    })
+}
+
+/// Removes `file` from `dir`: empty, or what went wrong.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_pluginRemove<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    dir: JString<'l>,
+    file: JString<'l>,
+) -> jstring {
+    string(&mut env, |env| {
+        let (dir, file) = (dir.try_to_string(env)?, file.try_to_string(env)?);
+        Ok(crate::plugins::remove(&dir, &file))
+    })
+}
+
+/// Loads `file` at power-on, or not: empty, or what went wrong.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_pluginEnable<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    dir: JString<'l>,
+    file: JString<'l>,
+    on: jboolean,
+) -> jstring {
+    string(&mut env, |env| {
+        let (dir, file) = (dir.try_to_string(env)?, file.try_to_string(env)?);
+        Ok(crate::plugins::set_enabled(&dir, &file, on))
+    })
+}
+
+/// The sources in `dir`, without their tokens ([`crate::plugins::sources`]).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_sourcesList<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    dir: JString<'l>,
+) -> jstring {
+    string(&mut env, |env| {
+        Ok(crate::plugins::sources(&dir.try_to_string(env)?))
+    })
+}
+
+/// Adds a source to `dir`: empty, or what is wrong with it.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_sourceAdd<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    dir: JString<'l>,
+    name: JString<'l>,
+    kind: JString<'l>,
+    location: JString<'l>,
+    reference: JString<'l>,
+    token: JString<'l>,
+) -> jstring {
+    string(&mut env, |env| {
+        Ok(crate::plugins::add_source(
+            &dir.try_to_string(env)?,
+            &name.try_to_string(env)?,
+            &kind.try_to_string(env)?,
+            &location.try_to_string(env)?,
+            &reference.try_to_string(env)?,
+            &token.try_to_string(env)?,
+        ))
+    })
+}
+
+/// Removes source `index` from `dir`: empty, or what went wrong.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_sourceRemove<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    dir: JString<'l>,
+    index: jint,
+) -> jstring {
+    string(&mut env, |env| {
+        Ok(crate::plugins::remove_source(
+            &dir.try_to_string(env)?,
+            index.max(0) as usize,
+        ))
+    })
+}
+
+/// Source `index`'s plugins ([`crate::plugins::index`]). Goes to the network.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_sourceIndex<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    dir: JString<'l>,
+    index: jint,
+) -> jstring {
+    string(&mut env, |env| {
+        Ok(crate::plugins::index(
+            &dir.try_to_string(env)?,
+            index.max(0) as usize,
+        ))
+    })
+}
+
+/// Installs `file` from source `index` into `dir`: what happened. Goes to the network.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_varuna_sh705x_Native_sourceInstall<'l>(
+    mut env: EnvUnowned<'l>,
+    _class: JClass<'l>,
+    dir: JString<'l>,
+    index: jint,
+    file: JString<'l>,
+) -> jstring {
+    string(&mut env, |env| {
+        let dir = dir.try_to_string(env)?;
+        let file = file.try_to_string(env)?;
+        Ok(crate::plugins::install(&dir, index.max(0) as usize, &file))
+    })
+}

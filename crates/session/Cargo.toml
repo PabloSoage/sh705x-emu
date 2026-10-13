@@ -13,6 +13,7 @@ sh2e.workspace = true
 board.workspace = true
 bridge.workspace = true
 engine.workspace = true
+plugins.workspace = true
 
 [lints]
 workspace = true

@@ -152,6 +152,8 @@ pub struct Session {
     breakpoints: Vec<u32>,
     /// Stop at the next lookup of a map, or the next test of a fault code.
     watch: Option<Watch>,
+    /// The plugins loaded: nodes on the bus, readers of memory.
+    pub plugins: plugins::Host,
 }
 
 /// What to stop at next.
@@ -214,6 +216,7 @@ impl Session {
             osc: None,
             breakpoints: Vec::new(),
             watch: None,
+            plugins: plugins::Host::default(),
         }
     }
 
@@ -414,7 +417,7 @@ impl Session {
     pub fn step(&mut self, n: u64) -> Stop {
         let skip = self.skip();
         let s = run_past(&mut self.m, n, skip.as_ref());
-        self.take_maps();
+        self.after_run();
         s
     }
 
@@ -481,7 +484,7 @@ impl Session {
     pub fn run(&mut self, cycles: u64) -> Stop {
         let skip = self.skip();
         let s = run_past(&mut self.m, cycles, skip.as_ref());
-        self.take_maps();
+        self.after_run();
         if let Some(p) = self.plants.as_mut()
             && self.m.cpu.cycles - self.plant_cycle >= PLANT_CYCLES
         {
@@ -511,7 +514,7 @@ impl Session {
             }
             s
         });
-        self.take_maps();
+        self.after_run();
         r
     }
 
@@ -537,12 +540,74 @@ impl Session {
             }
             s
         });
-        self.take_maps();
+        self.after_run();
         r
+    }
+
+    /// After the machine ran: the maps it read, and the plugins' turn.
+    fn after_run(&mut self) {
+        self.take_maps();
+        self.plugins.step(&mut self.m, CYCLES_PER_US);
     }
 
     /// Adds the moment to `scope` (every moment with `stepping`, else at its pace).
     pub fn sample(&self, scope: &mut scope::Scope, stepping: bool) {
         scope.take(&self.m, self.plant.as_ref(), &self.engine, stepping);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ECU (with its EEPROM, which says the ABS is fitted) idling with no other node on
+    /// the bus and its codes traced, and `plugin` loaded if given; the codes it reports
+    /// after eight seconds (U0121 takes seven, resultados fase 12), and the plugin's status.
+    fn alone(f: &[u8], e: &[u8], plugin: Option<&[u8]>) -> (Vec<u16>, Option<plugins::Status>) {
+        let mut m = machine(f, Some(e), board::DEFAULT_LAYOUT).unwrap();
+        m.chip.can_source = None;
+        Engine::idle().apply(&mut m);
+        let mut s = Session::new(m, Engine::idle());
+        s.trace_maps(true);
+        if let Some(p) = plugin {
+            s.plugins.load(p, "abs_node.wasm").unwrap();
+        }
+        while s.m.cpu.cycles < 8_000_000 * CYCLES_PER_US {
+            s.run(40_000);
+        }
+        s.read_codes();
+        let t = s.maps.clone().unwrap();
+        let g = t.lock().unwrap();
+        let d = g.dtcs.as_ref().unwrap();
+        let codes = d.confirmed.iter().chain(&d.pending).copied().collect();
+        (codes, s.plugins.status().first().cloned())
+    }
+
+    /// Alone on the bus the ECU misses the ABS (U0121); with the example plugin
+    /// (`plugins/abs-node`, built, in `SH705X_PLUGIN`) standing in for it, it does not,
+    /// and the plugin hears the ECU and reads its engine speed. Needs `SH705X_EEPROM` too.
+    #[test]
+    fn a_plugin_stands_in_for_a_node_on_the_bus() {
+        let read = |k: &str| std::env::var(k).ok().and_then(|p| std::fs::read(p).ok());
+        let (Some(f), Some(e), Some(p)) = (
+            read("SH705X_FLASH"),
+            read("SH705X_EEPROM"),
+            read("SH705X_PLUGIN"),
+        ) else {
+            return;
+        };
+        let (codes, _) = alone(&f, &e, None);
+        assert!(codes.contains(&0xC121), "{codes:x?}");
+        let (codes, st) = alone(&f, &e, Some(&p));
+        let st = st.unwrap();
+        assert!(!codes.contains(&0xC121), "{codes:x?}");
+        assert_eq!(st.error, None);
+        assert!(st.heard > 0 && st.sent > 200, "{st:?}");
+        eprintln!("{:?}", st.log);
+        assert!(
+            st.log.iter().any(|l| l.contains("engine speed 7")),
+            "{:?}",
+            st.log
+        );
     }
 }

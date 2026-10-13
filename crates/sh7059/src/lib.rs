@@ -393,6 +393,18 @@ impl Sh7059 {
         }
     }
 
+    /// Writes a byte of RAM, for a tool: nothing is traced or watched. Returns false (and
+    /// writes nothing) outside RAM.
+    pub fn poke_ram(&mut self, addr: u32, value: u8) -> bool {
+        match region(addr) {
+            Region::Ram(o) => {
+                self.ram[o] = value;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// The PWM output of ATU-II channel 6 or 7 (`ch` = 0 or 1), timer `k` (0 = A .. 3 =
     /// D), as a waveform, if that timer is running.
     pub fn pwm_wave(&self, ch: usize, k: usize) -> Option<atu::Wave> {

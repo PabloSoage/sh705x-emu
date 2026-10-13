@@ -68,6 +68,10 @@ pub enum Cmd {
     ReadCodes,
     /// Descriptions of fault codes, by code.
     DescribeCodes(std::collections::BTreeMap<String, String>),
+    /// Load a plugin: its module, and the file it came from.
+    LoadPlugin(Vec<u8>, String),
+    /// Unload the plugin at this index.
+    UnloadPlugin(usize),
     /// End the thread.
     Quit,
 }
@@ -141,6 +145,10 @@ pub struct Snapshot {
     pub watch: Option<session::Watch>,
     /// The pins as waveforms, while the oscilloscope is on.
     pub osc: Option<Arc<Mutex<session::osc::Osc>>>,
+    /// The plugins loaded.
+    pub plugins: Vec<plugins::Status>,
+    /// What the last plugin load did.
+    pub plugin_note: Option<String>,
 }
 
 /// Frames kept for the CAN view.
@@ -166,6 +174,7 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
     let (mut rt_cycle, mut rt_wall, mut rt_factor) = (ecu.m.cpu.cycles, Instant::now(), 0.0);
     let mut published = Instant::now() - Duration::from_secs(1);
     let scope = shared.lock().expect("snapshot lock").scope.clone();
+    let mut plugin_note = None;
     loop {
         // Orders: wait for one while paused, take what is there while running.
         let first = if running {
@@ -206,6 +215,15 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
                     (pace_cycle, pace_wall) = (ecu.m.cpu.cycles, Instant::now());
                 }
                 Cmd::DescribeCodes(t) => ecu.describe_codes(t),
+                Cmd::LoadPlugin(wasm, file) => {
+                    plugin_note = Some(match ecu.plugins.load(&wasm, &file) {
+                        Ok(i) => {
+                            format!("{file}: loaded ({})", ecu.plugins.plugins[i].manifest.name)
+                        }
+                        Err(e) => format!("{file}: {e}"),
+                    });
+                }
+                Cmd::UnloadPlugin(i) => ecu.plugins.unload(i),
                 Cmd::Adc(c, v) => ecu.m.chip.adc.input[c] = v,
                 Cmd::Sensor(k, v) => {
                     let _ = ecu.set_sensor(k, v);
@@ -338,6 +356,8 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
                 maps: ecu.maps.clone(),
                 watch: ecu.watching(),
                 osc: ecu.osc.clone(),
+                plugins: ecu.plugins.status(),
+                plugin_note: plugin_note.clone(),
             };
             *shared.lock().expect("snapshot lock") = snap;
             published = Instant::now();
@@ -403,5 +423,7 @@ pub fn first_snapshot(m: &Machine, engine: &Engine) -> Snapshot {
         maps: None,
         watch: None,
         osc: None,
+        plugins: Vec::new(),
+        plugin_note: None,
     }
 }

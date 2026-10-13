@@ -1,0 +1,21 @@
+[package]
+name = "abs-node"
+description = "An example plugin for sh705x-emu: the ABS on the bus, as the emulator's built-in peer, and a log line of what the ECU says"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Pablo Soage <p.soage@udc.es>"]
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+sh705x-plugin = { path = "../sdk" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = "debuginfo"

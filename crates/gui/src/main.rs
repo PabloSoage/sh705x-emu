@@ -19,6 +19,7 @@ mod faultview;
 mod load;
 mod mapview;
 mod oscview;
+mod pluginview;
 mod view;
 
 use std::sync::mpsc::{self, Sender};
@@ -80,8 +81,15 @@ impl Running {
         let (cmds, rx) = mpsc::channel();
         let s2 = shared.clone();
         let thread = std::thread::spawn(move || emu::run(m, engine, rx, s2));
+        // The plugins the user has set to load at power-on.
+        let (wanted, failed) = pluginview::enabled();
+        for (wasm, file) in wanted {
+            let _ = cmds.send(emu::Cmd::LoadPlugin(wasm, file));
+        }
+        let mut app = app::App::new(shared, cmds.clone(), Arc::new(images.flash));
+        app.plugins_view = !failed.is_empty();
         Ok(Self {
-            app: app::App::new(shared, cmds.clone(), Arc::new(images.flash)),
+            app,
             cmds,
             thread: Some(thread),
             load,

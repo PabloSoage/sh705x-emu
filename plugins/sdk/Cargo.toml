@@ -1,0 +1,12 @@
+[package]
+name = "sh705x-plugin"
+description = "Write plugins for sh705x-emu in Rust: the emulator's imports as safe functions, frames, and the manifest section"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Pablo Soage <p.soage@udc.es>"]
+license = "GPL-3.0-or-later"
+publish = false
+
+[lints.rust]
+missing_docs = "warn"
