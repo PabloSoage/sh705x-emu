@@ -10,7 +10,7 @@ pub(crate) use engine::plants::f32_at;
 mod touched;
 
 pub use actuators::ActuatorsOptions;
-pub use maps::MapsOptions;
+pub use maps::{MapsOptions, ReplayOptions};
 pub use plant::PlantOptions;
 pub use touched::TouchedOptions;
 
@@ -37,6 +37,8 @@ usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
                     [--seconds <s>] [--adc <channel:code>]...
        sh705x maps  --flash <flash.bin> [--compare <other.bin>] [--eeprom <eeprom.bin>]
                     [--rpm-list 750,1500,...] [--pedal-list 0,25,...] [--sensor <key=value>]...
+       sh705x replay --flash <flash.bin> --cells <cells.csv> [--eeprom <eeprom.bin>]
+                    [--sensor <key=value>]...
        sh705x touched --flash <flash.bin> [--eeprom <eeprom.bin>] --masters 3d=<hex>,2d=<hex>
                     [--catalog <maps.csv>]... [--compare <other.bin>] [--millis <ms>]
                     [--rpm <rpm>] [--sensor <key=value>]...
@@ -80,6 +82,11 @@ commands:
           desired EGR and throttle; with --compare, the same on
           a second flash image and where they differ, to see what a calibration change
           does
+  replay  drive each operating point of a recorded route (--cells, summarised from a
+          scanmatik-bench route by tools/route_cells.py) into the firmware and report how
+          far the setpoints it computes (rail pressure, boost, VGT, air, torque) sit from
+          the ones the car logged there; validates the firmware against a whole drive, not
+          a synthetic grid (fuel per stroke is 0 without injection, so it is not compared)
   touched boot the ECU as obd does, then watch --millis (2000) of ECU time and list every
           calibration map the firmware looks up through the interpolation routines
           given with --masters (3d=<hex>,2d=<hex>: they take the map's descriptor in R4
@@ -134,6 +141,8 @@ pub enum Command {
     Bench(EcuOptions, u32),
     /// Read the setpoints over a grid of speed and pedal, for one image or two.
     Maps(MapsOptions),
+    /// Replay a recorded route's inputs and compare the firmware's setpoints with it.
+    Replay(ReplayOptions),
     /// List the maps the firmware looks up in a scenario.
     Touched(TouchedOptions),
     /// Close the SCV and EGR loops against the firmware and trace them.
@@ -437,6 +446,24 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 pedal,
             }))
         }
+        "replay" => {
+            let mut cells = None;
+            let (mut o, args) = parse_ecu("replay", rest, &mut |opt, value| match opt {
+                "--cells" => {
+                    cells = Some(PathBuf::from(value.ok_or("--cells needs a path")?));
+                    Ok(true)
+                }
+                _ => Ok(false),
+            })?;
+            if let Some(a) = args.first() {
+                return Err(format!("replay takes no argument '{a}'"));
+            }
+            let cells = cells.ok_or("replay needs --cells <cells.csv>")?;
+            if o.boot == 40_000_000 {
+                o.boot = 120_000_000;
+            }
+            Ok(Command::Replay(ReplayOptions { ecu: o, cells }))
+        }
         "touched" => {
             let (mut masters, mut catalog, mut millis) = (Vec::new(), Vec::new(), 2000u64);
             let mut compare = None;
@@ -692,6 +719,7 @@ pub fn run(cmd: &Command) -> Result<String, String> {
         Command::Sm3(o, bind, port) => sm3(o, bind, *port),
         Command::Bench(o, seconds) => bench(o, *seconds),
         Command::Maps(o) => maps::maps(o),
+        Command::Replay(o) => maps::replay(o),
         Command::Touched(o) => touched::touched(o),
         Command::Actuators(o) => actuators::actuators(o),
         Command::Plant(o) => plant::plant(o),

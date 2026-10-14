@@ -348,6 +348,189 @@ pub fn maps(o: &MapsOptions) -> Result<String, String> {
     Ok(out)
 }
 
+/// Options of the `replay` command.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReplayOptions {
+    /// The ECU, with the firmware under test.
+    pub ecu: EcuOptions,
+    /// The cells CSV, summarised from a recorded route by `tools/route_cells.py`.
+    pub cells: PathBuf,
+}
+
+/// The inputs a cell drives, as (CSV column, sensor key).
+const DRIVEN: &[(&str, &str)] = &[
+    ("pedal", "pedal"),
+    ("coolant", "coolant"),
+    ("intake", "intake"),
+    ("boost", "boost"),
+    ("baro", "baro"),
+    ("maf", "maf"),
+];
+
+/// The setpoints compared, as (CSV column, the identifier the firmware answers for it).
+/// These are the ones that move without injection (the firmware computes them from speed,
+/// load and the plants), so a logged route can check them; `fuel per stroke` cannot.
+const COMPARED: &[(&str, u16)] = &[
+    ("rail", 0x308A),
+    ("boost_cmd", 0x328A),
+    ("vgt", 0x2041),
+    ("air", 0x327B),
+    ("torque", 0x1A2D),
+];
+
+/// The `SETPOINTS` index that answers identifier `did`.
+fn setpoint_of(did: u16) -> Option<usize> {
+    SETPOINTS
+        .iter()
+        .position(|s| matches!(s.from, From::Did(d) if d == did))
+}
+
+/// A recorded operating point: the inputs to drive, and the setpoints the car logged there.
+struct Cell {
+    rpm: u32,
+    driven: Vec<(&'static str, f64)>,
+    recorded: Vec<Option<f64>>,
+    n: u64,
+}
+
+/// The ECU on `flash` at a cell's recorded inputs.
+fn at_cell(o: &EcuOptions, flash: &Path, c: &Cell) -> EcuOptions {
+    let mut p = o.clone();
+    p.flash = flash.to_path_buf();
+    p.rpm = Some(c.rpm);
+    for (key, v) in &c.driven {
+        p.sensor.push(format!("{key}={v}"));
+    }
+    p
+}
+
+/// Runs `sh705x replay`: drive each cell's recorded inputs into the firmware and compare
+/// the setpoints it then computes with the ones the car logged at that point.
+pub fn replay(o: &ReplayOptions) -> Result<String, String> {
+    let text =
+        std::fs::read_to_string(&o.cells).map_err(|e| format!("{}: {e}", o.cells.display()))?;
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let header: Vec<&str> = lines
+        .next()
+        .ok_or("empty cells file")?
+        .split(',')
+        .map(str::trim)
+        .collect();
+    let col = |name: &str| header.iter().position(|h| *h == name);
+    let rpm_col = col("rpm").ok_or("the cells file has no 'rpm' column")?;
+    let n_col = col("n");
+    let driven: Vec<(usize, &'static str)> = DRIVEN
+        .iter()
+        .filter_map(|&(c, key)| Some((col(c)?, key)))
+        .collect();
+    // Each compared setpoint that the cells file carries and the firmware answers for.
+    let compared: Vec<(&'static str, usize, usize)> = COMPARED
+        .iter()
+        .filter_map(|&(c, did)| Some((c, col(c)?, setpoint_of(did)?)))
+        .collect();
+    if compared.is_empty() {
+        return Err("the cells file names none of the compared setpoints".into());
+    }
+
+    let mut cells = Vec::new();
+    for line in lines {
+        let f: Vec<&str> = line.split(',').map(str::trim).collect();
+        let get = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok());
+        let rpm = get(rpm_col).ok_or("a cell has no readable rpm")? as u32;
+        let drv = driven
+            .iter()
+            .filter_map(|&(i, key)| Some((key, get(i)?)))
+            .collect();
+        let recorded = compared.iter().map(|&(_, i, _)| get(i)).collect();
+        let n = n_col.and_then(get).unwrap_or(0.0) as u64;
+        cells.push(Cell {
+            rpm,
+            driven: drv,
+            recorded,
+            n,
+        });
+    }
+    if cells.is_empty() {
+        return Err("the cells file has no rows".into());
+    }
+
+    // Run the firmware at every cell, in parallel, as the grid does.
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let computed: Vec<Result<Vec<Option<f64>>, String>> = std::thread::scope(|s| {
+        let chunks: Vec<_> = cells
+            .chunks(cells.len().div_ceil(threads).max(1))
+            .map(|chunk| {
+                s.spawn(|| {
+                    chunk
+                        .iter()
+                        .map(|c| read_point(&at_cell(&o.ecu, &o.ecu.flash, c)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        chunks
+            .into_iter()
+            .flat_map(|h| h.join().expect("replay thread"))
+            .collect()
+    });
+
+    // Per compared setpoint, the absolute error over the cells the ECU answered.
+    let mut out = String::new();
+    let samples: u64 = cells.iter().map(|c| c.n).sum();
+    writeln!(
+        out,
+        "Replayed {} cells ({samples} samples) through the firmware.\n",
+        cells.len()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "{:<22}{:>8}{:>10}{:>10}{:>10}   worst at",
+        "setpoint", "cells", "mean|e|", "median|e|", "p90|e|"
+    )
+    .unwrap();
+    for (ci, &(name, _, sp)) in compared.iter().enumerate() {
+        let s = &SETPOINTS[sp];
+        let mut errs: Vec<(f64, &Cell)> = Vec::new();
+        for (cell, got) in cells.iter().zip(&computed) {
+            if let (Ok(got), Some(rec)) = (got, cell.recorded[ci]) {
+                if let Some(c) = got[sp] {
+                    errs.push(((c - rec).abs(), cell));
+                }
+            }
+        }
+        if errs.is_empty() {
+            writeln!(out, "{:<22}{:>8}", format!("{} ({})", name, s.unit), 0).unwrap();
+            continue;
+        }
+        let mut sorted: Vec<f64> = errs.iter().map(|&(e, _)| e).collect();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let mean = sorted.iter().sum::<f64>() / sorted.len() as f64;
+        let median = sorted[sorted.len() / 2];
+        let p90 = sorted[(sorted.len() * 9 / 10).min(sorted.len() - 1)];
+        let worst = errs.iter().max_by(|a, b| a.0.total_cmp(&b.0)).unwrap();
+        writeln!(
+            out,
+            "{:<22}{:>8}{:>10.2}{:>10.2}{:>10.2}   {:.1} at {} rpm",
+            format!("{} ({})", name, s.unit),
+            errs.len(),
+            mean,
+            median,
+            p90,
+            worst.0,
+            worst.1.rpm
+        )
+        .unwrap();
+    }
+    writeln!(
+        out,
+        "\n|e| is |computed - recorded|. Fuel per stroke is 0 without injection, so the\n\
+         setpoints that depend on it (and anything downstream) will not match here."
+    )
+    .unwrap();
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::span;
