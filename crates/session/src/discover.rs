@@ -220,8 +220,13 @@ impl Session {
                 continue;
             }
             for addr in found {
+                // For a low PID, prefer its fixed SAE J1979 name: a generic catalogue can
+                // hang another module's label on it (e.g. 0x0001 as an A/C monitor).
+                let text = crate::j1979::pid_name(p.pid)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| p.name.clone());
                 names.vars.entry(addr).or_insert_with(|| Name {
-                    text: p.name.clone(),
+                    text: text.clone(),
                     unit: p.unit.clone(),
                     how: How::Identifier { pid: p.pid, sure },
                 });

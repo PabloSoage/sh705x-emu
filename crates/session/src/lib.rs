@@ -6,6 +6,7 @@
 
 mod discover;
 pub mod dtcs;
+pub mod j1979;
 pub mod maps;
 pub mod names;
 pub mod osc;
