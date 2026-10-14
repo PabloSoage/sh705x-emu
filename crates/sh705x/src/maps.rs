@@ -266,6 +266,29 @@ fn show(v: Option<f64>) -> String {
     v.map_or("-".into(), |v| format!("{v:.2}"))
 }
 
+/// A one-line summary of a grid: empty, all zero, constant, or the range it spans. It keeps
+/// a reader from drawing conclusions from a setpoint that is 0 or flat across the whole grid
+/// (as a comparison of two all-zero grids once did).
+fn span(g: &[Vec<Option<f64>>]) -> String {
+    let (mut min, mut max, mut any) = (f64::INFINITY, f64::NEG_INFINITY, false);
+    for v in g.iter().flatten().flatten() {
+        any = true;
+        min = min.min(*v);
+        max = max.max(*v);
+    }
+    if !any {
+        "no values".into()
+    } else if min == max {
+        if min == 0.0 {
+            "all zero".into()
+        } else {
+            format!("constant at {min:.2}")
+        }
+    } else {
+        format!("range {min:.2}..{max:.2}")
+    }
+}
+
 /// Runs `sh705x maps`.
 pub fn maps(o: &MapsOptions) -> Result<String, String> {
     let a = grid(o, &o.ecu.flash)?;
@@ -279,18 +302,28 @@ pub fn maps(o: &MapsOptions) -> Result<String, String> {
         };
         let title = format!("{} ({}), {source}", s.name, s.unit);
         match &b {
-            None => table(&mut out, o, &title, |r, p| show(a[k][r][p])),
+            None => {
+                table(&mut out, o, &title, |r, p| show(a[k][r][p]));
+                writeln!(out, "{}: {}\n", s.name, span(&a[k])).unwrap();
+            }
             Some(b) => {
                 let same =
                     (0..o.rpm.len()).all(|r| (0..o.pedal.len()).all(|p| a[k][r][p] == b[k][r][p]));
                 if same {
-                    writeln!(out, "{title}: the same at every point\n").unwrap();
+                    writeln!(out, "{title}: the same at every point ({})\n", span(&a[k])).unwrap();
                     continue;
                 }
                 differ += 1;
                 table(&mut out, o, &format!("{title}, first image"), |r, p| {
                     show(a[k][r][p])
                 });
+                writeln!(
+                    out,
+                    "first image: {}; second image: {}\n",
+                    span(&a[k]),
+                    span(&b[k])
+                )
+                .unwrap();
                 table(
                     &mut out,
                     o,
@@ -313,4 +346,34 @@ pub fn maps(o: &MapsOptions) -> Result<String, String> {
         .unwrap();
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::span;
+
+    fn grid(vs: &[&[Option<f64>]]) -> Vec<Vec<Option<f64>>> {
+        vs.iter().map(|row| row.to_vec()).collect()
+    }
+
+    #[test]
+    fn span_describes_a_grid() {
+        // Empty, so nobody reads a range off a grid the ECU never answered.
+        assert_eq!(span(&grid(&[&[None, None], &[None, None]])), "no values");
+        // Flat at zero: the trap that made a comparison of two of these look meaningful.
+        assert_eq!(
+            span(&grid(&[&[Some(0.0), Some(0.0)], &[Some(0.0), None]])),
+            "all zero"
+        );
+        // Flat, but not zero (an idle value held across the grid).
+        assert_eq!(
+            span(&grid(&[&[Some(32.7), Some(32.7)]])),
+            "constant at 32.70"
+        );
+        // A real span.
+        assert_eq!(
+            span(&grid(&[&[Some(-10.0), Some(40.16)], &[None, Some(0.0)]])),
+            "range -10.00..40.16"
+        );
+    }
 }
