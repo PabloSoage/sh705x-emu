@@ -38,7 +38,7 @@ usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
        sh705x maps  --flash <flash.bin> [--compare <other.bin>] [--eeprom <eeprom.bin>]
                     [--rpm-list 750,1500,...] [--pedal-list 0,25,...] [--sensor <key=value>]...
        sh705x replay --flash <flash.bin> --cells <cells.csv> [--eeprom <eeprom.bin>]
-                    [--sensor <key=value>]...
+                    [--compare <other.bin>] [--out <per-cell.csv>] [--sensor <key=value>]...
        sh705x touched --flash <flash.bin> [--eeprom <eeprom.bin>] --masters 3d=<hex>,2d=<hex>
                     [--catalog <maps.csv>]... [--compare <other.bin>] [--millis <ms>]
                     [--rpm <rpm>] [--sensor <key=value>]...
@@ -84,9 +84,12 @@ commands:
           does
   replay  drive each operating point of a recorded route (--cells, summarised from a
           scanmatik-bench route by tools/route_cells.py) into the firmware and report how
-          far the setpoints it computes (rail pressure, boost, VGT, air, torque) sit from
-          the ones the car logged there; validates the firmware against a whole drive, not
-          a synthetic grid (fuel per stroke is 0 without injection, so it is not compared)
+          far the setpoints it computes (rail pressure, boost, VGT, air, torque, desired
+          EGR and EGR command) sit from the ones the car logged there, beside a constant
+          guess; validates the firmware against a whole drive, not a synthetic grid
+          (fuel per stroke is 0 without injection, so it is not compared); --compare
+          replays a second flash image too and lists every cell where the two differ;
+          --out writes each cell's recorded and computed setpoints as CSV
   touched boot the ECU as obd does, then watch --millis (2000) of ECU time and list every
           calibration map the firmware looks up through the interpolation routines
           given with --masters (3d=<hex>,2d=<hex>: they take the map's descriptor in R4
@@ -447,10 +450,18 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }))
         }
         "replay" => {
-            let mut cells = None;
+            let (mut cells, mut compare, mut out) = (None, None, None);
             let (mut o, args) = parse_ecu("replay", rest, &mut |opt, value| match opt {
                 "--cells" => {
                     cells = Some(PathBuf::from(value.ok_or("--cells needs a path")?));
+                    Ok(true)
+                }
+                "--compare" => {
+                    compare = Some(PathBuf::from(value.ok_or("--compare needs a path")?));
+                    Ok(true)
+                }
+                "--out" => {
+                    out = Some(PathBuf::from(value.ok_or("--out needs a path")?));
                     Ok(true)
                 }
                 _ => Ok(false),
@@ -462,7 +473,12 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             if o.boot == 40_000_000 {
                 o.boot = 120_000_000;
             }
-            Ok(Command::Replay(ReplayOptions { ecu: o, cells }))
+            Ok(Command::Replay(ReplayOptions {
+                ecu: o,
+                cells,
+                compare,
+                out,
+            }))
         }
         "touched" => {
             let (mut masters, mut catalog, mut millis) = (Vec::new(), Vec::new(), 2000u64);

@@ -98,6 +98,28 @@ fn replay_options() {
             assert_eq!(o.cells.to_str(), Some("c.csv"));
             assert_eq!(o.ecu.flash.to_str(), Some("a.bin"));
             assert_eq!(o.ecu.boot, 120_000_000, "longer than obd, to settle");
+            assert_eq!(o.compare, None);
+            assert_eq!(o.out, None);
+        }
+        other => panic!("{other:?}"),
+    }
+    let args: Vec<String> = [
+        "replay",
+        "--flash",
+        "a.bin",
+        "--cells",
+        "c.csv",
+        "--compare",
+        "b.bin",
+        "--out",
+        "o.csv",
+    ]
+    .map(String::from)
+    .to_vec();
+    match parse(&args).unwrap() {
+        Command::Replay(o) => {
+            assert_eq!(o.compare.unwrap().to_str(), Some("b.bin"));
+            assert_eq!(o.out.unwrap().to_str(), Some("o.csv"));
         }
         other => panic!("{other:?}"),
     }
@@ -115,13 +137,16 @@ fn replay_drives_a_dump() {
         eprintln!("SH705X_FLASH or SH705X_EEPROM not set: skipped");
         return;
     };
-    // Two idle-ish cells, written where the test can read them back.
-    let cells = std::env::temp_dir().join(format!("sh705x-replay-{}.csv", std::process::id()));
+    // An idle cell and one under load (route 72), written where the test can read them
+    // back; the second has no EGR command logged, as a route that does not poll it.
+    let dir = std::env::temp_dir();
+    let cells = dir.join(format!("sh705x-replay-{}.csv", std::process::id()));
+    let per_cell = dir.join(format!("sh705x-replay-{}-out.csv", std::process::id()));
     std::fs::write(
         &cells,
-        "rpm,pedal,coolant,intake,boost,baro,maf,rail,boost_cmd,vgt,air,torque,n\n\
-         750,0,62,26,98,99,5.5,24.0,99,58,5.3,15,4000\n\
-         1150,0,62,20,104,99,10.6,25.4,114,59,8.6,-15,4600\n",
+        "rpm,pedal,coolant,intake,boost,baro,maf,rail,boost_cmd,vgt,air,torque,egr,egr_cmd,n\n\
+         748,0.02,62,26,98.56,99,5.6,24.02,98.88,58.05,5.32,14.25,34.12,12,7905\n\
+         1843,34.26,68,21,161.6,100,38.8,73.1,158.67,58.44,38.77,133,2.35,,14740\n",
     )
     .unwrap();
     let args: Vec<String> = [
@@ -132,14 +157,38 @@ fn replay_drives_a_dump() {
         &eeprom,
         "--cells",
         cells.to_str().unwrap(),
+        "--compare",
+        &flash,
+        "--out",
+        per_cell.to_str().unwrap(),
     ]
     .map(String::from)
     .to_vec();
     let out = run(&parse(&args).unwrap()).unwrap();
+    let csv = std::fs::read_to_string(&per_cell).unwrap();
     std::fs::remove_file(&cells).ok();
+    std::fs::remove_file(&per_cell).ok();
     assert!(out.contains("Replayed 2 cells"), "{out}");
     // The rail-pressure error line is there and its mean is a sane MPa, not a dash.
     let rail = out.lines().find(|l| l.starts_with("rail (MPa)")).unwrap();
     let mean: f64 = rail.split_whitespace().nth(2).unwrap().parse().unwrap();
     assert!(mean < 30.0, "rail error implausibly large: {out}");
+    // Under load the vanes follow the car's, not their stop: with the recorded manifold
+    // pressure as the plant's resting one, the boost was counted twice and the command
+    // sat at 11 % against the car's 58 %.
+    let row: Vec<&str> = csv.lines().nth(2).unwrap().split(',').collect();
+    let header: Vec<&str> = csv.lines().next().unwrap().split(',').collect();
+    let at = |name: &str| row[header.iter().position(|h| *h == name).unwrap()];
+    let vgt: f64 = at("vgt_first").parse().unwrap();
+    assert!(
+        (vgt - 58.44).abs() < 20.0,
+        "VGT at 1843 rpm, 34 %: {vgt}\n{csv}"
+    );
+    // The column the cell lacks stays empty; the image against itself differs nowhere.
+    assert_eq!(at("egr_cmd_recorded"), "", "{csv}");
+    assert!(header.contains(&"egr_second"), "{csv}");
+    assert!(
+        out.contains("The two images compute the same setpoints in every cell."),
+        "{out}"
+    );
 }

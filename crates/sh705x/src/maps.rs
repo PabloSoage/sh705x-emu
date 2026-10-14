@@ -355,27 +355,43 @@ pub struct ReplayOptions {
     pub ecu: EcuOptions,
     /// The cells CSV, summarised from a recorded route by `tools/route_cells.py`.
     pub cells: PathBuf,
+    /// A second image to replay beside the first, to see where over the route they differ.
+    pub compare: Option<PathBuf>,
+    /// Where to write every cell's recorded and computed setpoints, as CSV.
+    pub out: Option<PathBuf>,
 }
 
 /// The inputs a cell drives, as (CSV column, sensor key).
+///
+/// The recorded boost is not driven: the `boost` key sets the manifold pressure with no
+/// boost, on which the turbocharger plant builds its own from the fuel the firmware asks
+/// for, so it takes the barometer. Fed the recorded manifold pressure, the plant added its
+/// boost on top of the car's, the firmware's boost loop saw about twice the pressure it
+/// wanted and opened the vanes to their stop: the VGT command sat at 11 % wherever the
+/// pedal was down (route 72: median |e| 30.2 %, against 4.3 % with the barometer). The
+/// air mass is the fresh-air plant's for the same reason (the EGR loop closes on it): the
+/// plant overrides the recorded one from its first step.
 const DRIVEN: &[(&str, &str)] = &[
     ("pedal", "pedal"),
     ("coolant", "coolant"),
     ("intake", "intake"),
-    ("boost", "boost"),
+    ("baro", "boost"),
     ("baro", "baro"),
     ("maf", "maf"),
 ];
 
 /// The setpoints compared, as (CSV column, the identifier the firmware answers for it).
 /// These are the ones that move without injection (the firmware computes them from speed,
-/// load and the plants), so a logged route can check them; `fuel per stroke` cannot.
+/// load and the plants), so a logged route can check them; `fuel per stroke` cannot. A
+/// cells file need not carry them all: the ones it lacks are left out.
 const COMPARED: &[(&str, u16)] = &[
     ("rail", 0x308A),
     ("boost_cmd", 0x328A),
     ("vgt", 0x2041),
     ("air", 0x327B),
     ("torque", 0x1A2D),
+    ("egr", 0x002C),
+    ("egr_cmd", 0x32A8),
 ];
 
 /// The `SETPOINTS` index that answers identifier `did`.
@@ -388,6 +404,8 @@ fn setpoint_of(did: u16) -> Option<usize> {
 /// A recorded operating point: the inputs to drive, and the setpoints the car logged there.
 struct Cell {
     rpm: u32,
+    /// Pedal travel, %, when the cells file gives it.
+    pedal: Option<f64>,
     driven: Vec<(&'static str, f64)>,
     recorded: Vec<Option<f64>>,
     n: u64,
@@ -437,7 +455,7 @@ pub fn replay(o: &ReplayOptions) -> Result<String, String> {
         let f: Vec<&str> = line.split(',').map(str::trim).collect();
         let get = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok());
         let rpm = get(rpm_col).ok_or("a cell has no readable rpm")? as u32;
-        let drv = driven
+        let drv: Vec<(&'static str, f64)> = driven
             .iter()
             .filter_map(|&(i, key)| Some((key, get(i)?)))
             .collect();
@@ -445,6 +463,7 @@ pub fn replay(o: &ReplayOptions) -> Result<String, String> {
         let n = n_col.and_then(get).unwrap_or(0.0) as u64;
         cells.push(Cell {
             rpm,
+            pedal: drv.iter().find(|(k, _)| *k == "pedal").map(|&(_, v)| v),
             driven: drv,
             recorded,
             n,
@@ -454,27 +473,9 @@ pub fn replay(o: &ReplayOptions) -> Result<String, String> {
         return Err("the cells file has no rows".into());
     }
 
-    // Run the firmware at every cell, in parallel, as the grid does.
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let computed: Vec<Result<Vec<Option<f64>>, String>> = std::thread::scope(|s| {
-        let chunks: Vec<_> = cells
-            .chunks(cells.len().div_ceil(threads).max(1))
-            .map(|chunk| {
-                s.spawn(|| {
-                    chunk
-                        .iter()
-                        .map(|c| read_point(&at_cell(&o.ecu, &o.ecu.flash, c)))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        chunks
-            .into_iter()
-            .flat_map(|h| h.join().expect("replay thread"))
-            .collect()
-    });
+    let first = run_cells(&o.ecu, &o.ecu.flash, &cells);
+    let second = o.compare.as_ref().map(|f| run_cells(&o.ecu, f, &cells));
 
-    // Per compared setpoint, the absolute error over the cells the ECU answered.
     let mut out = String::new();
     let samples: u64 = cells.iter().map(|c| c.n).sum();
     writeln!(
@@ -483,57 +484,271 @@ pub fn replay(o: &ReplayOptions) -> Result<String, String> {
         cells.len()
     )
     .unwrap();
+    if second.is_some() {
+        writeln!(out, "First image, {}:", o.ecu.flash.display()).unwrap();
+    }
+    errors(&mut out, &compared, &cells, &first);
+    if let (Some(second), Some(path)) = (&second, &o.compare) {
+        writeln!(out, "\nSecond image, {}:", path.display()).unwrap();
+        errors(&mut out, &compared, &cells, second);
+        differences(&mut out, &compared, &cells, &first, second);
+    }
     writeln!(
         out,
-        "{:<22}{:>8}{:>10}{:>10}{:>10}   worst at",
-        "setpoint", "cells", "mean|e|", "median|e|", "p90|e|"
+        "\n|e| is |computed - recorded|. \"const\" is the |e| of a constant guess, the setpoint's\n\
+         median over the route: an error below it is what the firmware explains.\n\
+         Fuel per stroke is 0 without injection, so the setpoints that depend on it (and\n\
+         anything downstream) will not match here."
+    )
+    .unwrap();
+
+    if let Some(path) = &o.out {
+        let mut csv = String::from("rpm,pedal,n");
+        for &(name, _, _) in &compared {
+            write!(csv, ",{name}_recorded,{name}_first").unwrap();
+            if second.is_some() {
+                write!(csv, ",{name}_second").unwrap();
+            }
+        }
+        csv.push('\n');
+        let num = |v: Option<f64>| v.map_or(String::new(), |v| format!("{v:.3}"));
+        for (k, cell) in cells.iter().enumerate() {
+            write!(csv, "{},{},{}", cell.rpm, num(cell.pedal), cell.n).unwrap();
+            for (ci, &(_, _, sp)) in compared.iter().enumerate() {
+                let got = |run: &[Option<Vec<Option<f64>>>]| run[k].as_ref().and_then(|g| g[sp]);
+                write!(csv, ",{},{}", num(cell.recorded[ci]), num(got(&first))).unwrap();
+                if let Some(second) = &second {
+                    write!(csv, ",{}", num(got(second))).unwrap();
+                }
+            }
+            csv.push('\n');
+        }
+        std::fs::write(path, csv).map_err(|e| format!("{}: {e}", path.display()))?;
+        writeln!(out, "\nEvery cell written to {}.", path.display()).unwrap();
+    }
+    Ok(out)
+}
+
+/// The setpoints `flash` computes at every cell, in parallel as the grid does; `None` for
+/// a cell where the ECU could not be run.
+fn run_cells(o: &EcuOptions, flash: &Path, cells: &[Cell]) -> Vec<Option<Vec<Option<f64>>>> {
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    std::thread::scope(|s| {
+        let chunks: Vec<_> = cells
+            .chunks(cells.len().div_ceil(threads).max(1))
+            .map(|chunk| {
+                s.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(|c| read_point(&at_cell(o, flash, c)).ok())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        chunks
+            .into_iter()
+            .flat_map(|h| h.join().expect("replay thread"))
+            .collect()
+    })
+}
+
+/// The median of the values in `pairs`, each weighted by its count (all equal if every
+/// count is 0).
+fn weighted_median(mut pairs: Vec<(f64, u64)>) -> Option<f64> {
+    if pairs.is_empty() {
+        return None;
+    }
+    pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if pairs.iter().all(|&(_, w)| w == 0) {
+        pairs.iter_mut().for_each(|p| p.1 = 1);
+    }
+    let half = pairs.iter().map(|&(_, w)| w).sum::<u64>() as f64 / 2.0;
+    let mut acc = 0;
+    for &(v, w) in &pairs {
+        acc += w;
+        if acc as f64 >= half {
+            return Some(v);
+        }
+    }
+    pairs.last().map(|&(v, _)| v)
+}
+
+/// Per compared setpoint the route logged, the absolute error of `run` over the cells the
+/// ECU answered, beside that of a constant guess (the setpoint's median over the route,
+/// each cell weighted by its samples), so a small error can be told from a flat setpoint.
+fn errors(
+    out: &mut String,
+    compared: &[(&'static str, usize, usize)],
+    cells: &[Cell],
+    run: &[Option<Vec<Option<f64>>>],
+) {
+    writeln!(
+        out,
+        "{:<22}{:>8}{:>10}{:>10}{:>10}{:>11}{:>11}   worst at",
+        "setpoint", "cells", "mean|e|", "median|e|", "p90|e|", "const mean", "const med"
     )
     .unwrap();
     for (ci, &(name, _, sp)) in compared.iter().enumerate() {
+        if cells.iter().all(|c| c.recorded[ci].is_none()) {
+            // A column the route did not log (route 73 has no desired rail pressure).
+            continue;
+        }
         let s = &SETPOINTS[sp];
+        let label = format!("{} ({})", name, s.unit);
         let mut errs: Vec<(f64, &Cell)> = Vec::new();
-        for (cell, got) in cells.iter().zip(&computed) {
-            if let (Ok(got), Some(rec)) = (got, cell.recorded[ci]) {
+        let mut recorded: Vec<(f64, u64)> = Vec::new();
+        for (cell, got) in cells.iter().zip(run) {
+            if let (Some(got), Some(rec)) = (got, cell.recorded[ci]) {
                 if let Some(c) = got[sp] {
                     errs.push(((c - rec).abs(), cell));
+                    recorded.push((rec, cell.n));
                 }
             }
         }
-        if errs.is_empty() {
-            writeln!(out, "{:<22}{:>8}", format!("{} ({})", name, s.unit), 0).unwrap();
+        let Some(constant) = weighted_median(recorded.clone()) else {
+            writeln!(out, "{label:<22}{:>8}", 0).unwrap();
             continue;
-        }
+        };
+        let median_of = |mut v: Vec<f64>| {
+            v.sort_by(|a, b| a.total_cmp(b));
+            v[v.len() / 2]
+        };
         let mut sorted: Vec<f64> = errs.iter().map(|&(e, _)| e).collect();
         sorted.sort_by(|a, b| a.total_cmp(b));
         let mean = sorted.iter().sum::<f64>() / sorted.len() as f64;
-        let median = sorted[sorted.len() / 2];
+        let median = median_of(sorted.clone());
         let p90 = sorted[(sorted.len() * 9 / 10).min(sorted.len() - 1)];
+        let guess: Vec<f64> = recorded
+            .iter()
+            .map(|&(r, _)| (r - constant).abs())
+            .collect();
+        let guess_mean = guess.iter().sum::<f64>() / guess.len() as f64;
+        let guess_median = median_of(guess);
         let worst = errs.iter().max_by(|a, b| a.0.total_cmp(&b.0)).unwrap();
         writeln!(
             out,
-            "{:<22}{:>8}{:>10.2}{:>10.2}{:>10.2}   {:.1} at {} rpm",
-            format!("{} ({})", name, s.unit),
+            "{label:<22}{:>8}{mean:>10.2}{median:>10.2}{p90:>10.2}{guess_mean:>11.2}{guess_median:>11.2}   {:.1} at {} rpm",
             errs.len(),
-            mean,
-            median,
-            p90,
             worst.0,
             worst.1.rpm
         )
         .unwrap();
     }
+}
+
+/// Where over the route two images compute different setpoints, cell by cell.
+fn differences(
+    out: &mut String,
+    compared: &[(&'static str, usize, usize)],
+    cells: &[Cell],
+    first: &[Option<Vec<Option<f64>>>],
+    second: &[Option<Vec<Option<f64>>>],
+) {
+    let mut rows = Vec::new();
+    let mut counts = Vec::new();
+    for &(name, _, sp) in compared {
+        let mut n = 0;
+        for (k, cell) in cells.iter().enumerate() {
+            let a = first[k].as_ref().and_then(|g| g[sp]);
+            let b = second[k].as_ref().and_then(|g| g[sp]);
+            if a != b {
+                n += 1;
+                rows.push((name, cell, a, b));
+            }
+        }
+        counts.push((name, n));
+    }
+    writeln!(out, "\nWhere the images differ:").unwrap();
+    for (name, n) in &counts {
+        writeln!(out, "{name:<22}{n:>4} of {} cells", cells.len()).unwrap();
+    }
+    if rows.is_empty() {
+        writeln!(
+            out,
+            "The two images compute the same setpoints in every cell."
+        )
+        .unwrap();
+        return;
+    }
     writeln!(
         out,
-        "\n|e| is |computed - recorded|. Fuel per stroke is 0 without injection, so the\n\
-         setpoints that depend on it (and anything downstream) will not match here."
+        "\n{:>6}{:>8}  {:<12}{:>10}{:>10}{:>10}",
+        "rpm", "pedal", "setpoint", "first", "second", "diff"
     )
     .unwrap();
-    Ok(out)
+    for (name, cell, a, b) in rows {
+        let diff = match (a, b) {
+            (Some(a), Some(b)) => format!("{:+.2}", b - a),
+            _ => "?".into(),
+        };
+        writeln!(
+            out,
+            "{:>6}{:>8}  {name:<12}{:>10}{:>10}{diff:>10}",
+            cell.rpm,
+            cell.pedal.map_or("-".into(), |p| format!("{p:.1}")),
+            show(a),
+            show(b)
+        )
+        .unwrap();
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::span;
+    use super::{COMPARED, Cell, differences, setpoint_of, span, weighted_median};
+
+    #[test]
+    fn differences_list_the_cells_where_two_images_part() {
+        let cell = |rpm| Cell {
+            rpm,
+            pedal: Some(20.0),
+            driven: Vec::new(),
+            recorded: vec![None],
+            n: 1,
+        };
+        let cells = [cell(1000), cell(2000)];
+        let (name, did) = COMPARED[0];
+        let sp = setpoint_of(did).unwrap();
+        let compared = [(name, 0, sp)];
+        let with = |v: f64| {
+            let mut g = vec![None; super::SETPOINTS.len()];
+            g[sp] = Some(v);
+            Some(g)
+        };
+        let mut out = String::new();
+        differences(
+            &mut out,
+            &compared,
+            &cells,
+            &[with(50.0), with(60.0)],
+            &[with(50.0), with(62.5)],
+        );
+        assert!(
+            out.contains("rail                     1 of 2 cells"),
+            "{out}"
+        );
+        assert!(
+            out.contains("2000    20.0  rail             60.00     62.50     +2.50"),
+            "{out}"
+        );
+        assert!(!out.contains("  1000  "), "{out}");
+    }
+
+    #[test]
+    fn weighted_median_follows_the_counts() {
+        assert_eq!(weighted_median(vec![]), None);
+        // The cell with most samples carries the median.
+        assert_eq!(
+            weighted_median(vec![(1.0, 1), (5.0, 10), (9.0, 1)]),
+            Some(5.0)
+        );
+        assert_eq!(weighted_median(vec![(9.0, 1), (1.0, 100)]), Some(1.0));
+        // With no counts, every value weighs the same.
+        assert_eq!(
+            weighted_median(vec![(3.0, 0), (1.0, 0), (2.0, 0)]),
+            Some(2.0)
+        );
+    }
 
     fn grid(vs: &[&[Option<f64>]]) -> Vec<Vec<Option<f64>>> {
         vs.iter().map(|row| row.to_vec()).collect()
