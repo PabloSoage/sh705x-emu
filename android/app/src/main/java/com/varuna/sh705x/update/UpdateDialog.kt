@@ -43,19 +43,25 @@ fun UpdateDialog(update: Releases.Update, onDismiss: () -> Unit) {
     val running = state is Download.Running
 
     fun install(file: File) {
-        // Without "install unknown apps" every installer refuses. The file
-        // stays in the cache, so the next tap after granting it installs.
-        if (!AppUpdate.canInstall(context)) {
-            state = Download.Ready(file)
-            AppUpdate.requestInstallPermission(context)
-            return
-        }
+        // Offer the installer list first: Install With Options installs through Shizuku on
+        // its own authority and needs no "install unknown apps". So when that permission is
+        // locked (a security setting can lock it), still show the list rather than dead-end
+        // at a settings screen that refuses. The system installer needs the permission; ask
+        // for it only when it is the lone option. The file stays in the cache, so the next
+        // tap after granting it installs.
         val installers = AppUpdate.installers(context, file)
-        if (installers.size >= 2) {
-            state = Download.Choose(file, installers)
-        } else {
-            state = Download.Ready(file)
-            AppUpdate.install(context, file)
+        val allowed = AppUpdate.canInstall(context)
+        when {
+            installers.size >= 2 || (installers.isNotEmpty() && !allowed) ->
+                state = Download.Choose(file, installers)
+            allowed -> {
+                state = Download.Ready(file)
+                AppUpdate.install(context, file)
+            }
+            else -> {
+                state = Download.Ready(file)
+                AppUpdate.requestInstallPermission(context)
+            }
         }
     }
 

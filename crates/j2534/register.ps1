@@ -50,7 +50,7 @@ foreach ($v in $views) {
         FunctionLibrary    = $dll
         ConfigApplication  = ''
         APIVersion         = '04.04'
-        ProductVersion     = '0.4.1'
+        ProductVersion     = '0.4.2'
         ProtocolsSupported = 'CAN,ISO15765'
     }
     foreach ($k in $strings.Keys) {
