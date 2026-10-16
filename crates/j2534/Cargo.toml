@@ -1,0 +1,28 @@
+[package]
+name = "j2534"
+description = "A J2534 pass-thru DLL whose adapter is the emulator's SM3, for GDS2 and other Windows tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sh705x_j2534"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+bridge.workspace = true
+
+[dev-dependencies]
+sh7059.workspace = true
+
+# The workspace forbids unsafe code; a C ABI cannot do without it, so this crate keeps
+# the rest of the workspace's lints and allows unsafe in lib.rs only.
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

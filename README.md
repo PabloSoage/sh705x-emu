@@ -123,6 +123,7 @@ second, which makes it a reference oracle rather than an emulator.
 | `crates/board` | The ECU board: the four 93C86 EEPROMs, the output status chips and fault lines, and how they are wired |
 | `crates/engine` | The simulated engine: crank and cam wheels, sensors with the firmware's A/D curves, the MAF, periodic frames of other CAN nodes |
 | `crates/bridge` | The CAN bus as a diagnostic tool sees it, in virtual or real time; ISO-TP; an ELM327; a TCP server; an emulated Scanmatik SM3 |
+| `crates/j2534` | `sh705x_j2534.dll`: a J2534 pass-thru DLL whose adapter is the emulated SM3, for GDS2 and other Windows tools; ISO 15765 on this side |
 | `crates/sh705x` | Command-line front end |
 | `crates/session` | The ECU as an interactive front end drives it: wired into its car, the plants around it, run a slice, a tooth or an edge at a time, the history the engine view draws, and the maps it reads (traced, decoded, their call sites read, their inputs named) |
 | `crates/gui` | `sh705x-gui`: a load screen for the images, then registers, code with breakpoints, memory, CAN, interrupts, the engine (speed, sensors in physical units, and the plants) and an ELM327 console, live (egui) |
@@ -178,6 +179,22 @@ sh705x sm3 --flash <flash.bin> --eeprom <eeprom.bin>
 
 and set opendash's adapter address to this machine's IP (port 777), on the same
 network.
+
+Windows tools that speak J2534 (GDS2, PCMflash…) reach the same emulated SM3 through
+`sh705x_j2534.dll` (`crates/j2534`), a pass-thru DLL of its own: the vendor's DLL pairs
+with the physical adapter over Wi-Fi Direct, Bluetooth or USB and takes no address.
+Build it for the application's bitness (GDS2 is 32-bit) and register it, as
+administrator, on the machine or virtual machine where the application runs:
+
+```powershell
+cargo build --release -p j2534 --target i686-pc-windows-msvc
+.\crates\j2534\register.ps1 -Dll32 target\i686-pc-windows-msvc\release\sh705x_j2534.dll -Server <emulator-ip>:777
+```
+
+The application then lists "sh705x emulated SM3" next to real adapters. It carries
+CAN and ISO 15765 on the high-speed bus (flow-control, pass and block filters, extended
+addressing, padding, loopback, periodic messages). `log=<file>` in
+`%ProgramData%\sh705x\j2534.ini` records every call and frame.
 
 To watch it run, start `sh705x-gui` (on Windows, the `.exe` from a release runs as it is,
 with no runtime to install). It opens on a load screen: choose the flash image and, if you
