@@ -2,6 +2,7 @@
 //! command can be tested without spawning a process.
 
 mod actuators;
+mod catalog;
 mod maps;
 mod plant;
 mod rig;
@@ -10,6 +11,7 @@ pub(crate) use engine::plants::f32_at;
 mod touched;
 
 pub use actuators::ActuatorsOptions;
+pub use catalog::CatalogOptions;
 pub use maps::{MapsOptions, ReplayOptions};
 pub use plant::PlantOptions;
 pub use touched::TouchedOptions;
@@ -37,6 +39,8 @@ usage: sh705x info  --flash <flash.bin> [--eeprom <eeprom.bin>]
                     [--seconds <s>] [--adc <channel:code>]...
        sh705x maps  --flash <flash.bin> [--compare <other.bin>] [--eeprom <eeprom.bin>]
                     [--rpm-list 750,1500,...] [--pedal-list 0,25,...] [--sensor <key=value>]...
+       sh705x catalog --flash <flash.bin> [--out <maps.csv>] [--2d-only | --3d-only]
+                    [--unreferenced]
        sh705x replay --flash <flash.bin> --cells <cells.csv> [--eeprom <eeprom.bin>]
                     [--compare <other.bin>] [--out <per-cell.csv>] [--sensor <key=value>]...
        sh705x touched --flash <flash.bin> [--eeprom <eeprom.bin>] --masters 3d=<hex>,2d=<hex>
@@ -82,6 +86,12 @@ commands:
           desired EGR and throttle; with --compare, the same on
           a second flash image and where they differ, to see what a calibration change
           does
+  catalog scan the whole flash for every map and curve descriptor, whether the firmware
+          reads it at run time or not (the exhaustive catalogue, the way WinOLS walks a
+          file), and mark each referenced (a master call loads its descriptor into R4) or
+          unreferenced (it parses but nothing reads it): a superset of what `maps`/`touched`
+          reach. --out writes it all as CSV; --2d-only / --3d-only and --unreferenced
+          narrow the listing
   replay  drive each operating point of a recorded route (--cells, summarised from a
           scanmatik-bench route by tools/route_cells.py) into the firmware and report how
           far the setpoints it computes (rail pressure, boost, VGT, air, torque, desired
@@ -144,6 +154,8 @@ pub enum Command {
     Bench(EcuOptions, u32),
     /// Read the setpoints over a grid of speed and pedal, for one image or two.
     Maps(MapsOptions),
+    /// Catalogue every map and curve descriptor in the flash, read or not.
+    Catalog(CatalogOptions),
     /// Replay a recorded route's inputs and compare the firmware's setpoints with it.
     Replay(ReplayOptions),
     /// List the maps the firmware looks up in a scenario.
@@ -449,6 +461,50 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 pedal,
             }))
         }
+        "catalog" => {
+            let (mut flash, mut out) = (None, None);
+            let (mut only_2d, mut only_3d, mut unreferenced) = (false, false, false);
+            let mut it = rest.iter();
+            while let Some(opt) = it.next() {
+                match opt.as_str() {
+                    "--2d-only" => {
+                        only_2d = true;
+                        continue;
+                    }
+                    "--3d-only" => {
+                        only_3d = true;
+                        continue;
+                    }
+                    "--unreferenced" => {
+                        unreferenced = true;
+                        continue;
+                    }
+                    _ => {}
+                }
+                let value = it.next().ok_or_else(|| format!("{opt} needs a value"))?;
+                match opt.as_str() {
+                    "--flash" => flash = Some(PathBuf::from(value)),
+                    "--out" => out = Some(PathBuf::from(value)),
+                    other => return Err(format!("unknown option '{other}'")),
+                }
+            }
+            if only_2d && only_3d {
+                return Err("catalog: --2d-only and --3d-only are mutually exclusive".into());
+            }
+            let dims = if only_2d {
+                Some(2)
+            } else if only_3d {
+                Some(3)
+            } else {
+                None
+            };
+            Ok(Command::Catalog(CatalogOptions {
+                flash: flash.ok_or("catalog needs --flash <flash.bin>")?,
+                out,
+                dims,
+                unreferenced,
+            }))
+        }
         "replay" => {
             let (mut cells, mut compare, mut out) = (None, None, None);
             let (mut o, args) = parse_ecu("replay", rest, &mut |opt, value| match opt {
@@ -735,6 +791,7 @@ pub fn run(cmd: &Command) -> Result<String, String> {
         Command::Sm3(o, bind, port) => sm3(o, bind, *port),
         Command::Bench(o, seconds) => bench(o, *seconds),
         Command::Maps(o) => maps::maps(o),
+        Command::Catalog(o) => catalog::catalog(o),
         Command::Replay(o) => maps::replay(o),
         Command::Touched(o) => touched::touched(o),
         Command::Actuators(o) => actuators::actuators(o),

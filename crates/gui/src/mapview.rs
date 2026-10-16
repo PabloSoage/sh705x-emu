@@ -8,7 +8,7 @@ use eframe::egui::{
     self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke, Vec2,
 };
 use session::Watch;
-use session::maps::{Map, MapTrace, Seen};
+use session::maps::{Found, Map, MapTrace, Seen};
 use session::names::{Name, Profile, read_labels, read_profiles};
 use session::sites::Source;
 use std::collections::BTreeMap;
@@ -82,6 +82,37 @@ impl Default for MapView {
             page: Page::Maps,
             faults: Default::default(),
         }
+    }
+}
+
+/// A map in the browser: found in the whole-ROM catalogue, looked up at run time, or
+/// both. The catalogue carries the static map and whether the firmware references it; the
+/// trace carries the live lookups.
+#[derive(Default)]
+struct Entry<'a> {
+    /// From the whole-ROM scan, if the descriptor was found there.
+    found: Option<&'a Found>,
+    /// From the run-time trace, if the firmware looked it up.
+    seen: Option<&'a Seen>,
+}
+
+impl Entry<'_> {
+    /// The decoded map: the run-time one first (it reads the live RAM pointers), else the
+    /// catalogue's.
+    fn map(&self) -> Option<&Map> {
+        self.seen
+            .and_then(|s| s.map.as_ref())
+            .or(self.found.map(|f| &f.map))
+    }
+
+    /// Whether the firmware reads it, when the catalogue found it.
+    fn referenced(&self) -> Option<bool> {
+        self.found.map(|f| f.referenced)
+    }
+
+    /// Lookups at run time (0 for a map never reached).
+    fn calls(&self) -> u64 {
+        self.seen.map_or(0, |s| s.calls)
     }
 }
 
@@ -170,6 +201,7 @@ pub fn show(
     trace: &MapTrace,
     v: &mut MapView,
     watch: Option<Watch>,
+    catalog: &[Found],
 ) -> Vec<Action> {
     let mut actions = Vec::new();
     let map_break = match watch {
@@ -201,9 +233,22 @@ pub fn show(
         v.selected = Some(c.r4);
     }
     let m = trace.masters;
+    // Every map in the browser: the whole-ROM catalogue, the run-time trace, or both.
+    let mut entries: BTreeMap<u32, Entry> = BTreeMap::new();
+    for f in catalog {
+        entries.entry(f.map.desc).or_default().found = Some(f);
+    }
+    for (&d, s) in &trace.seen {
+        entries.entry(d).or_default().seen = Some(s);
+    }
+    let referenced = catalog.iter().filter(|f| f.referenced).count();
     ui.horizontal_wrapped(|ui| {
         ui.label(format!(
-            "{} maps read · {} lookups · interpolation routines: 3D {}, 2D {}",
+            "{} maps found ({} referenced, {} unreferenced) · {} read · {} lookups · \
+             routines: 3D {}, 2D {}",
+            catalog.len(),
+            referenced,
+            catalog.len() - referenced,
             trace.seen.len(),
             trace.total,
             m.d3.map_or("not found".into(), |a| format!("{a:#06X}")),
@@ -213,10 +258,10 @@ pub fn show(
             ui.colored_label(Color32::YELLOW, format!("{} lookups lost", trace.dropped));
         }
     });
-    if m.d3.is_none() && m.d2.is_none() {
+    if entries.is_empty() {
         ui.label(
-            "No interpolation routine found in this flash: it does not read its maps the \
-             Denso way this viewer knows.",
+            "No maps found in this flash: it does not store its calibration the Denso way \
+             this viewer knows.",
         );
         return actions;
     }
@@ -225,30 +270,34 @@ pub fn show(
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
             ui.set_width(360.0);
-            list(ui, trace, v);
+            list(ui, trace, v, &entries);
             ui.separator();
             latest(ui, trace, v);
         });
         ui.separator();
-        ui.vertical(|ui| {
-            let seen = v.selected.and_then(|d| trace.seen.get(&d).map(|s| (d, s)));
-            match seen {
-                Some((desc, s)) => detail(ui, trace, desc, s, v, map_break, &mut actions),
+        ui.vertical(
+            |ui| match v.selected.and_then(|d| entries.get(&d).map(|e| (d, e))) {
+                Some((desc, e)) => detail(ui, trace, desc, e, v, map_break, &mut actions),
                 None => {
-                    ui.label("Choose a map on the left, or follow the latest lookup.");
+                    ui.label(
+                        "Choose a map on the left (dim rows are unreferenced: found in the \
+                         flash but not read), or follow the latest lookup.",
+                    );
                 }
-            }
-        });
+            },
+        );
     });
     actions
 }
 
-/// The maps looked up, filtered and ordered.
-fn list(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView) {
+/// The maps found, filtered and ordered: referenced and unreferenced, read or not.
+fn list(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView, entries: &BTreeMap<u32, Entry>) {
     ui.horizontal(|ui| {
         ui.label("Filter");
         ui.add(egui::TextEdit::singleline(&mut v.filter).desired_width(90.0))
-            .on_hover_text("Part of the descriptor's address (hex), of a name, or 2D / 3D");
+            .on_hover_text(
+                "Part of the descriptor's address (hex), of a name, 2D / 3D, or REF / UNREF",
+            );
         egui::ComboBox::from_id_salt("map_sort")
             .selected_text(match v.sort {
                 Sort::Recent => "latest",
@@ -264,24 +313,24 @@ fn list(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView) {
             .on_hover_text("Show the map looked up last: stepping, each lookup as it comes");
     });
     let f = v.filter.trim().to_uppercase();
-    let mut rows: Vec<(u32, &Seen)> = trace
-        .seen
+    let mut rows: Vec<(u32, &Entry)> = entries
         .iter()
-        .filter(|(d, s)| {
-            let dims = s
-                .map
-                .as_ref()
+        .filter(|(d, e)| {
+            let dims = e
+                .map()
                 .map_or("", |m| if m.dims() == 3 { "3D" } else { "2D" });
             f.is_empty()
                 || format!("{d:06X}").contains(&f)
                 || dims == f
+                || (f == "REF" && e.referenced() == Some(true))
+                || (f == "UNREF" && e.referenced() == Some(false))
                 || title(trace, **d).is_some_and(|t| t.to_uppercase().contains(&f))
         })
-        .map(|(&d, s)| (d, s))
+        .map(|(&d, e)| (d, e))
         .collect();
     match v.sort {
-        Sort::Recent => rows.sort_by_key(|(_, s)| std::cmp::Reverse(s.at)),
-        Sort::Calls => rows.sort_by_key(|(_, s)| std::cmp::Reverse(s.calls)),
+        Sort::Recent => rows.sort_by_key(|(_, e)| std::cmp::Reverse(e.seen.map_or(0, |s| s.at))),
+        Sort::Calls => rows.sort_by_key(|(_, e)| std::cmp::Reverse(e.calls())),
         Sort::Address => {}
     }
     let mono = egui::TextStyle::Monospace;
@@ -291,15 +340,16 @@ fn list(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView) {
         .max_height(380.0)
         .auto_shrink([false, false])
         .show_rows(ui, h, rows.len(), |ui, range| {
-            for (d, s) in &rows[range] {
-                let size = s.map.as_ref().map_or("?".into(), |m| {
+            for (d, e) in &rows[range] {
+                let size = e.map().map_or("?".into(), |m| {
                     if m.dims() == 3 {
                         format!("{}×{}", m.nx(), m.ny())
                     } else {
                         format!("{}", m.nx())
                     }
                 });
-                let mut text = format!("{d:06X} {size:>6} {:>8} → {}", s.calls, num(s.last.2));
+                let last = e.seen.map_or(f32::NAN, |s| s.last.2);
+                let mut text = format!("{d:06X} {size:>6} {:>8} → {}", e.calls(), num(last));
                 if let Some(t) = title(trace, *d) {
                     // One line a map: the name cut short (whole in the detail).
                     text.push_str("  ");
@@ -309,10 +359,12 @@ fn list(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView) {
                     }
                     text.push_str(&t);
                 }
-                let r = ui.selectable_label(
-                    v.selected == Some(*d),
-                    egui::RichText::new(text).monospace(),
-                );
+                let mut rt = egui::RichText::new(text).monospace();
+                // Unreferenced maps (found but not read by the firmware) are dimmed.
+                if e.referenced() == Some(false) {
+                    rt = rt.weak();
+                }
+                let r = ui.selectable_label(v.selected == Some(*d), rt);
                 if r.clicked() {
                     v.selected = Some(*d);
                     v.follow = false;
@@ -345,20 +397,22 @@ fn latest(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView) {
     }
 }
 
-/// One map: what it is, where it is read from, and the map itself.
+/// One map: what it is, where it is read from, and the map itself. The map comes from the
+/// catalogue, the run-time trace, or both; its lookups, sites and trail are shown only
+/// when the firmware has reached it.
 fn detail(
     ui: &mut egui::Ui,
     trace: &MapTrace,
     desc: u32,
-    s: &Seen,
+    e: &Entry,
     v: &mut MapView,
     map_break: Option<u32>,
     actions: &mut Vec<Action>,
 ) {
-    let Some(map) = &s.map else {
+    let Some(map) = e.map() else {
         ui.label(format!(
             "Descriptor {desc:06X}: it does not read as a map ({} lookups).",
-            s.calls
+            e.calls()
         ));
         return;
     };
@@ -369,6 +423,25 @@ fn detail(
     });
     if let Some(t) = title(trace, desc) {
         ui.label(egui::RichText::new(t).strong());
+    }
+    match e.referenced() {
+        Some(true) => {
+            ui.label(
+                egui::RichText::new(
+                    "referenced · the firmware loads this descriptor before a \
+                     master call",
+                )
+                .weak(),
+            );
+        }
+        Some(false) => {
+            ui.colored_label(
+                Color32::from_rgb(200, 170, 80),
+                "unreferenced · no master call loads this descriptor: an unused calibration, \
+                 or a false positive of the scan",
+            );
+        }
+        None => {}
     }
     let stored = if map.cell == session::maps::Cell::Float {
         "float".to_string()
@@ -389,70 +462,80 @@ fn detail(
         } else {
             String::new()
         },
-        s.calls
+        e.calls()
     ));
-    let (x, y, out) = s.last;
-    ui.label(
-        egui::RichText::new(if map.dims() == 3 {
-            format!(
-                "last lookup: X {}, Y {}, result {}",
-                num(x),
-                num(y),
-                num(out)
-            )
-        } else {
-            format!("last lookup: X {}, result {}", num(x), num(out))
-        })
-        .strong(),
-    );
-    if s.mismatches > 0 {
-        ui.colored_label(
-            Color32::YELLOW,
-            format!(
-                "{} lookups gave something else than this map interpolated: \
-                 the decoding may be off",
-                s.mismatches
-            ),
-        );
-    }
-    // Each call site: where its inputs come from and where its result goes.
-    for (&ret, &n) in &s.sites {
-        let site = trace.sites.get(&ret);
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .link(format!("{:06X}", ret.wrapping_sub(4)))
-                .on_hover_text(format!("{n} lookups from here; open in the code view"))
-                .clicked()
-            {
-                actions.push(Action::GoTo(ret.wrapping_sub(4)));
-            }
-            let Some(site) = site else { return };
-            let inputs: &[(&str, Source)] = if map.dims() == 3 {
-                &[("X", site.x), ("Y", site.y)]
+    if let Some(s) = e.seen {
+        let (x, y, out) = s.last;
+        ui.label(
+            egui::RichText::new(if map.dims() == 3 {
+                format!(
+                    "last lookup: X {}, Y {}, result {}",
+                    num(x),
+                    num(y),
+                    num(out)
+                )
             } else {
-                &[("X", site.x)]
-            };
-            for &(axis, src) in inputs {
-                ui.label(format!("{axis} from"));
-                source_link(ui, trace, src, v);
-            }
-            ui.label(match site.out {
-                Some(a) => format!("· result into {}", var_name(trace, a)),
-                None => "· result used in the caller".into(),
-            });
-        });
-    }
-    let readers = trace.readers(desc);
-    if !readers.is_empty() {
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Its result is read by");
-            for d in readers {
-                if ui.link(format!("map {d:06X}")).clicked() {
-                    v.selected = Some(d);
-                    v.follow = false;
+                format!("last lookup: X {}, result {}", num(x), num(out))
+            })
+            .strong(),
+        );
+        if s.mismatches > 0 {
+            ui.colored_label(
+                Color32::YELLOW,
+                format!(
+                    "{} lookups gave something else than this map interpolated: \
+                     the decoding may be off",
+                    s.mismatches
+                ),
+            );
+        }
+        // Each call site: where its inputs come from and where its result goes.
+        for (&ret, &n) in &s.sites {
+            let site = trace.sites.get(&ret);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .link(format!("{:06X}", ret.wrapping_sub(4)))
+                    .on_hover_text(format!("{n} lookups from here; open in the code view"))
+                    .clicked()
+                {
+                    actions.push(Action::GoTo(ret.wrapping_sub(4)));
                 }
-            }
-        });
+                let Some(site) = site else { return };
+                let inputs: &[(&str, Source)] = if map.dims() == 3 {
+                    &[("X", site.x), ("Y", site.y)]
+                } else {
+                    &[("X", site.x)]
+                };
+                for &(axis, src) in inputs {
+                    ui.label(format!("{axis} from"));
+                    source_link(ui, trace, src, v);
+                }
+                ui.label(match site.out {
+                    Some(a) => format!("· result into {}", var_name(trace, a)),
+                    None => "· result used in the caller".into(),
+                });
+            });
+        }
+        let readers = trace.readers(desc);
+        if !readers.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Its result is read by");
+                for d in readers {
+                    if ui.link(format!("map {d:06X}")).clicked() {
+                        v.selected = Some(d);
+                        v.follow = false;
+                    }
+                }
+            });
+        }
+    } else {
+        ui.label(
+            egui::RichText::new(
+                "Not looked up in this run — stop at its next lookup, or drive \
+                 the engine onto it.",
+            )
+            .weak(),
+        );
     }
     ui.horizontal(|ui| {
         if map_break == Some(desc) {
@@ -489,7 +572,7 @@ fn detail(
         .into_iter()
         .rev()
         .collect();
-    let now = (x, y, out);
+    let now = e.seen.map_or((f32::NAN, f32::NAN, f32::NAN), |s| s.last);
     match (v.mode, map.dims()) {
         (Mode::Table, _) => table(ui, map, now),
         (_, 2) => curve(ui, map, now, &trail),

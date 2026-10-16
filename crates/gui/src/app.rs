@@ -40,6 +40,9 @@ pub struct App {
     maps_view: bool,
     /// What it shows.
     maps: crate::mapview::MapView,
+    /// Every map and curve found by scanning the whole flash (referenced or not), built
+    /// once the maps window is first opened.
+    catalog: Option<Arc<Vec<session::maps::Found>>>,
     /// The oscilloscope window is open (and the pins watched).
     scope_view: bool,
     /// What it shows.
@@ -70,6 +73,7 @@ impl App {
             back: false,
             maps_view: false,
             maps: Default::default(),
+            catalog: None,
             scope_view: false,
             scope: Default::default(),
             plugins_view: false,
@@ -267,6 +271,13 @@ impl App {
         }
 
         if self.maps_view {
+            // Scan the whole flash once for every map and curve descriptor, the first time
+            // the window opens; the browser lists all of them, read by the firmware or not.
+            if self.catalog.is_none() {
+                let flash = self.flash.clone();
+                self.catalog = Some(Arc::new(session::maps::catalog(&flash)));
+            }
+            let catalog = self.catalog.clone().expect("catalog built");
             let mut open = true;
             let mut actions = Vec::new();
             egui::Window::new("Maps")
@@ -276,7 +287,7 @@ impl App {
                 .show(root.ctx(), |ui| match &s.maps {
                     Some(t) => {
                         let t = t.lock().expect("map trace lock");
-                        actions = crate::mapview::show(ui, &t, &mut self.maps, s.watch);
+                        actions = crate::mapview::show(ui, &t, &mut self.maps, s.watch, &catalog);
                     }
                     None => {
                         ui.label("Finding the interpolation routines in the flash…");

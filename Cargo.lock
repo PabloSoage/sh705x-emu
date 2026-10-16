@@ -2365,6 +2365,7 @@ dependencies = [
  "board",
  "bridge",
  "engine",
+ "session",
  "sh2e",
  "sh7059",
 ]

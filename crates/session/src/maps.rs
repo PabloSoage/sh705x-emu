@@ -19,7 +19,7 @@
 use crate::names::Names;
 use crate::sites::{self, Site, Source};
 use sh7059::{Call, Machine};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 /// The interpolation routines of one firmware.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -290,12 +290,12 @@ const LOOK_BACK: usize = 12;
 /// Calls with a valid descriptor a routine needs to be taken for a master.
 const MIN_CALLS: u32 = 20;
 
-/// Finds the interpolation routines in `flash`: for every `JSR @Rm` (its target loaded
-/// into Rm from a PC-relative literal) and every `BSR`, the literal loaded into R4 in the
-/// delay slot or just before; the target that most often gets a valid 3D descriptor
-/// there is the 3D master, and the other one that most often gets a valid 2D descriptor,
-/// the 2D master.
-pub fn find_masters(flash: &[u8]) -> Masters {
+/// For every `JSR @Rm` (its target loaded into Rm from a PC-relative literal) and every
+/// `BSR` in `flash`, calls `f(target, desc)` with the call's target and the literal loaded
+/// into R4 in the delay slot or just before, when both are known and R4's literal lies
+/// inside the flash. This is how a descriptor reaches an interpolation master: its address
+/// is a PC-relative literal set in R4 right before the call.
+fn scan_r4_calls(flash: &[u8], mut f: impl FnMut(u32, u32)) {
     let word = |a: usize| u16::from_be_bytes([flash[a], flash[a + 1]]);
     let literal = |a: usize, op: u16| {
         let at = (a & !3) + 4 + (op & 0xFF) as usize * 4;
@@ -318,8 +318,6 @@ pub fn find_masters(flash: &[u8]) -> Masters {
             .find(|&(_, op)| is(op))
             .and_then(|(b, op)| literal(b, op))
     };
-    let read = |a: u32| flash.get(a as usize).copied().unwrap_or(0);
-    let (mut c3, mut c2): (HashMap<u32, u32>, HashMap<u32, u32>) = Default::default();
     for a in (0..flash.len().saturating_sub(4)).step_by(2) {
         let op = word(a);
         let target = if op & 0xF0FF == 0x400B {
@@ -336,13 +334,25 @@ pub fn find_masters(flash: &[u8]) -> Masters {
         if (desc as usize) >= flash.len() {
             continue;
         }
+        f(target, desc);
+    }
+}
+
+/// Finds the interpolation routines in `flash`: over every call ([`scan_r4_calls`]) and
+/// the literal set in R4 before it, the target that most often gets a valid 3D descriptor
+/// there is the 3D master, and the other one that most often gets a valid 2D descriptor,
+/// the 2D master.
+pub fn find_masters(flash: &[u8]) -> Masters {
+    let read = |a: u32| flash.get(a as usize).copied().unwrap_or(0);
+    let (mut c3, mut c2): (HashMap<u32, u32>, HashMap<u32, u32>) = Default::default();
+    scan_r4_calls(flash, |target, desc| {
         if Map::read3d(&read, desc).is_some() {
             *c3.entry(target).or_default() += 1;
         }
         if Map::read2d(&read, desc).is_some() {
             *c2.entry(target).or_default() += 1;
         }
-    }
+    });
     let best = |c: &HashMap<u32, u32>, not: Option<u32>| {
         c.iter()
             .filter(|&(&t, &n)| n >= MIN_CALLS && Some(t) != not)
@@ -354,6 +364,87 @@ pub fn find_masters(flash: &[u8]) -> Masters {
         d3,
         d2: best(&c2, d3),
     }
+}
+
+/// Every descriptor address `flash` loads into R4 before a call to one of `masters`: the
+/// maps the firmware actually reads, cross-referenced the way [`find_masters`] scans. A
+/// descriptor that parses as a map but never reaches a master this way is unreferenced.
+pub fn referenced(flash: &[u8], masters: Masters) -> BTreeSet<u32> {
+    let mut set = BTreeSet::new();
+    scan_r4_calls(flash, |target, desc| {
+        if Some(target) == masters.d3 || Some(target) == masters.d2 {
+            set.insert(desc);
+        }
+    });
+    set
+}
+
+/// A map found by scanning the whole flash for descriptors, read at run time or not.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Found {
+    /// The map, decoded from its descriptor.
+    pub map: Map,
+    /// Whether the firmware reads it: a PC-relative literal loads its descriptor into R4
+    /// before an interpolation-master call ([`referenced`]). An unreferenced descriptor
+    /// parses as a map but nothing calls it — an unused calibration, or a false positive.
+    pub referenced: bool,
+}
+
+/// Every map and curve whose descriptor sits anywhere in `flash`, whether the firmware
+/// reads it at run time or not: the exhaustive catalogue, the way WinOLS walks a file.
+///
+/// Reuses [`Map::read3d`]/[`Map::read2d`] for the descriptor format and its checks (axes
+/// finite and non-decreasing, pointers plausible, valid cell type). On top of those it
+/// keeps a candidate only when its axes and cells live in ROM, its axes strictly increase
+/// (which drops the all-zero axes a RAM pointer would read as, and other flat false
+/// positives), and its cells fit the image. Deduped by the (X, Y, Z) data addresses, so
+/// two descriptors onto the same data count once. Each kept map is marked referenced or
+/// not by cross-referencing the master calls ([`referenced`]).
+pub fn catalog(flash: &[u8]) -> Vec<Found> {
+    let rom = flash.len() as u32;
+    let read = |a: u32| flash.get(a as usize).copied().unwrap_or(0);
+    let in_rom = |a: u32| a < rom;
+    let strictly_up = |ax: &[f32]| {
+        ax.len() >= 2
+            && ax.first().copied().unwrap_or(f32::NAN) < ax.last().copied().unwrap_or(f32::NAN)
+    };
+    let refs = referenced(flash, find_masters(flash));
+
+    // Every 4-aligned offset is tried as a descriptor: the masters get its address from a
+    // PC-relative literal, so a descriptor is word-aligned and its u32 axis and data
+    // pointers are naturally aligned.
+    let mut maps: Vec<Map> = Vec::new();
+    let mut seen: BTreeSet<(u32, u32, u32)> = BTreeSet::new();
+    for d in (0..rom).step_by(4) {
+        // 3D first (a Y axis to place it), then 2D at the same spot.
+        let cand = Map::read3d(&read, d)
+            .filter(|m| m.y_at != 0 && !m.y.is_empty())
+            .or_else(|| Map::read2d(&read, d));
+        let Some(m) = cand else { continue };
+
+        if !in_rom(m.x_at) || !in_rom(m.z_at) || (m.dims() == 3 && !in_rom(m.y_at)) {
+            continue;
+        }
+        let z_bytes = m.z.len() as u32 * m.cell.bytes();
+        if m.z_at.checked_add(z_bytes).is_none_or(|end| end > rom) {
+            continue;
+        }
+        if !strictly_up(&m.x) || (m.dims() == 3 && !strictly_up(&m.y)) {
+            continue;
+        }
+        if !seen.insert((m.x_at, m.y_at, m.z_at)) {
+            continue;
+        }
+        maps.push(m);
+    }
+
+    maps.sort_by_key(|m| m.desc);
+    maps.into_iter()
+        .map(|m| Found {
+            referenced: refs.contains(&m.desc),
+            map: m,
+        })
+        .collect()
 }
 
 /// Lookups kept for the live view, newest last.
@@ -608,6 +699,60 @@ mod tests {
         assert_eq!(Map::position(&m.x, 1500.0), 1.5);
         // Not a 2D curve.
         assert!(Map::read2d(&mem(&b), 0x100).is_none_or(|c| c.nx() == 3));
+    }
+
+    #[test]
+    fn the_catalog_finds_rom_resident_descriptors_and_dedups() {
+        // One 3D map at 0x100, and a second descriptor at 0x130 onto the same X/Y/Z data.
+        let mut b = map3();
+        let dup = b[0x100..0x11C].to_vec();
+        put(&mut b, 0x130, &dup);
+        // A would-be descriptor at 0x40 with a flat X axis (all 5.0): dropped because its
+        // axis does not strictly increase, like the all-zero axes a RAM pointer reads as.
+        put(&mut b, 0x040, &2u16.to_be_bytes());
+        put(&mut b, 0x042, &2u16.to_be_bytes());
+        put(&mut b, 0x044, &0x500u32.to_be_bytes());
+        put(&mut b, 0x048, &0x508u32.to_be_bytes());
+        put(&mut b, 0x04C, &0x510u32.to_be_bytes());
+        b[0x050] = 0x08;
+        put(&mut b, 0x054, &1.0f32.to_be_bytes());
+        for k in 0..2 {
+            put(&mut b, 0x500 + 4 * k, &5.0f32.to_be_bytes());
+            put(&mut b, 0x508 + 4 * k, &5.0f32.to_be_bytes());
+        }
+
+        let found = catalog(&b);
+        // Only the real map survives, counted once despite the duplicate descriptor.
+        let maps: Vec<u32> = found.iter().map(|f| f.map.desc).collect();
+        assert_eq!(maps, vec![0x100], "{maps:06X?}");
+        let m = &found[0].map;
+        assert_eq!((m.nx(), m.ny(), m.dims(), m.cell), (3, 2, 3, Cell::U16));
+        // No master is found in this toy ROM, so nothing cross-references: unreferenced.
+        assert!(!found[0].referenced);
+    }
+
+    #[test]
+    fn the_astra_catalog_surfaces_more_than_the_firmware_reads() {
+        let Some(f) = flash() else { return };
+        let found = catalog(&f);
+        let total = found.len();
+        let refd = found.iter().filter(|f| f.referenced).count();
+        let n3 = found.iter().filter(|f| f.map.dims() == 3).count();
+        eprintln!(
+            "{total} descriptors ({n3} 3D, {} 2D); {refd} referenced, {} unreferenced",
+            total - n3,
+            total - refd
+        );
+        // WinOLS-style sweep of the whole ROM: many more than the ~736 the firmware reaches.
+        assert!(total > 900, "{total}");
+        // The cross-reference marks a large, strict subset as read by the firmware.
+        assert!(refd > 300 && refd < total, "{refd} of {total}");
+        // Every referenced descriptor is one the masters are called with.
+        let masters = find_masters(&f);
+        let refs = referenced(&f, masters);
+        for entry in found.iter().filter(|f| f.referenced) {
+            assert!(refs.contains(&entry.map.desc), "{:06X}", entry.map.desc);
+        }
     }
 
     #[test]

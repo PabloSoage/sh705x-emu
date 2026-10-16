@@ -14,6 +14,7 @@ sh7059.workspace = true
 board.workspace = true
 bridge.workspace = true
 engine.workspace = true
+session.workspace = true
 
 [lints]
 workspace = true

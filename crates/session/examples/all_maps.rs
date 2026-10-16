@@ -1,25 +1,18 @@
 //! Every map and curve whose descriptor sits anywhere in the flash — whether the
-//! firmware reads it at run time or not. The exhaustive catalogue, the way WinOLS
-//! walks a file, so the emulator serves as an analysis tool and not only as a run.
+//! firmware reads it at run time or not. The exhaustive catalogue, the way WinOLS walks a
+//! file, so the emulator serves as an analysis tool and not only as a run.
 //!
-//! `maps` and `touched` list the maps the firmware looks up while running (through
-//! the interpolation masters). This walks the whole ROM instead and keeps every
-//! descriptor that parses and validates as a 3D map or a 2D curve, including the
-//! ones nothing calls.
+//! `maps` and `touched` list the maps the firmware looks up while running (through the
+//! interpolation masters). This walks the whole ROM instead and keeps every descriptor
+//! that parses and validates as a 3D map or a 2D curve, including the ones nothing calls,
+//! each marked referenced (the firmware reads it) or not.
 //!
 //!   cargo run -p session --release --example all_maps -- <flash.bin> [--csv <out.csv>]
 //!
-//! Reuses `session::maps::Map::{read3d, read2d}` for the descriptor format and its
-//! checks (axes finite and non-decreasing, pointers in range, valid cell type). On
-//! top of those it keeps a candidate only when its axes and cells live in ROM, its
-//! axes strictly increase (which drops the all-zero axes a RAM pointer would read as
-//! and other flat false positives), and its cells fit the image. Deduped by the
-//! (X, Y, Z) addresses, so two descriptors onto the same data count once.
-//!
-//! Reads a file; touches no hardware and boots nothing.
+//! A thin wrapper around `session::maps::catalog`, which the `sh705x catalog` command
+//! also drives. Reads a file; touches no hardware and boots nothing.
 
-use session::maps::Map;
-use std::collections::BTreeSet;
+use session::maps::catalog;
 use std::fmt::Write as _;
 
 fn main() {
@@ -38,59 +31,29 @@ fn main() {
         eprintln!("{path}: {e}");
         std::process::exit(1);
     });
-    let rom = flash.len() as u32;
-    let read = move |a: u32| *flash.get(a as usize).unwrap_or(&0);
 
-    let in_rom = |a: u32| a < rom;
-    let strictly_up = |ax: &[f32]| {
-        ax.len() >= 2 && ax.first().copied().unwrap_or(f32::NAN) < ax.last().copied().unwrap_or(f32::NAN)
-    };
-
-    // Every 4-aligned offset is tried as a descriptor: the masters get its address
-    // from a PC-relative literal, so a descriptor is word-aligned and its u32 axis
-    // and data pointers are naturally aligned.
-    let mut maps: Vec<Map> = Vec::new();
-    let mut seen: BTreeSet<(u32, u32, u32)> = BTreeSet::new();
-    for d in (0..rom).step_by(4) {
-        // 3D first (a Y axis to place it), then 2D at the same spot.
-        let cand = Map::read3d(&read, d)
-            .filter(|m| m.y_at != 0 && !m.y.is_empty())
-            .or_else(|| Map::read2d(&read, d));
-        let Some(m) = cand else { continue };
-
-        if !in_rom(m.x_at) || !in_rom(m.z_at) || (m.dims() == 3 && !in_rom(m.y_at)) {
-            continue;
-        }
-        let z_bytes = m.z.len() as u32 * m.cell.bytes();
-        if m.z_at.checked_add(z_bytes).is_none_or(|end| end > rom) {
-            continue;
-        }
-        if !strictly_up(&m.x) || (m.dims() == 3 && !strictly_up(&m.y)) {
-            continue;
-        }
-        if !seen.insert((m.x_at, m.y_at, m.z_at)) {
-            continue;
-        }
-        maps.push(m);
-    }
-
-    maps.sort_by_key(|m| m.desc);
-    let n3 = maps.iter().filter(|m| m.dims() == 3).count();
-    let n2 = maps.len() - n3;
+    let found = catalog(&flash);
+    let n3 = found.iter().filter(|f| f.map.dims() == 3).count();
+    let n2 = found.len() - n3;
+    let refd = found.iter().filter(|f| f.referenced).count();
     println!(
-        "{}: {} maps in the calibration — {} 3D, {} 2D (every descriptor in ROM, read or not)",
+        "{}: {} maps in the calibration — {} 3D, {} 2D; {} referenced, {} unreferenced \
+         (every descriptor in ROM, read or not)",
         path,
-        maps.len(),
+        found.len(),
         n3,
-        n2
+        n2,
+        refd,
+        found.len() - refd
     );
 
     if let Some(out) = csv_out {
-        let mut s = String::from("desc,dims,nx,ny,type,scale,offset,x_at,y_at,z_at\n");
-        for m in &maps {
+        let mut s = String::from("desc,dims,nx,ny,type,scale,offset,referenced,x_at,y_at,z_at\n");
+        for f in &found {
+            let m = &f.map;
             writeln!(
                 s,
-                "0x{:06X},{},{},{},{},{},{},0x{:06X},0x{:06X},0x{:06X}",
+                "0x{:06X},{},{},{},{},{},{},{},0x{:06X},0x{:06X},0x{:06X}",
                 m.desc,
                 m.dims(),
                 m.nx(),
@@ -98,6 +61,7 @@ fn main() {
                 m.cell.name(),
                 m.scale,
                 m.offset,
+                f.referenced,
                 m.x_at,
                 m.y_at,
                 m.z_at
@@ -110,10 +74,11 @@ fn main() {
         });
         println!("escrito {out}");
     } else {
-        println!("\n  descriptor   dims   nx×ny   type   escala      offset    datos");
-        for m in maps.iter().take(40) {
+        println!("\n  descriptor   dims   nx×ny   type   escala      offset   ref  datos");
+        for f in found.iter().take(40) {
+            let m = &f.map;
             println!(
-                "  0x{:06X}    {}D   {:>3}×{:<3}  {:>5}  {:>9.4}  {:>9.3}  0x{:06X}",
+                "  0x{:06X}    {}D   {:>3}×{:<3}  {:>5}  {:>9.4}  {:>9.3}  {:>3}  0x{:06X}",
                 m.desc,
                 m.dims(),
                 m.nx(),
@@ -121,11 +86,12 @@ fn main() {
                 m.cell.name(),
                 m.scale,
                 m.offset,
+                if f.referenced { "yes" } else { "no" },
                 m.z_at
             );
         }
-        if maps.len() > 40 {
-            println!("  … y {} más (usa --csv para todos)", maps.len() - 40);
+        if found.len() > 40 {
+            println!("  … y {} más (usa --csv para todos)", found.len() - 40);
         }
     }
 }
