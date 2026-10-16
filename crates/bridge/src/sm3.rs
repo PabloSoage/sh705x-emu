@@ -12,6 +12,9 @@
 //! - every message gets exactly one answer, with op 0x00;
 //! - the greeting (op 0x83) is answered with 66 bytes: a serial number and a firmware
 //!   word, which the client shows;
+//! - the rest of the opening gets the answers' lengths the car's SM3 gives: 0 for
+//!   0x88, 0x50, 0x51 and 0x52, 261 for 0x30, 308 for 0x12 (both zero-filled: their
+//!   layout is not captured), and the 28-byte channel status for 0x1C and 0x53;
 //! - op 0x20 is answered with the voltages, battery millivolts first;
 //! - op 0x1C with subcommand `60 80 02` puts a CAN frame on the bus: `len u32 | id u32 |
 //!   8 bytes` from data offset 3;
@@ -54,6 +57,30 @@ const OP_FRAMES: u8 = 0xFE;
 /// Most frames in one pushed block: the count is a nibble.
 const PER_BLOCK: usize = 15;
 const OP_CHANNEL: u8 = 0x50;
+/// The rest of `PassThruOpen` after the greeting (protocol.md §15): the second
+/// handshake word (0x88), a network-config block (0x30) and a session-config echo
+/// (0x12), then the state probes (0x51, 0x52) and the physical-layer mask (0x53).
+const OP_OPEN2: u8 = 0x88;
+const OP_NET: u8 = 0x30;
+const OP_SESSION: u8 = 0x12;
+const OP_STATE_A: u8 = 0x51;
+const OP_STATE_B: u8 = 0x52;
+const OP_LAYERS: u8 = 0x53;
+/// Length of the network-config answer to 0x30 (IP, mask, MAC); its inner layout is
+/// not captured byte for byte, so this side returns the right size, zero-filled.
+const LEN_NET: usize = 261;
+/// Length of the session-config echo answered to 0x12; likewise size-faithful only.
+const LEN_SESSION: usize = 308;
+
+/// The 28-byte channel-status block the adapter returns to 0x1C and 0x53 and carries
+/// in every 0xFE header, constant through a session once the channel is open
+/// (protocol.md §6, §15). The first word is the channel id, which on the car is zero
+/// until the channel opens; this side keeps it set, which opendash and a J2534 client
+/// read only after connecting anyway.
+const STATUS: [u8; 28] = [
+    0x80, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x01,
+    0x00, 0x00, 0xFF, 0x01, 0x00, 0x00, 0xB7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
 /// Frames waiting for the client, at most; older ones are dropped [EST].
 pub const QUEUE: usize = 512;
 /// Bytes written but not yet taken by the socket above which no more frames are queued.
@@ -164,6 +191,8 @@ pub fn take(buf: &mut Vec<u8>) -> Option<(u8, Vec<u8>)> {
 pub fn block(frames: &[Frame]) -> Vec<u8> {
     let n = frames.len().min(PER_BLOCK);
     let mut d = vec![0u8; 36 + 16 * n];
+    d[0..4].copy_from_slice(&[0x13, 0x00, 0x1C, 0x00]);
+    d[4..32].copy_from_slice(&STATUS);
     d[34] = (n as u8) << 4;
     for (i, f) in frames.iter().take(n).enumerate() {
         let o = 36 + 16 * i;
@@ -238,15 +267,18 @@ impl Sm3 {
                     data: bytes,
                 });
                 self.written += 1;
-                message(0, &[0u8; 28])
+                message(0, &STATUS)
             }
-            OP_BUS => message(0, &[0u8; 28]),
+            OP_BUS | OP_LAYERS => message(0, &STATUS),
             OP_CHANNEL => {
                 if let Some(f) = channel_filters(data) {
                     self.filters = f;
                 }
-                message(0, &[0u8; 4])
+                message(0, &[])
             }
+            OP_OPEN2 | OP_STATE_A | OP_STATE_B => message(0, &[]),
+            OP_NET => message(0, &[0u8; LEN_NET]),
+            OP_SESSION => message(0, &[0u8; LEN_SESSION]),
             _ => message(0, &[0u8; 4]),
         }
     }
@@ -405,6 +437,36 @@ mod tests {
         assert_eq!((f.id, f.dlc, f.extended), (0x7DF, 8, false));
         assert_eq!(&f.data[..3], &[0x02, 0x01, 0x00]);
         assert!(answers.iter().all(|a| a.len() % 4 == 0), "padded to 4");
+    }
+
+    #[test]
+    fn the_opening_gets_the_answer_lengths_of_the_car() {
+        // op -> length of the 0x00 answer, as the car's SM3 gave them (protocol.md §15).
+        let mut sm3 = Sm3::default();
+        let mut bus = Bus::default();
+        for (op, len) in [
+            (0x83u8, 66usize),
+            (0x88, 0),
+            (0x30, 261),
+            (0x12, 308),
+            (0x50, 0),
+            (0x51, 0),
+            (0x52, 0),
+            (0x53, 28),
+            (0x1C, 28),
+            (0x20, 6),
+        ] {
+            let mut a = sm3.answer(op, &[], &mut bus);
+            let (got, d) = take(&mut a).unwrap();
+            assert_eq!((got, d.len()), (0, len), "op {op:#04x}");
+            assert!(a.is_empty(), "op {op:#04x}: one message");
+        }
+        let mut s = sm3.answer(0x53, &[0x30, 0x00], &mut bus);
+        let (_, d) = take(&mut s).unwrap();
+        let mut b = block(&[]);
+        let (_, h) = take(&mut b).unwrap();
+        assert_eq!(&h[4..32], &d[..], "the status is the 0xFE header's");
+        assert_eq!(&h[0..4], &[0x13, 0x00, 0x1C, 0x00]);
     }
 
     #[test]
