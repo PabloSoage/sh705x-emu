@@ -145,6 +145,8 @@ Each [release](https://github.com/PabloSoage/sh705x-emu/releases) carries:
   nothing else installed.
 - the Android app, one APK per ABI: `arm64-v8a` for phones, `x86_64` for the Android
   emulator and x86 devices.
+- `sh705x_j2534_x86.dll` and `sh705x_j2534_x64.dll` with `register.ps1`: the J2534
+  pass-thru DLL (below) for 32-bit tools such as GDS2 and for 64-bit ones.
 
 No firmware comes with any of them: bring your own dump.
 
@@ -193,7 +195,9 @@ cargo build --release -p j2534 --target i686-pc-windows-msvc
 
 The application then lists "sh705x emulated SM3" next to real adapters. It carries
 CAN and ISO 15765 on the high-speed bus (flow-control, pass and block filters, extended
-addressing, padding, loopback, periodic messages). `log=<file>` in
+addressing, padding, loopback, periodic messages). Raw frames that only a pass filter
+claims are delivered too, so GDS2's Data Display gets its periodic data stream (identifier
+0x5E8) and shows the emulated ECU's parameters live. `log=<file>` in
 `%ProgramData%\sh705x\j2534.ini` records every call and frame.
 
 To watch it run, start `sh705x-gui` (on Windows, the `.exe` from a release runs as it is,
@@ -280,6 +284,33 @@ left. The list names a map by what its result becomes: "gives torque asked".*
 ![The boost target as a surface](docs/img/gui-maps-surface.png)
 
 *The boost target (20×20) as a surface, at idle.*
+
+**Comparing with another file.** "Compare with a flash…" reads a second image from your
+disk, as calibration editors compare an original with a modified file: each map is read
+from the same descriptor in both, the list marks the maps that differ with how many cells
+(`Δ100`), and the filter `DIFF` keeps only those. "Differences" shows each cell as this
+flash has it → as the other file has it, coloured by the size of the change.
+
+![Comparing with a modified file: the boost target, raised at high speed and load](docs/img/gui-maps-compare.png)
+
+*Against a copy with the boost target 8 % up and the quantity limit 5 % up in their
+upper quarter: the two maps listed, and the boost target's 100 changed cells in red.*
+
+**Changing a map.** In "Table", click a cell, type the value in physical units and press
+Set: it is stored in the map's own format (float, or 8/16 bits with the descriptor's scale
+and offset; out of range is refused with the limits) in the emulated flash, and also in the
+RAM copy when the firmware reads the map from there. The firmware's next lookups use it,
+which a test checks against the Astra's flash. Changed cells are underlined; "Revert this
+map" puts back the loaded flash's bytes, and "Save flash as…" writes the image with the
+changes. Its checksum is not recomputed: it is for the emulator and for study, not for an
+ECU. Only the emulator's memory changes; nothing is sent anywhere.
+
+"Copy" and "Save CSV…" give any map as text, axes included.
+
+![Three cells of the boost target changed in the running ECU, a fourth chosen](docs/img/gui-maps-edit.png)
+
+*Three cells of the boost target raised 10 % while idling (underlined), and a fourth
+chosen for editing.*
 
 Names come from three places:
 

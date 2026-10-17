@@ -139,6 +139,32 @@ impl MapView {
     }
 }
 
+#[cfg(test)]
+impl MapView {
+    /// Compare with `flash` as "Compare with a flash…" does, listing only what it changes.
+    pub(crate) fn compare_with(&mut self, name: &str, flash: Vec<u8>) {
+        self.other = Some(Other {
+            name: name.into(),
+            flash,
+        });
+        self.diffs.clear();
+        self.filter = "DIFF".into();
+    }
+
+    /// Mark `cells` of `desc` as changed and choose (`i`, `j`), as the editor does.
+    pub(crate) fn edited_cells(
+        &mut self,
+        desc: u32,
+        cells: &[usize],
+        (i, j): (usize, usize),
+        text: &str,
+    ) {
+        self.edited.entry(desc).or_default().extend(cells);
+        self.cell = Some((desc, i, j));
+        self.cell_text = text.into();
+    }
+}
+
 impl Default for MapView {
     fn default() -> Self {
         Self {
@@ -502,7 +528,7 @@ fn list(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView, entries: &BTreeMap
                 }
                 let mut rt = egui::RichText::new(text).monospace();
                 // Unreferenced maps (found but not read by the firmware) are dimmed.
-                if e.referenced() == Some(false) {
+                if e.referenced() == Some(false) && e.calls() == 0 {
                     rt = rt.weak();
                 }
                 let r = ui.selectable_label(v.selected == Some(*d), rt);
@@ -571,6 +597,15 @@ fn detail(
                 egui::RichText::new(
                     "referenced · the firmware loads this descriptor before a \
                      master call",
+                )
+                .weak(),
+            );
+        }
+        Some(false) if e.calls() > 0 => {
+            ui.label(
+                egui::RichText::new(
+                    "no master call in the scan loads this descriptor, yet the firmware looked \
+                     it up: it reaches it another way",
                 )
                 .weak(),
             );

@@ -1252,6 +1252,86 @@ mod tests {
         t.join().unwrap();
     }
 
+    /// The bytes that put `f` of each chosen cell of `map` in its place.
+    fn scaled(map: &session::maps::Map, cells: &[usize], f: f32) -> Vec<(u32, u8)> {
+        let mut writes = Vec::new();
+        for &k in cells {
+            let bytes = crate::mapview::encode(map, map.z[k] * f).expect("fits");
+            let at = map.z_at + k as u32 * map.cell.bytes();
+            writes.extend(
+                bytes
+                    .into_iter()
+                    .enumerate()
+                    .map(|(n, b)| (at + n as u32, b)),
+            );
+        }
+        writes
+    }
+
+    /// The upper-right quarter of a map: high on both axes.
+    fn top_quarter(map: &session::maps::Map) -> Vec<usize> {
+        (0..map.z.len())
+            .filter(|k| k % map.nx() >= map.nx() / 2 && k / map.nx() >= map.ny() / 2)
+            .collect()
+    }
+
+    #[test]
+    #[ignore = "writes docs/img; needs SH705X_FLASH and a GPU or WARP"]
+    fn screenshots_map_tools() {
+        const BOOST: u32 = 0x9DADC;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/img");
+        let Some((mut app, t)) = tracing_maps() else {
+            return;
+        };
+        let read = |flash: &[u8], d: u32| {
+            session::maps::Map::read3d(&|a| flash.get(a as usize).copied().unwrap_or(0), d).unwrap()
+        };
+        // A modified file: the boost target 8 % up and the quantity limit 5 % up, both at
+        // high speed and load, as a tuner would.
+        let mut other = app.flash.to_vec();
+        for (d, f) in [(BOOST, 1.08), (0x9B00C, 1.05)] {
+            let map = read(&other, d);
+            for (a, b) in scaled(&map, &top_quarter(&map), f) {
+                other[a as usize] = b;
+            }
+        }
+        app.maps_view = true;
+        app.maps.compare_with("modified.bin", other);
+        app.maps.selected = Some(BOOST);
+        app.maps.mode = crate::mapview::Mode::Diff;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+        h.run_steps(3);
+        let path = dir.join("gui-maps-compare.png");
+        h.render().unwrap().save(&path).unwrap();
+        eprintln!("{}", path.display());
+        h.state().send(Cmd::Quit);
+        t.join().unwrap();
+        // Three cells of the boost target changed in the running ECU, a fourth chosen.
+        let Some((mut app, t)) = tracing_maps() else {
+            return;
+        };
+        let map = read(&app.flash, BOOST);
+        let row = map.ny() / 2;
+        let cells: Vec<usize> = (3..6).map(|i| row * map.nx() + i).collect();
+        app.poke(scaled(&map, &cells, 1.1));
+        let text = format!("{}", map.at(6, row) * 1.1);
+        app.maps_view = true;
+        app.maps.selected = Some(BOOST);
+        app.maps.mode = crate::mapview::Mode::Table;
+        app.maps.edited_cells(BOOST, &cells, (6, row), &text);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .build_ui_state(|ui, app: &mut App| app.draw(ui), app);
+        h.run_steps(3);
+        let path = dir.join("gui-maps-edit.png");
+        h.render().unwrap().save(&path).unwrap();
+        eprintln!("{}", path.display());
+        h.state().send(Cmd::Quit);
+        t.join().unwrap();
+    }
+
     #[test]
     #[ignore = "writes docs/img; needs SH705X_FLASH and a GPU or WARP"]
     fn screenshots() {
