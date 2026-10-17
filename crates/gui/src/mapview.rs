@@ -43,6 +43,58 @@ pub(crate) enum Mode {
     Surface,
     /// The numbers.
     Table,
+    /// This flash's numbers against the compared file's.
+    Diff,
+}
+
+/// A second flash file the maps are compared with, as calibration editors do with an
+/// original and a modified file. Read from disk on request and kept only in memory.
+pub(crate) struct Other {
+    name: String,
+    flash: Vec<u8>,
+}
+
+/// How one map reads in the compared file.
+struct Diff {
+    map: Map,
+    /// Cells whose value differs.
+    changed: usize,
+    /// The largest difference, compared file minus this one, by size.
+    largest: f32,
+}
+
+/// Reads `base`'s descriptor from the compared file. `None` when the map does not live
+/// in the flash (its cells are in RAM) or does not read the same shape there.
+fn compare(other: &Other, desc: u32, base: &Map) -> Option<Diff> {
+    let flash = &other.flash;
+    let in_flash = |a: u32| (a as usize) < flash.len();
+    if !in_flash(base.z_at) || !in_flash(base.x_at) {
+        return None;
+    }
+    let read = |a: u32| flash.get(a as usize).copied().unwrap_or(0);
+    let map = if base.dims() == 3 {
+        Map::read3d(&read, desc)
+    } else {
+        Map::read2d(&read, desc)
+    }?;
+    if map.nx() != base.nx() || map.ny() != base.ny() {
+        return None;
+    }
+    let (mut changed, mut largest) = (0, 0.0f32);
+    for (a, b) in base.z.iter().zip(&map.z) {
+        let d = b - a;
+        if d != 0.0 && !(a.is_nan() && b.is_nan()) {
+            changed += 1;
+            if d.abs() > largest.abs() {
+                largest = d;
+            }
+        }
+    }
+    Some(Diff {
+        map,
+        changed,
+        largest,
+    })
 }
 
 /// What the viewer has chosen.
@@ -64,6 +116,21 @@ pub struct MapView {
     pub(crate) page: Page,
     /// The fault codes page.
     pub(crate) faults: crate::faultview::FaultView,
+    /// The file compared with, if any.
+    other: Option<Other>,
+    /// Each map as read in the compared file, worked out once.
+    diffs: BTreeMap<u32, Option<Diff>>,
+}
+
+impl MapView {
+    /// The map `desc` in the compared file, worked out on first use.
+    fn diff(&mut self, desc: u32, base: &Map) -> Option<&Diff> {
+        let other = self.other.as_ref()?;
+        self.diffs
+            .entry(desc)
+            .or_insert_with(|| compare(other, desc, base))
+            .as_ref()
+    }
 }
 
 impl Default for MapView {
@@ -81,6 +148,8 @@ impl Default for MapView {
             note: None,
             page: Page::Maps,
             faults: Default::default(),
+            other: None,
+            diffs: BTreeMap::new(),
         }
     }
 }
@@ -113,6 +182,12 @@ impl Entry<'_> {
     /// Lookups at run time (0 for a map never reached).
     fn calls(&self) -> u64 {
         self.seen.map_or(0, |s| s.calls)
+    }
+
+    /// The map as stored in the flash, for comparing with another file: the catalogue's
+    /// (the run-time one may read cells the firmware copied to RAM).
+    fn stored(&self) -> Option<&Map> {
+        self.found.map(|f| &f.map).or(self.map())
     }
 }
 
@@ -296,7 +371,8 @@ fn list(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView, entries: &BTreeMap
         ui.label("Filter");
         ui.add(egui::TextEdit::singleline(&mut v.filter).desired_width(90.0))
             .on_hover_text(
-                "Part of the descriptor's address (hex), of a name, 2D / 3D, or REF / UNREF",
+                "Part of the descriptor's address (hex), of a name, 2D / 3D, REF / UNREF, or \
+                 DIFF (the maps the compared file changes)",
             );
         egui::ComboBox::from_id_salt("map_sort")
             .selected_text(match v.sort {
@@ -312,6 +388,19 @@ fn list(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView, entries: &BTreeMap
         ui.checkbox(&mut v.follow, "follow")
             .on_hover_text("Show the map looked up last: stepping, each lookup as it comes");
     });
+    if v.other.is_some() {
+        for (&d, e) in entries {
+            if let Some(m) = e.stored() {
+                v.diff(d, m);
+            }
+        }
+    }
+    let changed = |v: &MapView, d: u32| {
+        v.diffs
+            .get(&d)
+            .and_then(|x| x.as_ref())
+            .map_or(0, |x| x.changed)
+    };
     let f = v.filter.trim().to_uppercase();
     let mut rows: Vec<(u32, &Entry)> = entries
         .iter()
@@ -324,6 +413,7 @@ fn list(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView, entries: &BTreeMap
                 || dims == f
                 || (f == "REF" && e.referenced() == Some(true))
                 || (f == "UNREF" && e.referenced() == Some(false))
+                || (f == "DIFF" && changed(v, **d) > 0)
                 || title(trace, **d).is_some_and(|t| t.to_uppercase().contains(&f))
         })
         .map(|(&d, e)| (d, e))
@@ -350,6 +440,10 @@ fn list(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView, entries: &BTreeMap
                 });
                 let last = e.seen.map_or(f32::NAN, |s| s.last.2);
                 let mut text = format!("{d:06X} {size:>6} {:>8} → {}", e.calls(), num(last));
+                let n = changed(v, *d);
+                if n > 0 {
+                    text.push_str(&format!("  Δ{n}"));
+                }
                 if let Some(t) = title(trace, *d) {
                     // One line a map: the name cut short (whole in the detail).
                     text.push_str("  ");
@@ -464,6 +558,35 @@ fn detail(
         },
         e.calls()
     ));
+    if let Some(name) = v.other.as_ref().map(|o| o.name.clone()) {
+        let base = e.stored().unwrap_or(map);
+        match v.diff(desc, base) {
+            Some(d) if d.changed > 0 => {
+                ui.colored_label(
+                    Color32::from_rgb(230, 150, 60),
+                    format!(
+                        "{name}: {} of {} cells differ · largest change {}{}",
+                        d.changed,
+                        base.z.len(),
+                        if d.largest > 0.0 { "+" } else { "" },
+                        num(d.largest)
+                    ),
+                );
+            }
+            Some(_) => {
+                ui.label(egui::RichText::new(format!("{name}: the same")).weak());
+            }
+            None => {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{name}: not comparable (its cells are not in the flash, or the \
+                         descriptor reads differently there)"
+                    ))
+                    .weak(),
+                );
+            }
+        }
+    }
     if let Some(s) = e.seen {
         let (x, y, out) = s.last;
         ui.label(
@@ -559,6 +682,12 @@ fn detail(
             ui.selectable_value(&mut v.mode, Mode::Surface, "Surface");
         }
         ui.selectable_value(&mut v.mode, Mode::Table, "Table");
+        if v.other.is_some() {
+            ui.selectable_value(&mut v.mode, Mode::Diff, "Differences")
+                .on_hover_text("Each cell as this flash has it → as the compared file has it");
+        } else if v.mode == Mode::Diff {
+            v.mode = Mode::Table;
+        }
     });
     // Where the firmware has been on this map, oldest first.
     let trail: Vec<(f32, f32, f32)> = trace
@@ -574,6 +703,15 @@ fn detail(
         .collect();
     let now = e.seen.map_or((f32::NAN, f32::NAN, f32::NAN), |s| s.last);
     match (v.mode, map.dims()) {
+        (Mode::Diff, _) => {
+            let base = e.stored().unwrap_or(map);
+            match v.diff(desc, base) {
+                Some(d) => diff_table(ui, base, &d.map),
+                None => {
+                    ui.label("Not comparable with the other file.");
+                }
+            }
+        }
         (Mode::Table, _) => table(ui, map, now),
         (_, 2) => curve(ui, map, now, &trail),
         (Mode::Surface, _) => surface(ui, map, now, v),
@@ -674,6 +812,43 @@ fn names_row(ui: &mut egui::Ui, trace: &MapTrace, v: &mut MapView, actions: &mut
                     let l = read_labels(&t);
                     v.note = Some(format!("{} labels read", l.len()));
                     actions.push(Action::Labels(l));
+                }
+                Err(e) => v.note = Some(e.to_string()),
+            }
+        }
+        if let Some(o) = &v.other {
+            let n = v.diffs.values().flatten().filter(|d| d.changed > 0).count();
+            ui.label(
+                egui::RichText::new(format!("comparing with {} · {n} maps differ", o.name))
+                    .color(Color32::from_rgb(230, 150, 60)),
+            );
+            if ui
+                .button("Stop comparing")
+                .on_hover_text("Forget the other file")
+                .clicked()
+            {
+                v.other = None;
+                v.diffs.clear();
+            }
+        } else if ui
+            .button("Compare with a flash…")
+            .on_hover_text(
+                "Another dump of this ECU (a modified file, another car): every map is read \
+                 from it with the same descriptor and the differing cells are counted. Filter \
+                 DIFF lists the maps it changes. Read from your disk; nothing is kept.",
+            )
+            .clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .set_title("Flash to compare with")
+                .pick_file()
+        {
+            match std::fs::read(&path) {
+                Ok(flash) => {
+                    let name = path
+                        .file_name()
+                        .map_or("other file".into(), |n| n.to_string_lossy().into_owned());
+                    v.other = Some(Other { name, flash });
+                    v.diffs.clear();
                 }
                 Err(e) => v.note = Some(e.to_string()),
             }
@@ -974,6 +1149,63 @@ fn thin_line(mesh: &mut egui::Mesh, a: Pos2, b: Pos2, width: f32, colour: Color3
     }
     mesh.add_triangle(base, base + 1, base + 2);
     mesh.add_triangle(base, base + 2, base + 3);
+}
+
+/// The numbers of two files side by side: each cell as `this → other`, on red where the
+/// other file raises it and on blue where it lowers it, stronger the bigger the change.
+fn diff_table(ui: &mut egui::Ui, base: &Map, other: &Map) {
+    let largest = base
+        .z
+        .iter()
+        .zip(&other.z)
+        .map(|(a, b)| (b - a).abs())
+        .filter(|d| d.is_finite())
+        .fold(0.0f32, f32::max);
+    egui::ScrollArea::both()
+        .id_salt("map_diff")
+        .max_height(560.0)
+        .show(ui, |ui| {
+            egui::Grid::new("map_diff_cells")
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(if base.dims() == 3 { "Y \\ X" } else { "X" })
+                            .monospace(),
+                    );
+                    for x in &base.x {
+                        ui.label(egui::RichText::new(num(*x)).monospace().strong());
+                    }
+                    ui.end_row();
+                    for j in 0..base.ny() {
+                        let head = if base.dims() == 3 {
+                            num(base.y[j])
+                        } else {
+                            "Z".into()
+                        };
+                        ui.label(egui::RichText::new(head).monospace().strong());
+                        for i in 0..base.nx() {
+                            let (a, b) = (base.at(i, j), other.at(i, j));
+                            let d = b - a;
+                            let mut t = if d == 0.0 || !d.is_finite() {
+                                egui::RichText::new(num(a)).monospace().weak()
+                            } else {
+                                egui::RichText::new(format!("{} → {}", num(a), num(b))).monospace()
+                            };
+                            if d != 0.0 && d.is_finite() && largest > 0.0 {
+                                let k = (40.0 + 160.0 * d.abs() / largest) as u8;
+                                let bg = if d > 0.0 {
+                                    Color32::from_rgb(k, 30, 30)
+                                } else {
+                                    Color32::from_rgb(30, 40, k)
+                                };
+                                t = t.background_color(bg).color(Color32::WHITE);
+                            }
+                            ui.label(t);
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
 }
 
 /// The numbers, with the cells the last lookup interpolated between marked.

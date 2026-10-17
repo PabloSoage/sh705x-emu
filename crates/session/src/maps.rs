@@ -112,7 +112,8 @@ fn plausible(a: u32) -> bool {
     (a as usize) < sh7059::ROM_SIZE || a >= sh7059::RAM_BASE
 }
 
-/// Big-endian reads from a memory seen a byte at a time.
+/// Big-endian reads from a memory seen a byte at a time. Addresses wrap as the CPU's do:
+/// a descriptor read from another file may point anywhere.
 struct Mem<'a>(&'a dyn Fn(u32) -> u8);
 
 impl Mem<'_> {
@@ -120,24 +121,26 @@ impl Mem<'_> {
         (self.0)(a)
     }
     fn u16(&self, a: u32) -> u16 {
-        u16::from_be_bytes([self.u8(a), self.u8(a + 1)])
+        u16::from_be_bytes([self.u8(a), self.u8(a.wrapping_add(1))])
     }
     fn u32(&self, a: u32) -> u32 {
-        (0..4).fold(0, |v, k| v << 8 | self.u8(a + k) as u32)
+        (0..4).fold(0, |v, k| v << 8 | self.u8(a.wrapping_add(k)) as u32)
     }
     fn f32(&self, a: u32) -> f32 {
         f32::from_bits(self.u32(a))
     }
     /// `n` axis points at `a`, if they are finite and never decrease.
     fn axis(&self, a: u32, n: u16) -> Option<Vec<f32>> {
-        let v: Vec<f32> = (0..n as u32).map(|k| self.f32(a + 4 * k)).collect();
+        let v: Vec<f32> = (0..n as u32)
+            .map(|k| self.f32(a.wrapping_add(4 * k)))
+            .collect();
         (v.iter().all(|x| x.is_finite()) && v.windows(2).all(|w| w[0] <= w[1])).then_some(v)
     }
     /// `n` cells of `cell` at `a`, in physical units.
     fn cells(&self, a: u32, n: u32, cell: Cell, scale: f32, offset: f32) -> Vec<f32> {
         (0..n)
             .map(|k| {
-                let at = a + k * cell.bytes();
+                let at = a.wrapping_add(k * cell.bytes());
                 let raw = match cell {
                     Cell::Float => return self.f32(at),
                     Cell::U8 => self.u8(at) as f32,
