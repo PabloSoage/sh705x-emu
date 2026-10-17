@@ -21,6 +21,8 @@ pub struct App {
     shared: Arc<Mutex<Snapshot>>,
     cmds: Sender<Cmd>,
     flash: Arc<Vec<u8>>,
+    /// The flash as loaded, before any cell was changed.
+    original: Arc<Vec<u8>>,
     breakpoints: Vec<u32>,
     tab: Tab,
     mem_text: String,
@@ -59,6 +61,7 @@ impl App {
         Self {
             shared,
             cmds,
+            original: flash.clone(),
             flash,
             breakpoints: Vec::new(),
             tab: Tab::Console,
@@ -83,6 +86,40 @@ impl App {
 
     fn send(&self, c: Cmd) {
         let _ = self.cmds.send(c);
+    }
+
+    /// Changes calibration bytes in the emulated ECU, and in this side's copy of the
+    /// flash and of the maps found in it, so the code view, the catalogue and a saved
+    /// flash show the change.
+    fn poke(&mut self, writes: Vec<(u32, u8)>) {
+        let flash = Arc::make_mut(&mut self.flash);
+        let mut touched = Vec::new();
+        for &(a, b) in &writes {
+            if let Some(x) = flash.get_mut(a as usize) {
+                *x = b;
+                touched.push(a);
+            }
+        }
+        if let Some(catalog) = self.catalog.as_mut() {
+            let flash = &self.flash;
+            let read = |a: u32| flash.get(a as usize).copied().unwrap_or(0);
+            for f in Arc::make_mut(catalog).iter_mut() {
+                let m = &f.map;
+                let end = m.z_at.wrapping_add(m.z.len() as u32 * m.cell.bytes());
+                if !touched.iter().any(|&a| a >= m.z_at && a < end) {
+                    continue;
+                }
+                let again = if m.dims() == 3 {
+                    session::maps::Map::read3d(&read, m.desc)
+                } else {
+                    session::maps::Map::read2d(&read, m.desc)
+                };
+                if let Some(again) = again {
+                    f.map = again;
+                }
+            }
+        }
+        self.send(Cmd::Poke(writes));
     }
 
     fn word(&self, addr: u32) -> Option<u16> {
@@ -316,6 +353,27 @@ impl App {
                     }
                     crate::mapview::Action::ReadCodes => self.send(Cmd::ReadCodes),
                     crate::mapview::Action::Texts(t) => self.send(Cmd::DescribeCodes(t)),
+                    crate::mapview::Action::Edit(writes) => self.poke(writes),
+                    crate::mapview::Action::Revert(spans) => {
+                        let mut writes = Vec::new();
+                        for (to, from, n) in spans {
+                            for k in 0..n {
+                                if let Some(&b) = self.original.get(from.wrapping_add(k) as usize) {
+                                    writes.push((to.wrapping_add(k), b));
+                                }
+                            }
+                        }
+                        self.poke(writes);
+                    }
+                    crate::mapview::Action::SaveFlash => {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .set_title("Save the changed flash")
+                            .set_file_name("flash-edited.bin")
+                            .save_file()
+                        {
+                            let _ = std::fs::write(path, self.flash.as_slice());
+                        }
+                    }
                 }
             }
             if !open {
@@ -947,6 +1005,70 @@ mod tests {
         let p = app.shared.lock().unwrap().plant.expect("the plants run");
         assert!((p.rpm - 750.0).abs() < 15.0, "{p:?}");
         assert!((p.torque - 12.0).abs() < 3.0, "{p:?}");
+        app.send(Cmd::Quit);
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn a_changed_map_is_what_the_firmware_reads() {
+        // The boost target, 10 % up in every cell: the lookups after the change give the
+        // new map's values, and the map shown is the new one.
+        const BOOST: u32 = 0x9DADC;
+        let Some((mut app, t)) = idling(2) else {
+            return;
+        };
+        app.send(Cmd::TraceMaps(true));
+        let seen = |app: &App| {
+            let s = app.shared.lock().unwrap();
+            let m = s.maps.as_ref()?.lock().unwrap();
+            m.seen.get(&BOOST).map(|x| (x.map.clone(), x.calls))
+        };
+        wait_for(&app.shared, |s| {
+            s.maps
+                .as_ref()
+                .is_some_and(|m| m.lock().unwrap().seen.contains_key(&BOOST))
+        });
+        let (map, calls) = seen(&app).unwrap();
+        let map = map.expect("the boost target reads as a map");
+        let mut writes = Vec::new();
+        for (k, z) in map.z.iter().enumerate() {
+            let bytes = crate::mapview::encode(&map, z * 1.1).expect("fits");
+            let at = map.z_at + k as u32 * map.cell.bytes();
+            writes.extend(
+                bytes
+                    .into_iter()
+                    .enumerate()
+                    .map(|(n, b)| (at + n as u32, b)),
+            );
+        }
+        app.poke(writes);
+        // A few more lookups, all made on the changed map.
+        let t0 = Instant::now();
+        let (new, _) = loop {
+            let (m, n) = seen(&app).unwrap();
+            if n > calls + 50 {
+                break (m.unwrap(), n);
+            }
+            assert!(t0.elapsed() < Duration::from_secs(60), "no more lookups");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        for (a, b) in map.z.iter().zip(&new.z) {
+            assert!(
+                (b - a * 1.1).abs() <= map.scale.abs() + a.abs() * 1e-3,
+                "{a} → {b}"
+            );
+        }
+        let s = app.shared.lock().unwrap();
+        let tr = s.maps.as_ref().unwrap().lock().unwrap();
+        let last = tr.recent.iter().rev().find(|c| c.r4 == BOOST).unwrap();
+        let want = new.interpolate(last.fr4, last.fr5);
+        assert!(
+            (want - last.fr0).abs() <= 1e-3 * want.abs().max(1.0),
+            "the firmware read {} where the changed map gives {want}",
+            last.fr0
+        );
+        drop(tr);
+        drop(s);
         app.send(Cmd::Quit);
         t.join().unwrap();
     }

@@ -405,6 +405,19 @@ impl Sh7059 {
         }
     }
 
+    /// Writes a byte of the flash image, for a tool changing calibration data: nothing is
+    /// traced or watched, and code already decoded from that address is not decoded
+    /// again. Returns false (and writes nothing) outside the flash.
+    pub fn poke_rom(&mut self, addr: u32, value: u8) -> bool {
+        match region(addr) {
+            Region::Rom(o) => {
+                self.rom[o] = value;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// The PWM output of ATU-II channel 6 or 7 (`ch` = 0 or 1), timer `k` (0 = A .. 3 =
     /// D), as a waveform, if that timer is running.
     pub fn pwm_wave(&self, ch: usize, k: usize) -> Option<atu::Wave> {

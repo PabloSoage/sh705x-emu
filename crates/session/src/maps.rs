@@ -581,6 +581,33 @@ impl MapTrace {
         out
     }
 
+    /// Reads again every map seen whose axes or cells hold one of `written`: after a tool
+    /// changed calibration data, so the map shown and the lookups checked against it are
+    /// the new ones.
+    pub fn reread(&mut self, chip: &sh7059::Sh7059, written: &[u32]) {
+        let read = |a: u32| chip.peek(a);
+        for (&desc, s) in self.seen.iter_mut() {
+            let Some(map) = &s.map else { continue };
+            let span = |at: u32, n: usize, w: u32| (at, at.wrapping_add(n as u32 * w));
+            let ranges = [
+                span(map.x_at, map.nx(), 4),
+                span(map.y_at, map.y.len(), 4),
+                span(map.z_at, map.z.len(), map.cell.bytes()),
+            ];
+            if !written
+                .iter()
+                .any(|&a| ranges.iter().any(|&(lo, hi)| a >= lo && a < hi))
+            {
+                continue;
+            }
+            s.map = if map.dims() == 3 {
+                Map::read3d(&read, desc)
+            } else {
+                Map::read2d(&read, desc)
+            };
+        }
+    }
+
     /// Takes the lookups `m` has made since the last time.
     pub fn take(&mut self, m: &mut Machine) {
         let Some(p) = m.probes.as_deref_mut() else {

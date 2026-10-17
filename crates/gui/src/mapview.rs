@@ -120,6 +120,12 @@ pub struct MapView {
     other: Option<Other>,
     /// Each map as read in the compared file, worked out once.
     diffs: BTreeMap<u32, Option<Diff>>,
+    /// The cell chosen for editing: map, column, row.
+    cell: Option<(u32, usize, usize)>,
+    /// What is typed for it.
+    cell_text: String,
+    /// The cells changed in this session, by map.
+    edited: BTreeMap<u32, std::collections::BTreeSet<usize>>,
 }
 
 impl MapView {
@@ -150,6 +156,9 @@ impl Default for MapView {
             faults: Default::default(),
             other: None,
             diffs: BTreeMap::new(),
+            cell: None,
+            cell_text: String::new(),
+            edited: BTreeMap::new(),
         }
     }
 }
@@ -208,6 +217,44 @@ pub enum Action {
     ReadCodes,
     /// Descriptions of fault codes to add, by code.
     Texts(BTreeMap<String, String>),
+    /// Write these bytes into the emulated ECU (flash or RAM): a changed cell.
+    Edit(Vec<(u32, u8)>),
+    /// Put back the loaded flash's bytes: (where, from where in the flash, how many).
+    Revert(Vec<(u32, u32, u32)>),
+    /// Save the flash as it is now, edits included.
+    SaveFlash,
+}
+
+/// The bytes that store `v` in one of `map`'s cells, if it fits its format.
+pub(crate) fn encode(map: &Map, v: f32) -> Result<Vec<u8>, String> {
+    use session::maps::Cell;
+    if !v.is_finite() {
+        return Err("not a number".into());
+    }
+    let (lo, hi, bytes) = match map.cell {
+        Cell::Float => return Ok(v.to_bits().to_be_bytes().to_vec()),
+        Cell::U8 => (0.0, 255.0, 1),
+        Cell::S8 => (-128.0, 127.0, 1),
+        Cell::U16 => (0.0, 65535.0, 2),
+        Cell::S16 => (-32768.0, 32767.0, 2),
+    };
+    if map.scale == 0.0 {
+        return Err("the cells have no scale".into());
+    }
+    let raw = ((v - map.offset) / map.scale).round();
+    if raw < lo || raw > hi {
+        return Err(format!(
+            "out of range: {} to {}",
+            num(map.offset + lo * map.scale),
+            num(map.offset + hi * map.scale)
+        ));
+    }
+    let r = raw as i64;
+    Ok(if bytes == 1 {
+        vec![r as u8]
+    } else {
+        (r as u16).to_be_bytes().to_vec()
+    })
 }
 
 /// Lookups shown as the trail of where the firmware has been on a map.
@@ -729,7 +776,15 @@ fn detail(
                 }
             }
         }
-        (Mode::Table, _) => table(ui, map, now),
+        (Mode::Table, _) => {
+            editor(ui, desc, e, map, v, actions);
+            let sel = v.cell.filter(|c| c.0 == desc).map(|c| (c.1, c.2));
+            let edited = v.edited.get(&desc).cloned().unwrap_or_default();
+            if let Some((i, j)) = table(ui, map, now, sel, &edited) {
+                v.cell = Some((desc, i, j));
+                v.cell_text = map.at(i, j).to_string();
+            }
+        }
         (_, 2) => curve(ui, map, now, &trail),
         (Mode::Surface, _) => surface(ui, map, now, v),
         _ => heat_map(ui, map, now, &trail),
@@ -1256,8 +1311,103 @@ fn diff_table(ui: &mut egui::Ui, base: &Map, other: &Map) {
         });
 }
 
-/// The numbers, with the cells the last lookup interpolated between marked.
-fn table(ui: &mut egui::Ui, map: &Map, now: (f32, f32, f32)) {
+/// Changing a cell of the map in the emulated ECU: its flash image and, when the firmware
+/// reads the map from RAM, that copy too. Only the emulator's memory changes.
+fn editor(
+    ui: &mut egui::Ui,
+    desc: u32,
+    e: &Entry,
+    map: &Map,
+    v: &mut MapView,
+    actions: &mut Vec<Action>,
+) {
+    // Where the cells are: in the flash, and where the firmware reads them if elsewhere.
+    let stored = e.stored().unwrap_or(map);
+    let mut places = vec![stored.z_at];
+    if map.z_at != stored.z_at {
+        places.push(map.z_at);
+    }
+    let width = map.cell.bytes();
+    ui.horizontal_wrapped(|ui| {
+        match v.cell.filter(|c| c.0 == desc) {
+            Some((_, i, j)) => {
+                ui.label(if map.dims() == 3 {
+                    format!("Cell X {}, Y {}:", num(map.x[i]), num(map.y[j]))
+                } else {
+                    format!("Point X {}:", num(map.x[i]))
+                });
+                let r = ui.add(egui::TextEdit::singleline(&mut v.cell_text).desired_width(80.0));
+                let enter = r.lost_focus() && ui.input(|k| k.key_pressed(egui::Key::Enter));
+                if ui.button("Set").clicked() || enter {
+                    let k = j * map.nx() + i;
+                    match v.cell_text.trim().replace(',', ".").parse::<f32>() {
+                        Ok(x) => match encode(map, x) {
+                            Ok(bytes) => {
+                                let mut writes = Vec::new();
+                                for &at in &places {
+                                    let a = at.wrapping_add(k as u32 * width);
+                                    for (n, &b) in bytes.iter().enumerate() {
+                                        writes.push((a.wrapping_add(n as u32), b));
+                                    }
+                                }
+                                actions.push(Action::Edit(writes));
+                                v.edited.entry(desc).or_default().insert(k);
+                                v.diffs.remove(&desc);
+                                v.note = None;
+                            }
+                            Err(why) => v.note = Some(why),
+                        },
+                        Err(_) => v.note = Some("not a number".into()),
+                    }
+                }
+            }
+            None => {
+                ui.label(
+                    egui::RichText::new("Click a cell to change it in the emulated ECU.").weak(),
+                );
+            }
+        }
+        if v.edited.contains_key(&desc) {
+            ui.separator();
+            if ui
+                .button("Revert this map")
+                .on_hover_text("Its cells as in the flash loaded")
+                .clicked()
+            {
+                let len = map.z.len() as u32 * width;
+                actions.push(Action::Revert(
+                    places.iter().map(|&at| (at, stored.z_at, len)).collect(),
+                ));
+                v.edited.remove(&desc);
+                v.diffs.remove(&desc);
+            }
+        }
+        if !v.edited.is_empty() {
+            ui.separator();
+            if ui
+                .button("Save flash as…")
+                .on_hover_text(
+                    "The flash with the changes, to your disk. Its checksum is not recomputed: \
+                     for the emulator and for study, not for an ECU.",
+                )
+                .clicked()
+            {
+                actions.push(Action::SaveFlash);
+            }
+        }
+    });
+}
+
+/// The numbers, with the cells the last lookup interpolated between marked, the chosen
+/// cell outlined and the changed ones underlined. Returns the cell clicked.
+fn table(
+    ui: &mut egui::Ui,
+    map: &Map,
+    now: (f32, f32, f32),
+    sel: Option<(usize, usize)>,
+    edited: &std::collections::BTreeSet<usize>,
+) -> Option<(usize, usize)> {
+    let mut clicked = None;
     let near = |axis: &[f32], v: f32| {
         let p = Map::position(axis, v);
         let i = p.floor() as usize;
@@ -1297,10 +1447,19 @@ fn table(ui: &mut egui::Ui, map: &Map, now: (f32, f32, f32)) {
                                 .background_color(Color32::from_rgb(90, 80, 20))
                                 .color(Color32::WHITE);
                         }
-                        ui.label(t);
+                        if edited.contains(&(j * map.nx() + i)) {
+                            t = t.underline().color(Color32::from_rgb(230, 150, 60));
+                        }
+                        if sel == Some((i, j)) {
+                            t = t.background_color(Color32::from_rgb(40, 90, 150));
+                        }
+                        if ui.add(egui::Label::new(t).sense(Sense::click())).clicked() {
+                            clicked = Some((i, j));
+                        }
                     }
                     ui.end_row();
                 }
             });
         });
+    clicked
 }

@@ -68,6 +68,9 @@ pub enum Cmd {
     ReadCodes,
     /// Descriptions of fault codes, by code.
     DescribeCodes(std::collections::BTreeMap<String, String>),
+    /// Write these bytes, each in the flash or the RAM where its address is: a tool
+    /// changing calibration data, never the car.
+    Poke(Vec<(u32, u8)>),
     /// Load a plugin: its module, and the file it came from.
     LoadPlugin(Vec<u8>, String),
     /// Unload the plugin at this index.
@@ -224,6 +227,19 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
                     });
                 }
                 Cmd::UnloadPlugin(i) => ecu.plugins.unload(i),
+                Cmd::Poke(bytes) => {
+                    for &(a, v) in &bytes {
+                        if !ecu.m.chip.poke_rom(a, v) {
+                            ecu.m.chip.poke_ram(a, v);
+                        }
+                    }
+                    if let Some(t) = &ecu.maps {
+                        let written: Vec<u32> = bytes.iter().map(|b| b.0).collect();
+                        t.lock()
+                            .expect("map trace lock")
+                            .reread(&ecu.m.chip, &written);
+                    }
+                }
                 Cmd::Adc(c, v) => ecu.m.chip.adc.input[c] = v,
                 Cmd::Sensor(k, v) => {
                     let _ = ecu.set_sensor(k, v);
