@@ -48,7 +48,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "android"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "board",
  "bridge",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "board"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "sh2e",
  "sh7059",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "bridge"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "sh7059",
 ]
@@ -657,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "engine"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "sh7059",
 ]
@@ -999,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "gui"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "board",
  "bridge",
@@ -1139,7 +1139,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "j2534"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "bridge",
  "sh7059",
@@ -1917,7 +1917,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plugins"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "serde_json",
  "sh7059",
@@ -2345,7 +2345,7 @@ dependencies = [
 
 [[package]]
 name = "session"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "board",
  "bridge",
@@ -2357,18 +2357,18 @@ dependencies = [
 
 [[package]]
 name = "sh2e"
-version = "0.4.2"
+version = "0.4.3"
 
 [[package]]
 name = "sh7059"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "sh2e",
 ]
 
 [[package]]
 name = "sh705x"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "board",
  "bridge",
