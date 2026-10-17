@@ -682,6 +682,23 @@ fn detail(
             ui.selectable_value(&mut v.mode, Mode::Surface, "Surface");
         }
         ui.selectable_value(&mut v.mode, Mode::Table, "Table");
+        ui.separator();
+        if ui
+            .button("Copy")
+            .on_hover_text("The map as text with tabs, to paste into a spreadsheet")
+            .clicked()
+        {
+            ui.ctx().copy_text(as_text(map, '\t'));
+        }
+        if ui.button("Save CSV…").clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .set_title("Save the map")
+                .set_file_name(format!("map_{desc:06X}.csv"))
+                .save_file()
+            && let Err(e) = std::fs::write(&path, as_text(map, ','))
+        {
+            v.note = Some(e.to_string());
+        }
         if v.other.is_some() {
             ui.selectable_value(&mut v.mode, Mode::Diff, "Differences")
                 .on_hover_text("Each cell as this flash has it → as the compared file has it");
@@ -1149,6 +1166,37 @@ fn thin_line(mesh: &mut egui::Mesh, a: Pos2, b: Pos2, width: f32, colour: Color3
     }
     mesh.add_triangle(base, base + 1, base + 2);
     mesh.add_triangle(base, base + 2, base + 3);
+}
+
+/// The map as rows of text: the X axis on top and, for a map, the Y axis down the left.
+fn as_text(map: &Map, sep: char) -> String {
+    let mut out = String::new();
+    let row = |out: &mut String, head: String, cells: Vec<f32>| {
+        out.push_str(&head);
+        for c in cells {
+            out.push(sep);
+            out.push_str(&c.to_string());
+        }
+        out.push('\n');
+    };
+    row(
+        &mut out,
+        if map.dims() == 3 { "Y\\X" } else { "X" }.into(),
+        map.x.clone(),
+    );
+    for j in 0..map.ny() {
+        let head = if map.dims() == 3 {
+            map.y[j].to_string()
+        } else {
+            "Z".into()
+        };
+        row(
+            &mut out,
+            head,
+            (0..map.nx()).map(|i| map.at(i, j)).collect(),
+        );
+    }
+    out
 }
 
 /// The numbers of two files side by side: each cell as `this → other`, on red where the
