@@ -298,7 +298,10 @@ impl Channel {
             }
             return (vec![], None);
         }
-        // ISO 15765: only through a flow-control filter.
+        // ISO 15765: segmented traffic through a flow-control filter. A frame no
+        // flow-control filter claims can still come through a pass filter, raw, the
+        // way GMLAN's periodic answers ($AA on 0x5E8 and alike) arrive next to
+        // the ISO-TP traffic of the same module.
         let mut full = head.clone();
         full.extend(&f.data);
         let Some(filter) = self
@@ -308,6 +311,15 @@ impl Channel {
             .find(|x| x.kind == FLOW_CONTROL_FILTER && x.matches(&full))
             .cloned()
         else {
+            if self.passes(&full) {
+                self.push(Msg {
+                    protocol: ISO15765,
+                    rx_status: ext_id,
+                    timestamp: now,
+                    data: full,
+                    ..Msg::default()
+                });
+            }
             return (vec![], None);
         };
         let ext = filter.extended_addressing();
