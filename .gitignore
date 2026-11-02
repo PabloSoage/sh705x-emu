@@ -21,3 +21,6 @@ keystore/
 *.jks
 *.keystore
 keystore.properties
+
+# Local, machine-specific agent context (never public)
+CLAUDE.local.md
