@@ -1,0 +1,16 @@
+# Standalone workspace: a build-it-yourself tool, deliberately NOT a member of the main
+# workspace, so it is never built into the released binaries. Build it yourself to use it
+# (see README.md).
+[workspace]
+
+[package]
+name = "injection-scenarios"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+sh7059 = { path = "../crates/sh7059" }
+engine = { path = "../crates/engine" }
+board = { path = "../crates/board" }
+bridge = { path = "../crates/bridge" }
