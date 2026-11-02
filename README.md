@@ -131,6 +131,7 @@ second, which makes it a reference oracle rather than an emulator.
 | `plugins/` | Writing plugins: the Rust SDK (`sh705x-plugin`), an example, and the guide |
 | `crates/android` | The Android app's native side: the ECU on its own thread behind a JNI bridge (`libsh705x_jni.so`) |
 | `android/` | The Android app: Kotlin and Compose, the engine view on a phone |
+| `rp2040/` | The SH-2E core on a Raspberry Pi RP2040: a bare-metal `no_std` port and its on-board benchmarks |
 | `tools/bench.py` | Interleaved speed comparison of builds |
 | `tools/gen_curves.py` | Generates `crates/engine/src/curves.rs` from a sweep of the A/D inputs |
 | `tools/ghidra/EmuBoot.py` | Phase 0: runs a raw flash image from its reset vector in Ghidra's p-code emulator, logs every I/O access and resolves status-bit polls automatically |

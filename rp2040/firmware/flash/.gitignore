@@ -1,0 +1,3 @@
+# Your own SH7059 flash image goes here for `--features real-boot`.
+# It is never committed.
+*.bin

@@ -1,0 +1,4 @@
+target/
+*.uf2
+*.elf
+*.bin

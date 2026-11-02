@@ -1,0 +1,33 @@
+# Standalone workspace: this is a bare-metal thumbv6m crate, not a member of the
+# repository's host workspace (which builds for the host and excludes no_std targets).
+[workspace]
+
+[package]
+name = "sh705x-rp2040"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[features]
+# Off by default: the default build runs only the synthetic SH-2/SH-2E benchmarks,
+# which need no firmware image and are reproducible by anyone. Turn it on to also run
+# a real ECU flash image you supply yourself (see flash/README.md); no image ships here.
+default = []
+real-boot = []
+
+[dependencies]
+cortex-m = "0.7.7"
+cortex-m-rt = "0.7.5"
+rp2040-hal = { version = "0.10.2", features = ["rt", "critical-section-impl"] }
+rp2040-boot2 = "0.3.0"
+panic-halt = "1.0.0"
+usb-device = "0.3.2"
+usbd-serial = "0.2.2"
+embedded-hal = "0.2.7"
+nb = "1.1.0"
+
+[profile.release]
+panic = "abort"
+lto = "fat"
+opt-level = 3
+codegen-units = 1
