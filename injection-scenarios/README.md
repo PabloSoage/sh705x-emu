@@ -14,7 +14,7 @@ it yourself to use it.
 The firmware only computes an off-idle torque/fuel path once it believes the engine is
 running. The emulator has no body-control module in front of the ECU, so this tool sets the
 engine-state flags a running car would carry — **engine running, fuelling enabled, in gear**
-(`runner.rs`, `addrs`) — and then sweeps the operating point. That stands in for a running
+(`runner.rs`, `Addrs`) — and then sweeps the operating point. That stands in for a running
 engine; it is not a bypass of any vehicle security function, and none is modelled here.
 
 Because only those engine-state flags are held, a few operating points can still hit a
@@ -35,6 +35,10 @@ $BIN dyno     --flash flash.bin --start 1400 --end 4200 --gear 4
 ```
 
 `--flash` points at a flash image you own (default `./flash.bin`); no image ships here.
+The RAM addresses the tool reads and sets depend on the software release, which is read from
+the image (0xC0000): AX36NCLSW420 and AX39NCLSW440 share one layout; AZ07NCLNP030 and
+AZ03NCLNP000 have their own (net torque not located there, printed as n/a). Any other
+release is refused instead of returning zeros.
 `--compare <other.bin>` adds a second image to `grid` and `dyno` and prints the difference.
 
 ## What it reports
