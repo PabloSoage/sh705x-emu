@@ -11,6 +11,7 @@
 use crate::actuators::{Egr, Solenoid};
 use crate::crank::Crank;
 use crate::sensors::{Input, MAF_KEY, input, maf_hz};
+use crate::software::Software;
 use crate::turbo::Turbo;
 use sh7059::Machine;
 
@@ -26,27 +27,38 @@ pub struct Wiring {
     pub egr_open: (usize, usize),
     /// The half that closes it.
     pub egr_close: (usize, usize),
-    /// The firmware's net torque, N·m (what 0x1A2D reports).
-    pub torque_at: u32,
-    /// The fuel per stroke it asks for, mm³.
-    pub quantity_at: u32,
+    /// The firmware's net torque, N·m (what 0x1A2D reports), where its release is known.
+    pub torque_at: Option<u32>,
+    /// The fuel per stroke it asks for, mm³, where its release is known.
+    pub quantity_at: Option<u32>,
 }
 
-/// The Astra J's (A17DTJ, software NCLSW420AX36), found in its firmware [MED]:
+/// The outputs of the Astra J's board (A17DTJ), found in its firmware NCLSW420AX36 [MED],
+/// with no release's variables (see [`Wiring::of`]):
 /// - the SCV on 6A: the firmware writes its command (0x323D, `FFFEF9C0`, % on-time) there,
 ///   with a period it varies (`0xC4A4`);
 /// - the VGT on 7A, which carries the vane command 0x2041 reports (`FFFEFDDC`);
-/// - the EGR's H-bridge: a positive command on 7D, a negative one on 7C (`0xB76C`);
-/// - the torque and quantity where `sh705x plant` checks them against diagnostics
-///   (resultados fases 8 and 9).
+/// - the EGR's H-bridge: a positive command on 7D, a negative one on 7C (`0xB76C`).
 pub const ASTRA: Wiring = Wiring {
     scv: (0, 0),
     vgt: (1, 0),
     egr_open: (1, 3),
     egr_close: (1, 2),
-    torque_at: 0xFFFE_FC4C,
-    quantity_at: 0xFFFE_F8F4,
+    torque_at: None,
+    quantity_at: None,
 };
+
+impl Wiring {
+    /// The Astra's board running `software`; without its variables if it is not a release
+    /// known, so that the plants never read another release's.
+    pub fn of(software: Option<&Software>) -> Self {
+        Self {
+            torque_at: software.map(|s| s.ram.torque),
+            quantity_at: software.map(|s| s.ram.quantity),
+            ..ASTRA
+        }
+    }
+}
 
 /// A big-endian float in the chip's memory.
 pub fn f32_at(m: &Machine, addr: u32) -> f64 {
@@ -73,9 +85,9 @@ pub struct State {
     pub maf: f64,
     /// Manifold pressure, kPa: the resting value plus the turbocharger's boost.
     pub boost: f64,
-    /// The firmware's net torque, N·m.
+    /// The firmware's net torque, N·m; NaN where its variable is not known.
     pub torque: f64,
-    /// The fuel per stroke it asks for, mm³.
+    /// The fuel per stroke it asks for, mm³; NaN where its variable is not known.
     pub quantity: f64,
 }
 
@@ -109,7 +121,7 @@ pub struct Plants {
 
 impl Plants {
     /// The plants of `wiring`, the engine at `rpm` (turning on the firmware's torque if
-    /// `crank` is given, from `rpm`), the manifold at `rest_kpa` with no boost and
+    /// `crank` is given and the torque is known, from `rpm`), the manifold at `rest_kpa` with no boost and
     /// `intake_c`.
     pub fn new(
         wiring: Wiring,
@@ -118,6 +130,7 @@ impl Plants {
         rest_kpa: f64,
         intake_c: f64,
     ) -> Self {
+        let crank = crank.filter(|_| wiring.torque_at.is_some());
         Self {
             wiring,
             rpm: crank.as_ref().map_or(rpm, |c| c.rpm),
@@ -138,8 +151,9 @@ impl Plants {
     /// drives now, and feeds them back to its inputs.
     pub fn step(&mut self, m: &mut Machine, dt: f64) -> State {
         let w = self.wiring;
-        let torque = f32_at(m, w.torque_at);
-        let quantity = f32_at(m, w.quantity_at);
+        let read = |m: &Machine, at: Option<u32>| at.map_or(f64::NAN, |a| f32_at(m, a));
+        let torque = read(m, w.torque_at);
+        let quantity = read(m, w.quantity_at);
         if let Some(c) = self.crank.as_mut().filter(|_| !self.held) {
             let was = self.rpm;
             self.rpm = c.step(torque, dt);
@@ -155,9 +169,11 @@ impl Plants {
         let egr = self.egr.step(egr_drive, dt);
         m.chip.adc.input[self.scv_in.channel] = self.scv_in.code(self.scv.milliamps());
         m.chip.adc.input[self.egr_in.channel] = self.egr_in.code(egr);
-        // The turbine on the fuel the firmware asks for, with its vanes where it puts them.
+        // The turbine on the fuel the firmware asks for, with its vanes where it puts them;
+        // no boost where the fuel is not known.
+        let burnt = w.quantity_at.map_or(0.0, |_| quantity);
         let vgt = vgt_duty.unwrap_or(0.0) * 100.0;
-        let boost = self.rest_kpa + self.turbo.step(self.rpm, quantity, vgt, dt);
+        let boost = self.rest_kpa + self.turbo.step(self.rpm, burnt, vgt, dt);
         m.chip.adc.input[self.boost_in.channel] = self.boost_in.code(boost);
         let maf = if self.rpm > 0.0 {
             let g = crate::air::fresh_air_g_per_s(self.rpm, boost, self.intake_c, egr);

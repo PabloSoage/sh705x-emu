@@ -5,7 +5,8 @@
 //! rotating mass under the firmware's torque ([`crank`]); the air it draws ([`air`]); the
 //! analog sensors as A/D codes from physical values ([`sensors`]); the SCV and EGR
 //! actuators ([`actuators`]); the turbocharger ([`turbo`]); and other nodes on the CAN
-//! bus sending their periodic frames ([`bus`]). Planned: the rail.
+//! bus sending their periodic frames ([`bus`]). [`software`] says where each firmware
+//! release known keeps what they read. Planned: the rail.
 
 pub mod actuators;
 pub mod air;
@@ -14,5 +15,6 @@ pub mod crank;
 pub mod curves;
 pub mod plants;
 pub mod sensors;
+pub mod software;
 pub mod turbo;
 pub mod wheel;

@@ -496,9 +496,14 @@ impl App {
                             "And the engine turns on the firmware's torque against the idling car's load",
                         ),
                     ] {
+                        // Its torque is only known on the releases known.
                         if ui
-                            .selectable_label(s.plant_mode == mode, name)
+                            .add_enabled_ui(s.known || mode != PlantMode::Turning, |ui| {
+                                ui.selectable_label(s.plant_mode == mode, name)
+                            })
+                            .inner
                             .on_hover_text(tip)
+                            .on_disabled_hover_text("Where this firmware release keeps its torque is not known")
                             .clicked()
                             && s.plant_mode != mode
                         {
@@ -508,11 +513,12 @@ impl App {
                 });
                 if let Some(p) = &s.plant {
                     let vgt = p.vgt_duty.unwrap_or(0.0) * 100.0;
+                    let known = |v: f64, text: String| if v.is_nan() { "-".into() } else { text };
                     egui::Grid::new("plant").show(ui, |ui| {
                         for row in [
                             [
-                                ("torque", format!("{:.1} N·m", p.torque)),
-                                ("fuel", format!("{:.2} mm3", p.quantity)),
+                                ("torque", known(p.torque, format!("{:.1} N·m", p.torque))),
+                                ("fuel", known(p.quantity, format!("{:.2} mm3", p.quantity))),
                             ],
                             [
                                 ("boost", format!("{:.1} kPa", p.boost)),

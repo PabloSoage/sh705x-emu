@@ -524,6 +524,11 @@ and 5.2 g/s of fresh air: what the car reports standing still. With the car's EE
 the firmware also checks the immobilizer, and its reaction raises the idle to 1000 rpm;
 the trace shows the target it aims at.
 
+The plants read the firmware's torque and fuel from its RAM, and each release keeps them
+elsewhere, so they need a release they know: `NCLSW420AX36` (the car's), `NCLSW440AX39`,
+`NCLNP000AZ03` or `NCLNP030AZ07`. On any other, `plant` says so, the other commands leave
+out what they cannot read, and the turbocharger gives no boost.
+
 ### Tests
 
 ```sh

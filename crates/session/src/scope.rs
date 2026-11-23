@@ -3,6 +3,7 @@
 //! (where the injectors are). Kept apart from any snapshot, so a frame does not copy it.
 
 use engine::plants::{State, f32_at};
+use engine::software::{Ram, Software};
 use sh7059::Machine;
 use std::collections::VecDeque;
 
@@ -78,12 +79,6 @@ pub const TRACES: [Trace; 15] = [
     },
 ];
 
-/// Where the firmware keeps its setpoints in RAM, as floats (NCLSW420AX36) [MED].
-const EGR_ASKED_AT: u32 = 0xFFFF_1370;
-const BOOST_ASKED_AT: u32 = 0xFFFE_FE84;
-const SCV_ASKED_AT: u32 = 0xFFFE_F9DC;
-const RAIL_ASKED_AT: u32 = 0xFFFE_F924;
-
 /// One moment.
 #[derive(Clone, Copy, Debug)]
 pub struct Sample {
@@ -119,10 +114,12 @@ const PER_US: f64 = 80.0;
 
 impl Scope {
     /// Takes a sample of `m` if enough ECU time has gone by (or any, with `stepping`), with
-    /// the plants' last step if they run, else what the engine is set to.
+    /// the plants' last step if they run, else what the engine is set to. What the
+    /// firmware asks for is shown if `software` is known.
     pub fn take(
         &mut self,
         m: &Machine,
+        software: Option<&Software>,
         plant: Option<&State>,
         engine: &crate::Engine,
         stepping: bool,
@@ -148,7 +145,7 @@ impl Scope {
         }
         self.last = Some(now);
         let sensor = |k: &str| engine.sensor(k).unwrap_or(f64::NAN);
-        let ram = |a| f32_at(m, a);
+        let ram = |at: fn(&Ram) -> u32| software.map_or(f64::NAN, |s| f32_at(m, at(&s.ram)));
         let duty = |ch, k| m.chip.pwm_duty(ch, k).map_or(f64::NAN, |d| d * 100.0);
         let egr_drive = {
             let w = engine::plants::ASTRA;
@@ -158,20 +155,20 @@ impl Scope {
         };
         let v = [
             plant.map_or(engine.rpm, |p| p.rpm),
-            ram(EGR_ASKED_AT),
+            ram(|r| r.egr_asked),
             plant.map_or(sensor("egr"), |p| p.egr),
             egr_drive,
-            ram(BOOST_ASKED_AT),
+            ram(|r| r.boost_asked),
             plant.map_or(sensor("boost"), |p| p.boost),
             duty(1, 0),
-            ram(SCV_ASKED_AT),
+            ram(|r| r.scv_asked),
             plant.map_or(f64::NAN, |p| p.scv_ma),
             duty(0, 0),
-            ram(RAIL_ASKED_AT),
+            ram(|r| r.rail_asked),
             sensor("rail"),
             plant.map_or(sensor("maf"), |p| p.maf),
-            ram(engine::plants::ASTRA.quantity_at),
-            ram(engine::plants::ASTRA.torque_at),
+            ram(|r| r.quantity),
+            ram(|r| r.torque),
         ];
         self.samples.push_back(Sample {
             us: now as f64 / PER_US,

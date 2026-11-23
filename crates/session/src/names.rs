@@ -2,18 +2,19 @@
 //! input, and the maps themselves.
 //!
 //! Some come with the emulator: what this project found in one calibration
-//! ([`Names::builtin`], only when the flash is that calibration), and the sensors, found by
+//! ([`Names::builtin`], only when the flash is that release or another one known), and the sensors, found by
 //! moving each one and seeing which variable follows ([`crate::Session::find_sensors`]).
 //! The rest are loaded from the user's own files at run time and never ship with the
 //! emulator: an opendash parameter profile, matched against RAM by asking the emulated
 //! ECU for each identifier ([`crate::Session::find_identifiers`]), and map labels.
 
+use engine::software::Software;
 use std::collections::BTreeMap;
 
 /// How a name was found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum How {
-    /// Known for this calibration from this project's own work.
+    /// Known for this release from this project's own work.
     Calibration,
     /// A sensor moved and this variable followed it.
     Sensor,
@@ -61,29 +62,30 @@ pub struct Names {
     pub maps: BTreeMap<u32, Name>,
 }
 
-/// The Astra J's calibration, as its flash names itself.
+/// The Astra J's release, as its flash names itself.
 pub const ASTRA: &str = "NCLSW420AX36";
 
 impl Names {
-    /// The names known for the calibration `id` (as found in the flash by
-    /// [`calibration`]): this project's findings for the Astra J's NCLSW420AX36
-    /// (`Denso_SH705x` 18, and resultados fases 8, 9 and 11); none for another.
-    pub fn builtin(id: Option<&str>) -> Self {
+    /// The names known for `software`: this project's findings for the Astra J's
+    /// NCLSW420AX36 (`Denso_SH705x` 18, and resultados fases 8, 9 and 11), and the same
+    /// variables where the other releases known keep them (the routines are at the same
+    /// addresses in all); none for another.
+    pub fn builtin(software: Option<&Software>) -> Self {
         let mut n = Self::default();
-        if id != Some(ASTRA) {
+        let Some(r) = software.map(|s| s.ram) else {
             return n;
-        }
+        };
         let c = How::Calibration;
         for (a, text, unit) in [
-            (0xFFFE_B7E4, "engine speed", "rpm"),
-            (0xFFFE_FC4C, "torque asked", "N·m"),
-            (0xFFFE_F8F4, "fuel asked per stroke", "mm³"),
-            (0xFFFF_1370, "EGR asked", "%"),
-            (0xFFFE_FE84, "boost asked", "kPa"),
-            (0xFFFE_F9DC, "SCV current asked", "mA"),
-            (0xFFFE_F924, "rail pressure asked", "MPa"),
-            (0xFFFE_F9C0, "SCV command", "%"),
-            (0xFFFE_FDDC, "VGT command", "%"),
+            (r.rpm, "engine speed", "rpm"),
+            (r.torque, "torque asked", "N·m"),
+            (r.quantity, "fuel asked per stroke", "mm³"),
+            (r.egr_asked, "EGR asked", "%"),
+            (r.boost_asked, "boost asked", "kPa"),
+            (r.scv_asked, "SCV current asked", "mA"),
+            (r.rail_asked, "rail pressure asked", "MPa"),
+            (r.scv_command, "SCV command", "%"),
+            (r.vgt_command, "VGT command", "%"),
         ] {
             n.vars.insert(a, Name::new(text, unit, c.clone()));
         }
@@ -110,13 +112,6 @@ impl Names {
             self.maps.entry(a).or_insert(v);
         }
     }
-}
-
-/// The calibration a flash names itself, if it carries one of the known ones.
-pub fn calibration(flash: &[u8]) -> Option<&'static str> {
-    [ASTRA]
-        .into_iter()
-        .find(|id| flash.windows(id.len()).any(|w| w == id.as_bytes()))
 }
 
 /// One parameter of a profile: an identifier and how its bytes become a value.
@@ -239,6 +234,7 @@ pub fn read_labels(text: &str) -> BTreeMap<u32, Name> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::software::KNOWN;
 
     #[test]
     fn a_profile_reads_as_opendash_writes_it() {
@@ -268,11 +264,14 @@ mod tests {
 
     #[test]
     fn builtin_names_are_only_for_their_calibration() {
-        assert!(Names::builtin(Some(ASTRA)).vars.contains_key(&0xFFFE_B7E4));
+        let vars = |id: &str| {
+            let s = KNOWN.iter().find(|s| s.id == id);
+            assert!(s.is_some(), "{id}");
+            Names::builtin(s).vars
+        };
+        assert!(vars(ASTRA).contains_key(&0xFFFE_B7E4));
+        let az07 = vars("NCLNP030AZ07");
+        assert!(az07.contains_key(&0xFFFE_B944) && !az07.contains_key(&0xFFFE_B7E4));
         assert!(Names::builtin(None).vars.is_empty());
-        let mut flash = vec![0u8; 64];
-        flash[10..22].copy_from_slice(ASTRA.as_bytes());
-        assert_eq!(calibration(&flash), Some(ASTRA));
-        assert_eq!(calibration(&[0u8; 64]), None);
     }
 }

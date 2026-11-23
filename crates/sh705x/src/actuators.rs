@@ -13,6 +13,8 @@
 
 use crate::rig::Rig;
 use crate::{EcuOptions, f32_at};
+use engine::software::Ram;
+use sh7059::Machine;
 use std::fmt::Write as _;
 
 /// Options of `sh705x actuators`.
@@ -28,15 +30,6 @@ pub struct ActuatorsOptions {
 
 /// The plants' step, milliseconds.
 const PLANT_MS: u64 = 1;
-
-/// Where the firmware keeps the SCV current it asks for, mA: the setpoint its current
-/// loop on 6A closes onto (found as the float the measured current settles at, beside
-/// the command it drives) [MED].
-pub const SCV_DESIRED_AT: u32 = 0xFFFE_F9DC;
-
-/// Where the firmware keeps the EGR position it asks for, % (what 0x002C, desired EGR
-/// position, reports) [MED].
-pub const EGR_DESIRED_AT: u32 = 0xFFFF_1370;
 
 /// One sample of the trace.
 struct Sample {
@@ -54,6 +47,8 @@ struct Sample {
 /// Runs `sh705x actuators`.
 pub fn actuators(o: &ActuatorsOptions) -> Result<String, String> {
     let mut rig = Rig::new(&o.ecu, None, PLANT_MS * 1000)?;
+    let ram = rig.software.map(|s| s.ram);
+    let asked = |m: &Machine, at: fn(&Ram) -> u32| ram.map_or(f64::NAN, |r| f32_at(m, at(&r)));
     // The plants step every millisecond, as fast as the firmware's own loops, whatever
     // the trace interval: a slower feedback would be a plant the firmware never sees.
     let every = (o.step / PLANT_MS).max(1);
@@ -84,11 +79,11 @@ pub fn actuators(o: &ActuatorsOptions) -> Result<String, String> {
             t: ((s + 1) * PLANT_MS) as f64,
             scv_duty: st.scv_duty,
             scv_ma: st.scv_ma,
-            scv_desired: f32_at(&rig.m, SCV_DESIRED_AT),
+            scv_desired: asked(&rig.m, |r| r.scv_asked),
             vgt: st.vgt_duty,
             egr_drive: st.egr_drive,
             egr_pos: st.egr,
-            egr_desired: f32_at(&rig.m, EGR_DESIRED_AT),
+            egr_desired: asked(&rig.m, |r| r.egr_asked),
             maf: st.maf,
         });
     }

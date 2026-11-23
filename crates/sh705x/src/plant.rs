@@ -7,7 +7,8 @@
 //! speed tooth by tooth, the MAF reads what the engine draws at that speed, and the SCV
 //! and EGR plants close as in `sh705x actuators`. So the firmware's idle governor and
 //! pedal map close their loop through a simulated engine: nothing in the firmware is
-//! changed, and nothing here would make a real engine run.
+//! changed, and nothing here would make a real engine run. It needs to know where the
+//! firmware keeps its torque ([`engine::software`]).
 
 use crate::rig::Rig;
 use crate::{EcuOptions, f32_at};
@@ -33,23 +34,6 @@ pub struct PlantOptions {
 /// scanmatik-bench routes 67, 69 and 72, standing at 650-900 rpm with coolant at 70 °C
 /// or more: 12.0 N·m, 9090 samples) [DER].
 pub const IDLE_LOAD: f64 = 12.0;
-
-/// Where the firmware keeps its net torque (what 0x1A2D reports): a float in RAM, found
-/// by searching the RAM for the diagnostic value and following it over speeds [MED]. In
-/// the Astra's software (calibration NCLSW420AX36); another software may keep it
-/// elsewhere, which the check against 0x1A2D at the start catches.
-pub const TORQUE_AT: u32 = engine::plants::ASTRA.torque_at;
-/// Where it keeps the fuel quantity it asks for, mm³ a stroke: the float that the
-/// rail-pressure maps take as their quantity input, and that follows the idle governor
-/// over speeds (34 at 600 rpm, 12.5 at 780, -10 from 800 with the engine held) [MED].
-pub const QUANTITY_AT: u32 = engine::plants::ASTRA.quantity_at;
-/// Where it keeps the idle speed it aims at, rpm: the largest of the requests it weighs
-/// (coolant, limp modes...), found as the float that follows the idle when the engine
-/// is held at one speed [MED].
-pub const IDLE_TARGET_AT: u32 = 0xFFFE_FB60;
-/// Where it keeps the boost it asks for, kPa (what 0x328A, desired boost pressure,
-/// reports) [MED].
-pub const BOOST_DESIRED_AT: u32 = 0xFFFE_FE84;
 
 /// The torque the firmware reports on diagnostics, N·m (0x1A2D, signed, 0.25 a bit).
 fn diagnostic_torque(m: &mut Machine) -> Option<f64> {
@@ -86,13 +70,17 @@ pub fn plant(o: &PlantOptions) -> Result<String, String> {
     crank.load = o.load;
     let mut rig = Rig::new(&o.ecu, Some(crank), o.step_us)?;
 
-    // The RAM must hold what the diagnostics say, or this is another software.
+    let Some(ram) = rig.software.map(|s| s.ram) else {
+        return Err("this software is not known: where it keeps its torque is not either".into());
+    };
+    // The RAM must hold what the diagnostics say, or the release is not what it says.
     let said = diagnostic_torque(&mut rig.m).ok_or("no answer to 0x1A2D")?;
-    let held = f32_at(&rig.m, TORQUE_AT);
+    let held = f32_at(&rig.m, ram.torque);
     if (said - held).abs() > 0.5 {
         return Err(format!(
-            "the torque is not at {TORQUE_AT:08X} in this image ({held} there, {said} on \
-             diagnostics): another software"
+            "the torque is not at {:08X} in this image ({held} there, {said} on \
+             diagnostics): another software",
+            ram.torque
         ));
     }
 
@@ -103,13 +91,13 @@ pub fn plant(o: &PlantOptions) -> Result<String, String> {
         trace.push(Sample {
             t: (k + 1) as f64 * rig.dt * 1000.0,
             rpm: st.rpm,
-            target: f32_at(&rig.m, IDLE_TARGET_AT),
+            target: f32_at(&rig.m, ram.idle_target),
             torque: st.torque,
-            quantity: f32_at(&rig.m, QUANTITY_AT),
+            quantity: f32_at(&rig.m, ram.quantity),
             maf: st.maf,
             egr: st.egr,
             boost: st.boost,
-            boost_asked: f32_at(&rig.m, BOOST_DESIRED_AT),
+            boost_asked: f32_at(&rig.m, ram.boost_asked),
             vgt: st.vgt_duty.unwrap_or(0.0) * 100.0,
         });
     }

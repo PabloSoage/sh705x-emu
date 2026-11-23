@@ -28,8 +28,8 @@ pub struct Addrs {
     pub driver_demand_trq: u32,
     /// Final delivered torque to the engine (Nm).
     pub delivered_trq: u32,
-    /// Net engine torque reported over OBD/GMLAN DID 0x1A2D (Nm); `None` where not located.
-    pub net_trq: Option<u32>,
+    /// Net engine torque reported over OBD/GMLAN DID 0x1A2D (Nm).
+    pub net_trq: u32,
     /// Torque limit from the smoke/flow limiter (Nm).
     pub trq_limit_smoke: u32,
     /// Fuel quantity requested / injected (mm3/stroke).
@@ -53,7 +53,7 @@ pub const AX36: Addrs = Addrs {
     gear_selector: 0xFFFE_E100,
     driver_demand_trq: 0xFFFE_FC14,
     delivered_trq: 0xFFFE_FC6C,
-    net_trq: Some(0xFFFE_FC4C),
+    net_trq: 0xFFFE_FC4C,
     trq_limit_smoke: 0xFFFE_FD04,
     fuel_requested: 0xFFFE_F8F4,
     flow_limit: 0xFFFF_0E70,
@@ -65,14 +65,15 @@ pub const AX36: Addrs = Addrs {
 /// AZ07NCLNP030. Derived from AX36 by matching the code around every literal-pool load of
 /// each variable (the routines are byte-identical; only the literals differ) and taking the
 /// literal the same instruction loads here; every variable got a single, unanimous answer.
-/// The net-torque variable could not be matched unambiguously and is left out.
+/// The net torque has no second copy here as it has on AX36: it is read where it is
+/// computed, which is what 0x1A2D answers.
 pub const AZ07: Addrs = Addrs {
     engine_running_flag: 0xFFFE_E870,
     fuel_enable: 0xFFFF_2B84,
     gear_selector: 0xFFFE_E294,
     driver_demand_trq: 0xFFFE_FDA8,
     delivered_trq: 0xFFFE_FE08,
-    net_trq: None,
+    net_trq: 0xFFFE_FDC8,
     trq_limit_smoke: 0xFFFE_FEA0,
     fuel_requested: 0xFFFE_FA88,
     flow_limit: 0xFFFF_100C,
@@ -88,7 +89,7 @@ pub const AZ03: Addrs = Addrs {
     gear_selector: 0xFFFE_E294,
     driver_demand_trq: 0xFFFE_FDA8,
     delivered_trq: 0xFFFE_FE0C,
-    net_trq: None,
+    net_trq: 0xFFFE_FDE0,
     trq_limit_smoke: 0xFFFE_FEA4,
     fuel_requested: 0xFFFE_FA88,
     flow_limit: 0xFFFF_1010,
@@ -195,7 +196,8 @@ pub fn run_scenario(opts: &ScenarioOptions) -> Result<ScenarioResult, String> {
 
     let mut m = Machine::new(chip, true);
     let wiring = Wiring {
-        quantity_at: addrs.fuel_requested,
+        torque_at: Some(addrs.net_trq),
+        quantity_at: Some(addrs.fuel_requested),
         ..ASTRA
     };
     let mut plants = Plants::new(wiring, opts.rpm, None, 100.0, 30.0);
@@ -227,7 +229,7 @@ pub fn run_scenario(opts: &ScenarioOptions) -> Result<ScenarioResult, String> {
         pedal_ram_pct: f32_at(&m, addrs.pedal_position_ram),
         driver_demand_nm: f32_at(&m, addrs.driver_demand_trq),
         delivered_trq_nm: f32_at(&m, addrs.delivered_trq),
-        net_trq_nm: addrs.net_trq.map_or(f64::NAN, |a| f32_at(&m, a)),
+        net_trq_nm: f32_at(&m, addrs.net_trq),
         trq_limit_smoke_nm: f32_at(&m, addrs.trq_limit_smoke),
         fuel_req_mm3: f32_at(&m, addrs.fuel_requested),
         flow_limit_mm3: f32_at(&m, addrs.flow_limit),

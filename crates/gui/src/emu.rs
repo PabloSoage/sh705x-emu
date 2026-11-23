@@ -138,6 +138,8 @@ pub struct Snapshot {
     pub engine: Engine,
     /// The plants around the ECU.
     pub plant_mode: PlantMode,
+    /// Whether the firmware's release is one known.
+    pub known: bool,
     /// What they gave last, if they are on.
     pub plant: Option<State>,
     /// The history the engine view draws (the same one in every snapshot).
@@ -367,6 +369,7 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
                 }),
                 engine: ecu.engine.clone(),
                 plant_mode: ecu.plant_mode,
+                known: ecu.software.is_some(),
                 plant: ecu.plant,
                 scope: scope.clone(),
                 maps: ecu.maps.clone(),
@@ -434,6 +437,7 @@ pub fn first_snapshot(m: &Machine, engine: &Engine) -> Snapshot {
         sci: [(0, 0); 5],
         engine: engine.clone(),
         plant_mode: PlantMode::Off,
+        known: true,
         plant: None,
         scope: Arc::default(),
         maps: None,

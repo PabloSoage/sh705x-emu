@@ -37,8 +37,7 @@ $BIN dyno     --flash flash.bin --start 1400 --end 4200 --gear 4
 `--flash` points at a flash image you own (default `./flash.bin`); no image ships here.
 The RAM addresses the tool reads and sets depend on the software release, which is read from
 the image (0xC0000): AX36NCLSW420 and AX39NCLSW440 share one layout; AZ07NCLNP030 and
-AZ03NCLNP000 have their own (net torque not located there, printed as n/a). Any other
-release is refused instead of returning zeros.
+AZ03NCLNP000 have their own. Any other release is refused instead of returning zeros.
 `--compare <other.bin>` adds a second image to `grid` and `dyno` and prints the difference.
 
 ## What it reports

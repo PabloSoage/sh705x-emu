@@ -5,13 +5,16 @@
 use crate::{EcuOptions, boot, sensors};
 use engine::crank::Crank;
 pub(crate) use engine::plants::State;
-use engine::plants::{ASTRA, Plants};
+use engine::plants::{Plants, Wiring};
+use engine::software::{self, Software};
 use sh7059::Machine;
 
 /// The machine and its plants.
 pub(crate) struct Rig {
     /// The machine, running.
     pub m: Machine,
+    /// Its firmware release, if it is one known.
+    pub software: Option<&'static Software>,
     /// The plants around it.
     pub plants: Plants,
     /// Step, seconds.
@@ -27,8 +30,10 @@ impl Rig {
         let get = |k: &str| s.values.iter().find(|(x, _)| *x == k).map(|&(_, v)| v);
         let mut cold = o.clone();
         cold.boot = 0;
+        let m = boot(&cold)?;
+        let software = software::of(&m);
         let mut plants = Plants::new(
-            ASTRA,
+            Wiring::of(software),
             o.rpm.unwrap_or(0) as f64,
             crank,
             get("boost").unwrap_or(98.0),
@@ -36,7 +41,8 @@ impl Rig {
         );
         plants.held = true;
         let mut rig = Self {
-            m: boot(&cold)?,
+            m,
+            software,
             plants,
             dt: step_us as f64 / 1e6,
         };

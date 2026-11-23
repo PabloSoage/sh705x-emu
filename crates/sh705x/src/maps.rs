@@ -13,7 +13,6 @@
 //! does not inject (see the README), so these are the values it asks for, not what an
 //! engine would reach; the fuel it asks for is read from RAM.
 
-use crate::plant::QUANTITY_AT;
 use crate::rig::Rig;
 use crate::{EcuOptions, f32_at};
 use std::fmt::Write as _;
@@ -23,8 +22,9 @@ use std::path::{Path, PathBuf};
 enum From {
     /// A GMLAN identifier, over service 22.
     Did(u16),
-    /// A float in RAM, for what the diagnostics do not report.
-    Ram(u32),
+    /// The fuel asked for, which the diagnostics do not report: a float in RAM, if the
+    /// release is known.
+    Quantity,
 }
 
 /// A setpoint.
@@ -54,7 +54,7 @@ const SETPOINTS: &[Setpoint] = &[
     Setpoint {
         // What the firmware asks for: 0x3233 is what it injects, 0 while the immobiliser
         // holds it shut (resultados fase 8).
-        from: From::Ram(QUANTITY_AT),
+        from: From::Quantity,
         name: "fuel asked for",
         unit: "mm3",
         bytes: 4,
@@ -173,7 +173,7 @@ pub struct MapsOptions {
 /// steady state the firmware reaches there.
 fn read_point(o: &EcuOptions) -> Result<Vec<Option<f64>>, String> {
     let mut rig = Rig::new(o, None, 1000)?;
-    let quantity = f32_at(&rig.m, QUANTITY_AT);
+    let quantity = rig.software.map(|s| f32_at(&rig.m, s.ram.quantity));
     let mut link = bridge::link::VirtualLink::new(&mut rig.m, 0);
     let mut elm = bridge::elm::Elm327::new();
     elm.echo = false;
@@ -181,7 +181,7 @@ fn read_point(o: &EcuOptions) -> Result<Vec<Option<f64>>, String> {
         .iter()
         .map(|s| {
             let did = match s.from {
-                From::Ram(_) => return Some(quantity),
+                From::Quantity => return quantity,
                 From::Did(did) => did,
             };
             let answer = elm.line(&format!("22{did:04X}"), &mut link);
@@ -298,7 +298,7 @@ pub fn maps(o: &MapsOptions) -> Result<String, String> {
     for (k, s) in SETPOINTS.iter().enumerate() {
         let source = match s.from {
             From::Did(did) => format!("identifier {did:04X}"),
-            From::Ram(at) => format!("RAM {at:08X}"),
+            From::Quantity => "RAM".into(),
         };
         let title = format!("{} ({}), {source}", s.name, s.unit);
         match &b {

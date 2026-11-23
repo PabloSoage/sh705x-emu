@@ -15,8 +15,9 @@ pub mod sites;
 
 use bridge::link::CYCLES_PER_US;
 use engine::crank::Crank;
-use engine::plants::{ASTRA, Plants, State};
+use engine::plants::{Plants, State, Wiring};
 use engine::sensors::{MAF_KEY, Sensors};
+use engine::software::{self, Software};
 use maps::{MapTrace, Masters};
 use sh7059::pins::{Merge, Pin, SquareWave};
 use sh7059::{Machine, Sh7059, Stop};
@@ -138,6 +139,9 @@ pub struct Session {
     pub m: Machine,
     /// The engine as set: speed and sensors.
     pub engine: Engine,
+    /// The firmware release, if it is one known: without it the engine cannot turn on its
+    /// torque, nor can what it asks for be shown.
+    pub software: Option<&'static Software>,
     /// The plants around the ECU.
     pub plant_mode: PlantMode,
     /// What they gave last, if they are on.
@@ -207,6 +211,7 @@ impl Session {
     pub fn new(m: Machine, engine: Engine) -> Self {
         let plant_cycle = m.cpu.cycles;
         Self {
+            software: software::of(&m),
             m,
             engine,
             plant_mode: PlantMode::Off,
@@ -229,8 +234,8 @@ impl Session {
             let flash: Vec<u8> = (0..sh7059::ROM_SIZE as u32).map(|a| chip.peek(a)).collect();
             let flash = Arc::new(flash);
             let mut t = MapTrace::attach(&mut self.m, maps::find_masters(&flash));
-            let id = names::calibration(&flash);
-            t.names = names::Names::builtin(id);
+            let id = self.software.map(|s| s.id);
+            t.names = names::Names::builtin(self.software);
             // The fault codes' tests are probed with the maps, where the layout is known
             // or found.
             if let Some(l) = dtcs::layout(id, &flash) {
@@ -452,19 +457,25 @@ impl Session {
         self.engine.apply(&mut self.m);
     }
 
-    /// Puts the plants around the ECU, or takes them away.
+    /// Puts the plants around the ECU, or takes them away. On a release that is not known
+    /// its torque is not either, and the speed stays held.
     pub fn set_plants(&mut self, mode: PlantMode) {
+        let mode = match mode {
+            PlantMode::Turning if self.software.is_none() => PlantMode::Held,
+            m => m,
+        };
         self.plant_mode = mode;
+        let wiring = Wiring::of(self.software);
         let rest = self.engine.sensor("boost").unwrap_or(98.0);
         let intake = self.engine.sensor("intake2").unwrap_or(26.0);
         let rpm = self.engine.rpm;
         self.plants = match mode {
             PlantMode::Off => None,
-            PlantMode::Held => Some(Plants::new(ASTRA, rpm, None, rest, intake)),
+            PlantMode::Held => Some(Plants::new(wiring, rpm, None, rest, intake)),
             PlantMode::Turning => {
                 let mut c = Crank::new(rpm);
                 c.load = IDLE_LOAD;
-                Some(Plants::new(ASTRA, rpm, Some(c), rest, intake))
+                Some(Plants::new(wiring, rpm, Some(c), rest, intake))
             }
         };
         self.plant = None;
@@ -553,7 +564,13 @@ impl Session {
 
     /// Adds the moment to `scope` (every moment with `stepping`, else at its pace).
     pub fn sample(&self, scope: &mut scope::Scope, stepping: bool) {
-        scope.take(&self.m, self.plant.as_ref(), &self.engine, stepping);
+        scope.take(
+            &self.m,
+            self.software,
+            self.plant.as_ref(),
+            &self.engine,
+            stepping,
+        );
     }
 }
 
