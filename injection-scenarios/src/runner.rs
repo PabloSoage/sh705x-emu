@@ -6,7 +6,7 @@
 //! enabled". That stands in for a running engine; it is not a bypass of any vehicle security
 //! function, and no such function is modelled or touched here.
 
-use engine::plants::{f32_at, Plants, ASTRA};
+use engine::plants::{f32_at, Plants, Wiring, ASTRA};
 use engine::sensors::{maf_hz, pedal_sensors, Sensors, MAF_KEY};
 use engine::wheel::Wheels;
 use sh7059::{Machine, Sh7059};
@@ -194,7 +194,11 @@ pub fn run_scenario(opts: &ScenarioOptions) -> Result<ScenarioResult, String> {
     chip.set_stimulus(Box::new(pins));
 
     let mut m = Machine::new(chip, true);
-    let mut plants = Plants::new(ASTRA, opts.rpm, None, 100.0, 30.0);
+    let wiring = Wiring {
+        quantity_at: addrs.fuel_requested,
+        ..ASTRA
+    };
+    let mut plants = Plants::new(wiring, opts.rpm, None, 100.0, 30.0);
 
     let mut last_vgt = 0.0;
     let mut last_scv_ma = 0.0;
