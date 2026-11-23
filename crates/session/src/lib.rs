@@ -5,6 +5,7 @@
 //! Android app (`android`) both drive it; the command line has its own rig.
 
 mod discover;
+pub mod drive;
 pub mod dtcs;
 pub mod j1979;
 pub mod maps;
@@ -159,6 +160,8 @@ pub struct Session {
     watch: Option<Watch>,
     /// The plugins loaded: nodes on the bus, readers of memory.
     pub plugins: plugins::Host,
+    /// A recorded drive on the inputs.
+    driving: Option<drive::Driving>,
 }
 
 /// What to stop at next.
@@ -223,6 +226,7 @@ impl Session {
             breakpoints: Vec::new(),
             watch: None,
             plugins: plugins::Host::default(),
+            driving: None,
         }
     }
 
@@ -485,6 +489,48 @@ impl Session {
         }
     }
 
+    /// Puts a recorded drive on the inputs: the plants hold its engine speed, the wheels
+    /// turn at its road speed, and [`drive::WARM_UP`] later it starts. The ABS on the bus
+    /// is that of the car on the road from here on.
+    pub fn start_drive(&mut self, d: drive::Drive) {
+        let road = engine::bus::Road::default();
+        self.m
+            .chip
+            .set_can_source(Box::new(engine::bus::RollingWheels::new(road.clone())));
+        self.driving = Some(drive::Driving::new(d, road, self.m.cpu.cycles));
+        self.put_drive();
+        self.engine.apply(&mut self.m);
+        // With no boost the manifold is at the air outside.
+        if let Some(b) = self.engine.sensor("baro") {
+            let _ = self.engine.sensors.set("boost", b);
+        }
+        self.set_plants(PlantMode::Held);
+    }
+
+    /// Where the drive is, if there is one.
+    pub fn drive(&self) -> Option<drive::Moment> {
+        self.driving.as_ref().map(|d| d.moment(self.m.cpu.cycles))
+    }
+
+    /// Puts the drive's moment on the inputs it sets, and on those only: the rest are the
+    /// plants'.
+    fn put_drive(&mut self) {
+        let Some(d) = &self.driving else { return };
+        let (rpm, sensors) = (d.rpm(), d.sensors());
+        self.engine.rpm = rpm;
+        self.m.chip.stimulus_set("rpm", rpm);
+        if let Some(p) = self.plants.as_mut() {
+            p.rpm = rpm;
+        }
+        for (k, v) in sensors {
+            if self.engine.sensors.set(k, v).is_ok()
+                && let Some(i) = engine::sensors::input(k)
+            {
+                self.m.chip.adc.input[i.channel] = i.code(v);
+            }
+        }
+    }
+
     /// The plants pick up from now: after the machine ran without them (a step, a
     /// diagnostic exchange) or after a pause.
     pub fn resync(&mut self) {
@@ -494,6 +540,10 @@ impl Session {
     /// Runs `cycles` (breakpoints still stop it), then steps the plants if a millisecond
     /// of ECU time has gone by since their last step.
     pub fn run(&mut self, cycles: u64) -> Stop {
+        let now = self.m.cpu.cycles;
+        if self.driving.as_mut().is_some_and(|d| d.advance(now)) {
+            self.put_drive();
+        }
         let skip = self.skip();
         let s = run_past(&mut self.m, cycles, skip.as_ref());
         self.after_run();
@@ -569,6 +619,7 @@ impl Session {
             self.software,
             self.plant.as_ref(),
             &self.engine,
+            self.drive().map(|d| d.recorded),
             stepping,
         );
     }
@@ -577,6 +628,38 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On the Astra's flash, cruising at 1860 rpm and 100 km/h with a light foot the
+    /// firmware opens the EGR; with the car standing, at the same speed and pedal, it keeps
+    /// it shut; and it reads the road speed its wheels' frames say.
+    #[test]
+    fn on_the_road_the_firmware_opens_the_egr() {
+        let Some(f) = std::env::var("SH705X_FLASH")
+            .ok()
+            .and_then(|p| std::fs::read(p).ok())
+        else {
+            return;
+        };
+        let cruise = |kmh: f64| {
+            let mut m = machine(&f, None, board::DEFAULT_LAYOUT).unwrap();
+            Engine::idle().apply(&mut m);
+            let mut s = Session::new(m, Engine::idle());
+            let csv = format!("t,rpm,kmh,pedal,coolant\n0,1860,{kmh},8,80\n1,1860,{kmh},8,80\n");
+            s.start_drive(drive::Drive::read(&csv).unwrap());
+            while s.m.cpu.cycles < 5_000_000 * CYCLES_PER_US {
+                s.run(40_000);
+            }
+            (
+                engine::plants::f32_at(&s.m, 0xFFFF_17A8),
+                s.plant.unwrap().egr,
+            )
+        };
+        let (kmh, egr) = cruise(100.0);
+        assert!((kmh - 100.0).abs() < 0.5, "{kmh}");
+        assert!(egr > 15.0, "{egr}");
+        let (kmh, egr) = cruise(0.0);
+        assert!(kmh < 0.5 && egr < 1.0, "{kmh} {egr}");
+    }
 
     /// The ECU (with its EEPROM, which says the ABS is fitted) idling with no other node on
     /// the bus and its codes traced, and `plugin` loaded if given; the codes it reports

@@ -5,11 +5,14 @@
 use crate::app::App;
 use crate::emu::{Cmd, PlantMode};
 
-/// The options after the images. Without `--plants` the ECU waits, paused, as ever.
+/// The options after the images. Without `--plants` or `--drive` the ECU waits, paused, as
+/// ever.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Start {
     /// Idle (750 rpm, warm sensors) with these plants, and run.
     plants: Option<PlantMode>,
+    /// A recorded drive.
+    drive: Option<String>,
     /// ECU time run flat out before `speed` applies, ms.
     slow_at: Option<f64>,
     /// ECU time per wall-clock time.
@@ -46,6 +49,7 @@ impl Start {
                     _ => return Err(format!("--plants is held or torque, not {v}")),
                 });
             }
+            "--drive" => self.drive = Some(v.into()),
             "--slow-at" => self.slow_at = Some(number()?),
             "--speed" => self.speed = Some(number()?),
             "--show" => {
@@ -94,6 +98,11 @@ impl Start {
         let read = |p: &str| std::fs::read(p).map_err(|e| format!("{p}: {e}"));
         let labels = self.labels.as_deref().map(read).transpose()?;
         let other = self.compare.as_deref().map(read).transpose()?;
+        let drive = self.drive.as_deref().map(|p| {
+            let text = String::from_utf8_lossy(&read(p)?).into_owned();
+            session::drive::Drive::read(&text).map_err(|e| format!("{p}: {e}"))
+        });
+        let drive = drive.transpose()?;
         app.show(self.engine, self.maps, self.scope);
         if let Some(names) = &self.charts {
             app.view.only(names);
@@ -117,12 +126,17 @@ impl Start {
             app.send(Cmd::Preset(true));
             app.send(Cmd::Plants(mode));
         }
+        let driving = drive.is_some();
+        if let Some(d) = drive {
+            app.send(Cmd::Preset(true));
+            app.send(Cmd::Drive(d));
+        }
         match (self.slow_at, self.speed) {
             (Some(ms), v) => app.send(Cmd::SlowAt(ms, v.unwrap_or(1.0))),
             (None, Some(v)) => app.send(Cmd::Speed(v)),
             (None, None) => {}
         }
-        if self.plants.is_some() {
+        if self.plants.is_some() || driving {
             app.send(Cmd::Run);
         }
         Ok(())

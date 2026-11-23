@@ -572,6 +572,19 @@ impl App {
                         }
                     }
                 });
+                if let Some(d) = &s.drive {
+                    let pedal = d.pedal.map_or(String::new(), |p| format!(", pedal {p:.0} %"));
+                    ui.label(if d.t < 0.0 {
+                        format!("Drive: starts in {:.1} s of ECU time", -d.t)
+                    } else {
+                        format!(
+                            "Drive: {:.1} of {:.1} s, {:.0} km/h{pedal}",
+                            d.t.min(d.seconds),
+                            d.seconds,
+                            d.kmh
+                        )
+                    });
+                }
                 if let Some(p) = &s.plant {
                     let vgt = p.vgt_duty.unwrap_or(0.0) * 100.0;
                     let known = |v: f64, text: String| if v.is_nan() { "-".into() } else { text };
@@ -1003,6 +1016,7 @@ mod tests {
                     us: i as f64 * 100.0,
                     crank: (i as f32 * 0.45) % 720.0,
                     v: [i as f32; session::scope::TRACES.len()],
+                    recorded: [i as f32 / 2.0; session::drive::RECORDED.len()],
                 });
             }
             sc.pulses.push_back((8, 1000.0, 1300.0));

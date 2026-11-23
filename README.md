@@ -218,7 +218,10 @@ and it can be told what to run and show, to come back to the same scene: `--plan
 and `--speed 0.01` goes on slowed down from there; `--show engine,maps,scope` opens those
 windows side by side, `--charts egr,air` and `--window <ms>` choose what the engine view
 draws, `--map <descriptor>` the map, `--labels <file>` names maps and `--compare <flash>`
-reads a second image:
+reads a second image. `--drive <drive.csv>` puts a recorded drive on the inputs, moment by
+moment (engine speed, road speed as the wheels' frames on the bus, pedal, temperatures),
+and draws what the car did beside what the firmware does with it; the columns are in
+`crates/session/src/drive.rs`:
 
 ```sh
 sh705x-gui --flash <flash.bin> --plants torque --slow-at 1140 --speed 0.01 --charts egr,air --map 9B904

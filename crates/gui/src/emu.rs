@@ -47,6 +47,8 @@ pub enum Cmd {
     /// ECU time per wall-clock time when following the wall clock: 1 is real time,
     /// 0.001 shows a tooth at idle about every second.
     Speed(f64),
+    /// Put a recorded drive on the inputs.
+    Drive(session::drive::Drive),
     /// Run flat out to this ECU time (ms since power-on), then follow the wall clock at
     /// this speed.
     SlowAt(f64, f64),
@@ -145,6 +147,8 @@ pub struct Snapshot {
     pub known: bool,
     /// What they gave last, if they are on.
     pub plant: Option<State>,
+    /// Where the drive is, if there is one.
+    pub drive: Option<session::drive::Moment>,
     /// The history the engine view draws (the same one in every snapshot).
     pub scope: Arc<Mutex<Scope>>,
     /// The maps the firmware reads, while they are traced.
@@ -254,6 +258,7 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
                 Cmd::Rpm(r) => ecu.set_rpm(r),
                 Cmd::Plants(mode) => ecu.set_plants(mode),
                 Cmd::Preset(idle) => ecu.preset(idle),
+                Cmd::Drive(d) => ecu.start_drive(d),
                 Cmd::Memory(a) => mem_addr = a,
                 Cmd::SlowAt(ms, v) => {
                     slow_at = Some(((ms.max(0.0) * 1000.0) as u64 * CYCLES_PER_US, v));
@@ -390,6 +395,7 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
                 plant_mode: ecu.plant_mode,
                 known: ecu.software.is_some(),
                 plant: ecu.plant,
+                drive: ecu.drive(),
                 scope: scope.clone(),
                 maps: ecu.maps.clone(),
                 watch: ecu.watching(),
@@ -458,6 +464,7 @@ pub fn first_snapshot(m: &Machine, engine: &Engine) -> Snapshot {
         plant_mode: PlantMode::Off,
         known: true,
         plant: None,
+        drive: None,
         scope: Arc::default(),
         maps: None,
         watch: None,

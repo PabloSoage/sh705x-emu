@@ -2,6 +2,7 @@
 //! plants give back, sampled in ECU time, and the one-shot pulses of the ATU-II's channel 8
 //! (where the injectors are). Kept apart from any snapshot, so a frame does not copy it.
 
+use crate::drive::RECORDED;
 use engine::plants::{State, f32_at};
 use engine::software::{Ram, Software};
 use sh7059::Machine;
@@ -88,6 +89,8 @@ pub struct Sample {
     pub crank: f32,
     /// The traces; NaN where there is nothing to show.
     pub v: [f32; TRACES.len()],
+    /// What the car did at this moment of a drive ([`RECORDED`]); NaN if it does not say.
+    pub recorded: [f32; RECORDED.len()],
 }
 
 /// The history.
@@ -122,6 +125,7 @@ impl Scope {
         software: Option<&Software>,
         plant: Option<&State>,
         engine: &crate::Engine,
+        recorded: Option<[f32; RECORDED.len()]>,
         stepping: bool,
     ) {
         let now = m.cpu.cycles;
@@ -174,6 +178,7 @@ impl Scope {
             us: now as f64 / PER_US,
             crank: m.chip.crank_angle(now).map_or(f32::NAN, |a| a as f32),
             v: v.map(|x| x as f32),
+            recorded: recorded.unwrap_or([f32::NAN; RECORDED.len()]),
         });
         while self.samples.len() > KEPT {
             self.samples.pop_front();

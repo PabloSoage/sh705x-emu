@@ -5,6 +5,7 @@
 //! show: the EGR's drive, the teeth, a pulse.
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2};
+use session::drive::RECORDED;
 use session::scope::{Sample, Scope, TRACES};
 
 /// The chart panels: title and traces (indexes into [`TRACES`]).
@@ -30,6 +31,8 @@ const CAM_WIDTH: f32 = 10.0;
 /// cylinder 1 put at 0°: where it really is relative to the gap is not known [SUP].
 const TDC: [f32; 4] = [0.0, 540.0, 180.0, 360.0];
 
+/// What the car did in a recorded drive.
+const RECORDED_COLOR: Color32 = Color32::from_rgb(235, 120, 220);
 const COLORS: [Color32; 3] = [
     Color32::from_rgb(110, 170, 255),
     Color32::from_rgb(255, 160, 60),
@@ -337,6 +340,11 @@ fn strip(
     x: &dyn Fn(f64) -> f32,
     hover: Option<f64>,
 ) {
+    // What the car did, where a drive says.
+    let recorded: Vec<usize> = (0..RECORDED.len())
+        .filter(|&k| traces.contains(&RECORDED[k].2))
+        .filter(|&k| visible.iter().any(|s| s.recorded[k].is_finite()))
+        .collect();
     ui.horizontal_wrapped(|ui| {
         ui.label(egui::RichText::new(title).strong());
         for (n, &k) in traces.iter().enumerate() {
@@ -352,15 +360,25 @@ fn strip(
                 .small(),
             );
         }
+        for &k in &recorded {
+            let (name, _, trace) = RECORDED[k];
+            let v = now.map_or(f32::NAN, |s| s.recorded[k]);
+            ui.label(
+                egui::RichText::new(format!("■ {name} {} {}", value(v), TRACES[trace].unit))
+                    .color(RECORDED_COLOR)
+                    .small(),
+            );
+        }
     });
     let (resp, p) = ui.allocate_painter(Vec2::new(width, 70.0), Sense::hover());
     let r = resp.rect;
     let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
     for s in visible {
-        for &k in traces {
-            if s.v[k].is_finite() {
-                lo = lo.min(s.v[k]);
-                hi = hi.max(s.v[k]);
+        let shown = traces.iter().map(|&k| s.v[k]);
+        for v in shown.chain(recorded.iter().map(|&k| s.recorded[k])) {
+            if v.is_finite() {
+                lo = lo.min(v);
+                hi = hi.max(v);
             }
         }
     }
@@ -403,7 +421,7 @@ fn strip(
             Stroke::new(1.0, Color32::from_gray(60)),
         );
     }
-    for (n, &k) in traces.iter().enumerate() {
+    let line = |of: &dyn Fn(&Sample) -> f32, color: Color32| {
         // Per pixel column, the first, lowest and highest points: fast moves stay visible.
         let mut pts: Vec<Pos2> = Vec::new();
         let mut col: Option<(i32, f32, f32)> = None;
@@ -414,7 +432,7 @@ fn strip(
             }
         };
         for s in visible {
-            let v = s.v[k];
+            let v = of(s);
             if !v.is_finite() {
                 continue;
             }
@@ -432,8 +450,14 @@ fn strip(
             flush(&mut pts, c);
         }
         if pts.len() > 1 {
-            p.add(Shape::line(pts, Stroke::new(1.5, COLORS[n])));
+            p.add(Shape::line(pts, Stroke::new(1.5, color)));
         }
+    };
+    for &k in &recorded {
+        line(&|s| s.recorded[k], RECORDED_COLOR);
+    }
+    for (n, &k) in traces.iter().enumerate() {
+        line(&|s| s.v[k], COLORS[n]);
     }
     cursor(&p, plot, x, hover);
 }

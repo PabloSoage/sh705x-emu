@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! sh705x-gui [--flash <flash.bin>] [--eeprom <eeprom.bin>] [--eeprom-layout 0123[le]]
-//!            [--plants held|torque] [--slow-at <ms>] [--speed <x>]
+//!            [--plants held|torque] [--drive <drive.csv>] [--slow-at <ms>] [--speed <x>]
 //!            [--show engine,maps,scope] [--charts <names>] [--window <ms>] [--map <descriptor>] [--labels <file>]
 //!            [--compare <flash.bin>]
 //! ```
