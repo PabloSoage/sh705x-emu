@@ -175,10 +175,14 @@ fn print_scenario_result(res: &runner::ScenarioResult) {
         res.driver_demand_nm
     );
     println!("Delivered Torque:       {:.1} N·m", res.delivered_trq_nm);
-    println!(
-        "Net Output Torque:      {:.1} N·m (DID 0x1A2D)",
-        res.net_trq_nm
-    );
+    if res.net_trq_nm.is_nan() {
+        println!("Net Output Torque:      n/a (not located for this software)");
+    } else {
+        println!(
+            "Net Output Torque:      {:.1} N·m (DID 0x1A2D)",
+            res.net_trq_nm
+        );
+    }
     println!(
         "Torque Smoke Limiter:   {:.1} N·m (v_FD04)",
         res.trq_limit_smoke_nm
