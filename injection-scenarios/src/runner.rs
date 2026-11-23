@@ -11,6 +11,10 @@ use engine::sensors::{maf_hz, pedal_sensors, Sensors, MAF_KEY};
 use engine::wheel::Wheels;
 use sh7059::{Machine, Sh7059};
 
+/// The ignition input, AN14, and the code that reads as on (as the emulator's own front ends
+/// wire it).
+const IGNITION: (usize, u16) = (14, 600);
+
 /// RAM variables this tool reads or sets, for one firmware software (SW) id.
 ///
 /// The firmware's RAM layout differs between software releases: reading the AX36 addresses
@@ -171,6 +175,9 @@ pub fn run_scenario(opts: &ScenarioOptions) -> Result<ScenarioResult, String> {
         Sh7059::new(&bytes).map_err(|e| format!("Failed to initialize SH7059 core: {e}"))?;
     let addrs = addrs_for(&bytes)?;
     board::wire_status(&mut chip);
+    // Ignition on. Without it the firmware sees the key off, and its supervisor drops the
+    // engine-running flag every few ticks however often this tool sets it.
+    chip.adc.input[IGNITION.0] = IGNITION.1;
 
     let mut s = Sensors::idle();
     let (s1, s2) = pedal_sensors(opts.pedal_pct);
