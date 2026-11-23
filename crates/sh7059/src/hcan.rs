@@ -219,6 +219,7 @@ fn id_fields(io: &[u8], at: u32) -> (u32, bool, bool) {
 impl Hcan {
     /// Initial values after a power-on reset (manual 17.4).
     pub fn reset(&mut self, io: &mut [u8]) {
+        #[allow(clippy::needless_range_loop)] // ch also selects the registers
         for ch in 0..2 {
             Self::reset_channel(io, ch);
             self.ch[ch] = Channel::default();

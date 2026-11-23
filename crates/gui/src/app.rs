@@ -386,6 +386,7 @@ impl App {
             ui.heading("CPU");
             let c = &s.cpu;
             egui::Grid::new("regs").striped(true).show(ui, |ui| {
+                #[allow(clippy::needless_range_loop)] // the index is also the register number
                 for k in 0..16 {
                     ui.monospace(format!("R{k}"));
                     ui.monospace(format!("{:08X}", c.r[k]));
@@ -421,6 +422,7 @@ impl App {
             ui.separator();
             ui.label("FPU");
             egui::Grid::new("fregs").show(ui, |ui| {
+                #[allow(clippy::needless_range_loop)] // the index is also the register number
                 for k in 0..16 {
                     ui.monospace(format!("FR{k}"));
                     ui.monospace(format!("{:.6e}", f32::from_bits(c.fr[k])));
@@ -548,6 +550,7 @@ impl App {
                 }
                 egui::CollapsingHeader::new("Raw A/D codes").show(ui, |ui| {
                     ui.label("10-bit codes; AN14 is the ignition input (on above 229).");
+                    #[allow(clippy::needless_range_loop)] // the index is also the channel number
                     for k in 0..32 {
                         let mut v = s.adc[k];
                         ui.horizontal(|ui| {

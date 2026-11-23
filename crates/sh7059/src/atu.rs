@@ -493,6 +493,7 @@ impl Atu {
                 },
             ]);
             let new = r16(io, DSTR);
+            #[allow(clippy::needless_range_loop)] // k is also the bit and the register index
             for k in 0..16 {
                 let bit = 1u16 << k;
                 if new & bit != 0 && old & bit == 0 {
