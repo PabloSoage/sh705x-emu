@@ -139,15 +139,21 @@ impl MapView {
     }
 }
 
-#[cfg(test)]
 impl MapView {
-    /// Compare with `flash` as "Compare with a flash…" does, listing only what it changes.
+    /// Compare with `flash` as "Compare with a flash…" does.
     pub(crate) fn compare_with(&mut self, name: &str, flash: Vec<u8>) {
         self.other = Some(Other {
             name: name.into(),
             flash,
         });
         self.diffs.clear();
+    }
+}
+
+#[cfg(test)]
+impl MapView {
+    /// List only the maps the compared file changes.
+    pub(crate) fn only_differences(&mut self) {
         self.filter = "DIFF".into();
     }
 

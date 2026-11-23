@@ -35,13 +35,13 @@ pub struct App {
     /// The engine view's window is open.
     engine_view: bool,
     /// What it shows.
-    view: crate::view::Settings,
+    pub(crate) view: crate::view::Settings,
     /// Asked to power off and go back to the load screen.
     pub back: bool,
     /// The maps window is open (and the maps traced).
     maps_view: bool,
     /// What it shows.
-    maps: crate::mapview::MapView,
+    pub(crate) maps: crate::mapview::MapView,
     /// Every map and curve found by scanning the whole flash (referenced or not), built
     /// once the maps window is first opened.
     catalog: Option<Arc<Vec<session::maps::Found>>>,
@@ -49,6 +49,10 @@ pub struct App {
     scope_view: bool,
     /// What it shows.
     scope: crate::oscview::OscView,
+    /// The windows opened at the start stand side by side, clear of the code.
+    tiled: bool,
+    /// Frames left before they open, for the main window to take its size.
+    settle: u8,
     /// The plugins window is open.
     pub plugins_view: bool,
     /// Its state.
@@ -79,13 +83,50 @@ impl App {
             catalog: None,
             scope_view: false,
             scope: Default::default(),
+            tiled: false,
+            settle: 0,
             plugins_view: false,
             plugins: Default::default(),
         }
     }
 
-    fn send(&self, c: Cmd) {
+    pub(crate) fn send(&self, c: Cmd) {
         let _ = self.cmds.send(c);
+    }
+
+    /// Opens these windows, side by side to the right of the code.
+    pub(crate) fn show(&mut self, engine: bool, maps: bool, scope: bool) {
+        self.tiled = engine || maps || scope;
+        self.settle = 10;
+        self.engine_view = engine;
+        self.maps_view = maps;
+        self.scope_view = scope;
+        if maps {
+            self.send(Cmd::TraceMaps(true));
+        }
+        if scope {
+            self.send(Cmd::ScopePins(true));
+        }
+    }
+
+    /// Where a window starts: `usual`, or tiled, in the part of the screen from (`x0`, `y0`)
+    /// to (1, `y1`), as fractions.
+    fn place(
+        &self,
+        ctx: &egui::Context,
+        usual: egui::Rect,
+        (x0, y0, y1): (f32, f32, f32),
+    ) -> egui::Rect {
+        if !self.tiled {
+            return usual;
+        }
+        let r = ctx.content_rect();
+        let mut max = r.lerp_inside(egui::vec2(0.99, y1));
+        // On a wide screen the engine's panel stays in sight too.
+        if r.width() >= 1700.0 {
+            max.x = r.right() - 310.0;
+        }
+        egui::Rect::from_min_max(r.lerp_inside(egui::vec2(x0, y0)), max)
     }
 
     /// Changes calibration bytes in the emulated ECU, and in this side's copy of the
@@ -144,6 +185,10 @@ fn speed_name(v: f64) -> String {
     format!("×{v}")
 }
 
+fn rect(x: f32, y: f32, w: f32, h: f32) -> egui::Rect {
+    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h))
+}
+
 fn hex(s: &str) -> Option<u32> {
     u32::from_str_radix(
         s.trim().trim_start_matches("0x").trim_start_matches("H'"),
@@ -158,6 +203,8 @@ impl App {
         let s = self.shared.lock().expect("snapshot lock").clone();
         root.ctx()
             .request_repaint_after(std::time::Duration::from_millis(33));
+        self.settle = self.settle.saturating_sub(1);
+        let windows = self.settle == 0;
 
         egui::Panel::top("controls").show(root, |ui| {
             ui.horizontal(|ui| {
@@ -253,13 +300,18 @@ impl App {
             });
         });
 
-        if self.engine_view {
+        if self.engine_view && windows {
             let mut open = true;
             let now_us = s.cpu.cycles as f64 / 80.0;
+            let r = self.place(
+                root.ctx(),
+                rect(200.0, 60.0, 1000.0, 640.0),
+                (0.37, 0.05, 0.43),
+            );
             egui::Window::new("Engine view")
                 .open(&mut open)
-                .default_size([1000.0, 640.0])
-                .default_pos([200.0, 60.0])
+                .default_rect(r)
+                .vscroll(self.tiled)
                 .show(root.ctx(), |ui| {
                     let scope = s.scope.lock().expect("scope lock");
                     crate::view::show(ui, &scope, &mut self.view, now_us);
@@ -286,12 +338,16 @@ impl App {
             self.plugins_view = open;
         }
 
-        if self.scope_view {
+        if self.scope_view && windows {
             let mut open = true;
+            let r = self.place(
+                root.ctx(),
+                rect(140.0, 70.0, 1150.0, 620.0),
+                (0.37, 0.30, 0.95),
+            );
             egui::Window::new("Oscilloscope")
                 .open(&mut open)
-                .default_size([1150.0, 620.0])
-                .default_pos([140.0, 70.0])
+                .default_rect(r)
                 .show(root.ctx(), |ui| match &s.osc {
                     Some(o) => {
                         let o = o.lock().expect("oscilloscope lock");
@@ -307,7 +363,7 @@ impl App {
             }
         }
 
-        if self.maps_view {
+        if self.maps_view && windows {
             // Scan the whole flash once for every map and curve descriptor, the first time
             // the window opens; the browser lists all of them, read by the firmware or not.
             if self.catalog.is_none() {
@@ -317,10 +373,15 @@ impl App {
             let catalog = self.catalog.clone().expect("catalog built");
             let mut open = true;
             let mut actions = Vec::new();
+            let r = self.place(
+                root.ctx(),
+                rect(160.0, 40.0, 1150.0, 720.0),
+                (0.37, 0.47, 0.97),
+            );
             egui::Window::new("Maps")
                 .open(&mut open)
-                .default_size([1150.0, 720.0])
-                .default_pos([160.0, 40.0])
+                .default_rect(r)
+                .vscroll(self.tiled)
                 .show(root.ctx(), |ui| match &s.maps {
                     Some(t) => {
                         let t = t.lock().expect("map trace lock");
@@ -1306,6 +1367,7 @@ mod tests {
         }
         app.maps_view = true;
         app.maps.compare_with("modified.bin", other);
+        app.maps.only_differences();
         app.maps.selected = Some(BOOST);
         app.maps.mode = crate::mapview::Mode::Diff;
         let mut h = egui_kittest::Harness::builder()

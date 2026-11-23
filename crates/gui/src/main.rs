@@ -8,6 +8,9 @@
 //!
 //! ```text
 //! sh705x-gui [--flash <flash.bin>] [--eeprom <eeprom.bin>] [--eeprom-layout 0123[le]]
+//!            [--plants held|torque] [--slow-at <ms>] [--speed <x>]
+//!            [--show engine,maps,scope] [--charts <names>] [--window <ms>] [--map <descriptor>] [--labels <file>]
+//!            [--compare <flash.bin>]
 //! ```
 
 // A window, not a console program, in release builds on Windows.
@@ -20,6 +23,7 @@ mod load;
 mod mapview;
 mod oscview;
 mod pluginview;
+mod start;
 mod view;
 
 use std::sync::mpsc::{self, Sender};
@@ -28,6 +32,7 @@ use std::thread::JoinHandle;
 
 fn main() -> Result<(), String> {
     let mut load = load::Load::default();
+    let mut start = start::Start::default();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -39,14 +44,23 @@ fn main() -> Result<(), String> {
                 load::parse_layout(v)?;
                 load.layout = v.clone();
             }
-            other => return Err(format!("unknown option '{other}'")),
+            other => {
+                if !start.take(other, v)? {
+                    return Err(format!("unknown option '{other}'"));
+                }
+            }
         }
     }
-    let shell = Shell::new(load);
+    let title = match std::path::Path::new(&load.flash).file_name() {
+        Some(f) => format!("SH705x emulator: {}", f.to_string_lossy()),
+        None => "SH705x emulator".into(),
+    };
+    let shell = Shell::new(load, &start);
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 900.0])
-            .with_title("SH705x emulator"),
+            .with_title(title)
+            .with_maximized(start.windows()),
         ..Default::default()
     };
     eframe::run_native(
@@ -111,15 +125,24 @@ struct Shell {
 }
 
 impl Shell {
-    /// Powered on with `load`'s images if it names a flash and they read, else on the load
-    /// screen (saying what was wrong, if anything).
-    fn new(mut load: load::Load) -> Self {
+    /// Powered on with `load`'s images if it names a flash and they read, running and
+    /// showing what `start` asks; else on the load screen (saying what was wrong, if
+    /// anything).
+    fn new(mut load: load::Load, start: &start::Start) -> Self {
         if load.flash.is_empty() {
             return Self {
                 screen: Screen::Load(load),
             };
         }
-        let screen = match load.read().and_then(|i| Running::start(i, load.clone())) {
+        let on = load.read().and_then(|i| {
+            let mut r = Running::start(i, load.clone())?;
+            if let Err(e) = start.apply(&mut r.app) {
+                r.stop();
+                return Err(e);
+            }
+            Ok(r)
+        });
+        let screen = match on {
             Ok(r) => Screen::Running(Box::new(r)),
             Err(e) => {
                 load.error = Some(e);

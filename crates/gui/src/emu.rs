@@ -47,6 +47,9 @@ pub enum Cmd {
     /// ECU time per wall-clock time when following the wall clock: 1 is real time,
     /// 0.001 shows a tooth at idle about every second.
     Speed(f64),
+    /// Run flat out to this ECU time (ms since power-on), then follow the wall clock at
+    /// this speed.
+    SlowAt(f64, f64),
     /// Send an ELM327 command line over the emulated CAN bus, in virtual time.
     Elm(String),
     /// Put the plants around the ECU, or take them away.
@@ -167,6 +170,8 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
     let mut running = false;
     let mut real_time = true;
     let mut speed = 1.0f64;
+    // Flat out to this cycle, then at this speed.
+    let mut slow_at: Option<(u64, f64)> = None;
     let mut stop = None;
     let mut mem_addr = sh7059::RAM_BASE;
     let mut can: VecDeque<CanEvent> = VecDeque::new();
@@ -250,11 +255,17 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
                 Cmd::Plants(mode) => ecu.set_plants(mode),
                 Cmd::Preset(idle) => ecu.preset(idle),
                 Cmd::Memory(a) => mem_addr = a,
+                Cmd::SlowAt(ms, v) => {
+                    slow_at = Some(((ms.max(0.0) * 1000.0) as u64 * CYCLES_PER_US, v));
+                    real_time = false;
+                }
                 Cmd::RealTime(r) => {
+                    slow_at = None;
                     real_time = r;
                     (pace_cycle, pace_wall) = (ecu.m.cpu.cycles, Instant::now());
                 }
                 Cmd::Speed(s) => {
+                    slow_at = None;
                     speed = s.clamp(1e-4, 1.0);
                     (pace_cycle, pace_wall) = (ecu.m.cpu.cycles, Instant::now());
                 }
@@ -288,6 +299,14 @@ pub fn run(m: Machine, engine: Engine, cmds: Receiver<Cmd>, shared: Arc<Mutex<Sn
                 Cmd::Quit => return,
             }
             next = cmds.try_recv().ok();
+        }
+        if let Some((at, v)) = slow_at
+            && ecu.m.cpu.cycles >= at
+        {
+            slow_at = None;
+            real_time = true;
+            speed = v.clamp(1e-4, 1.0);
+            (pace_cycle, pace_wall) = (ecu.m.cpu.cycles, Instant::now());
         }
         if running {
             let ahead = real_time && {

@@ -48,6 +48,29 @@ pub struct Settings {
     pulses: bool,
 }
 
+/// The panels by the name the command line gives them, in [`PANELS`]' order.
+pub const CHARTS: [&str; PANELS.len()] = [
+    "speed", "egr", "boost", "commands", "scv", "rail", "air", "fuel", "torque",
+];
+
+impl Settings {
+    /// Shows only the panels named, without the signals or the pulses.
+    pub(crate) fn only(&mut self, names: &[String]) {
+        self.panels = std::array::from_fn(|k| names.iter().any(|n| n == CHARTS[k]));
+        (self.teeth, self.pulses) = (false, false);
+    }
+
+    /// The time window offered nearest to `ms`.
+    pub(crate) fn nearest_window(&mut self, ms: f64) {
+        let far = |w: f64| (w.ln() - ms.max(1.0).ln()).abs();
+        for (k, &w) in WINDOWS.iter().enumerate() {
+            if far(w) < far(WINDOWS[self.window]) {
+                self.window = k;
+            }
+        }
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {

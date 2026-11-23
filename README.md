@@ -213,6 +213,17 @@ command line, and then it powers on straight away:
 cargo run --release -p gui -- --flash <flash.bin> --eeprom <eeprom.bin> [--eeprom-layout 0123[le]]
 ```
 
+and it can be told what to run and show, to come back to the same scene: `--plants held` or
+`torque` idles it with the plants around it, `--slow-at <ms>` runs flat out to that ECU time
+and `--speed 0.01` goes on slowed down from there; `--show engine,maps,scope` opens those
+windows side by side, `--charts egr,air` and `--window <ms>` choose what the engine view
+draws, `--map <descriptor>` the map, `--labels <file>` names maps and `--compare <flash>`
+reads a second image:
+
+```sh
+sh705x-gui --flash <flash.bin> --plants torque --slow-at 1140 --speed 0.01 --charts egr,air --map 9B904
+```
+
 ![The load screen](docs/img/gui-load.png)
 
 In the engine panel, "Plants" puts the plants around the ECU: "Held" closes the SCV,
