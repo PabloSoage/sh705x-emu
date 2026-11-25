@@ -94,10 +94,20 @@ second, which makes it a reference oracle rather than an emulator.
   and its 27 GMLAN identifiers come back with the same shape; 108 are the same byte for
   byte, the rest are live values, injection, the immobilizer, or counters the EEPROM
   holds from the day it was read.
-- **Speed:** with the EEPROM, CAN and the engine turning, the emulated ECU runs 1.26 to
-  1.36 times faster than real time (about 90 M instructions per second, i7-10870H);
-  the SH7059 runs at 80 MHz, about 69 M instructions per second of ECU time. Flash is
-  decoded once, and flash and RAM accesses take a direct path.
+- **Speed:** on one thread, with the EEPROM and CAN, the emulated ECU runs faster than
+  real time, and flash is decoded once, with a direct path for flash and RAM accesses.
+  The SH7059 runs at 80 MHz, about 69 M instructions per second of ECU time.
+
+  | CPU | Scenario | Times real time | M instructions/s |
+  |---|---|---|---|
+  | Ryzen 9 9950X3D | engine stopped | 3.64 | 252 |
+  | Ryzen 9 9950X3D | engine at 800 rpm | 3.50 | 242 |
+  | Ryzen 9 9950X3D | engine at 3000 rpm | 3.31 | 228 |
+  | Ryzen 9 9950X3D | `plant`, closed loop, no EEPROM | 2.89 | – |
+  | i7-10870H (laptop) | engine at 800 rpm | 1.26 to 1.36 | about 90 |
+
+  The Ryzen figures are medians: nine runs of `bench` (five seconds of ECU time each),
+  three of `plant` (15 seconds, boot included).
 - **The engine runs on the firmware's torque** (`sh705x plant`): a simulated crank turns
   with the torque the firmware asks for, and its idle governor settles at 750 rpm, 12 N·m
   and 7.0 mm³ a stroke, as the car does at warm idle. The SCV current loop and the EGR,
