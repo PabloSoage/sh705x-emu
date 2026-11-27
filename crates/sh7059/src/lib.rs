@@ -536,7 +536,7 @@ impl Sh7059 {
             Region::Ram(o) => self.ram[o..o + N].copy_from_slice(&bytes),
             Region::Io(o) => {
                 if periph_at(addr) == Some(Periph::Atu) {
-                    self.atu.resync(self.now);
+                    self.atu.resync(self.now, &mut self.io);
                     self.atu.store(self.now, &mut self.io);
                     let mut before = [0u8; N];
                     before.copy_from_slice(&self.io[o..o + N]);
