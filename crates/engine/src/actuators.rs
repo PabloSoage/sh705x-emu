@@ -89,10 +89,21 @@ impl Egr {
     }
 
     /// Advances `dt` seconds with `drive` (opening minus closing duty, -1..1) and
-    /// returns the position, % open.
+    /// returns the position, % open. When actively driven closed (`drive < 0`), the valve
+    /// can compress slightly against its seat stop (down to `-5 %`) before relaxing back
+    /// to `0 %` when drive stops.
     pub fn step(&mut self, drive: f64, dt: f64) -> f64 {
-        let net = drive.clamp(-1.0, 1.0) - self.hold;
-        self.pos = (self.pos + self.rate * net * dt).clamp(0.0, 100.0);
+        let drive = drive.clamp(-1.0, 1.0);
+        if drive < 0.0 {
+            let net = drive - self.hold;
+            self.pos = (self.pos + self.rate * net * dt).clamp(-5.0, 100.0);
+        } else if self.pos < 0.0 {
+            let net = drive + self.hold;
+            self.pos = (self.pos + self.rate * net * dt).min(0.0);
+        } else {
+            let net = drive - self.hold;
+            self.pos = (self.pos + self.rate * net * dt).clamp(0.0, 100.0);
+        }
         self.pos
     }
 }
@@ -159,10 +170,13 @@ mod tests {
         // No drive: the spring alone shuts it, at hold x rate.
         e.step(0.0, 0.5);
         assert!((e.pos - 35.0).abs() < 1e-9, "{}", e.pos);
-        // Closing drive is faster, and it stops shut.
+        // Closing drive is faster, compresses against the closed seat (-5 %), and
+        // relaxes back to 0 % when drive stops.
         e.step(-1.0, 0.03);
         assert!((e.pos - 1.1).abs() < 1e-9, "{}", e.pos);
         e.step(-1.0, 1.0);
+        assert_eq!(e.pos, -5.0);
+        e.step(0.0, 0.1);
         assert_eq!(e.pos, 0.0);
         // A drive past full counts as full.
         e.step(5.0, 0.01);

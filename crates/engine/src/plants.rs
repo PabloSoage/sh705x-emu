@@ -208,9 +208,10 @@ impl Plants {
         let vgt_duty = duty(w.vgt);
         let egr_drive = duty(w.egr_open).unwrap_or(0.0) - duty(w.egr_close).unwrap_or(0.0);
         self.scv.step(scv_duty.unwrap_or(0.0), dt);
-        let egr = self.egr.step(egr_drive, dt);
+        let egr_sensor = self.egr.step(egr_drive, dt);
+        let egr = egr_sensor.max(0.0);
         m.chip.adc.input[self.scv_in.channel] = self.scv_in.code(self.scv.milliamps());
-        m.chip.adc.input[self.egr_in.channel] = self.egr_in.code(egr);
+        m.chip.adc.input[self.egr_in.channel] = self.egr_in.code(egr_sensor);
         let rail = if let Some(addr) = w.rail_asked_at {
             let asked = f32_at(m, addr);
             if asked.is_finite() && asked >= 0.0 {
