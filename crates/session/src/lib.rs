@@ -527,6 +527,11 @@ impl Session {
                 && let Some(i) = engine::sensors::input(k)
             {
                 self.m.chip.adc.input[i.channel] = i.code(v);
+                if k == "intake2"
+                    && let Some(p) = self.plants.as_mut()
+                {
+                    p.intake_c = v;
+                }
             }
         }
     }

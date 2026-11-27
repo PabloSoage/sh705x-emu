@@ -169,7 +169,9 @@ impl Scope {
             plant.map_or(f64::NAN, |p| p.scv_ma),
             duty(0, 0),
             ram(|r| r.rail_asked),
-            sensor("rail"),
+            plant
+                .and_then(|p| p.rail.is_finite().then_some(p.rail))
+                .unwrap_or_else(|| sensor("rail")),
             plant.map_or(sensor("maf"), |p| p.maf),
             ram(|r| r.quantity),
             ram(|r| r.torque),

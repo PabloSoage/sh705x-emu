@@ -98,6 +98,7 @@ const TSR8: u32 = 0xFFFF_F66A;
 const TIER8: u32 = 0xFFFF_F66C;
 const RLDR8: u32 = 0xFFFF_F660;
 const TCNR: u32 = 0xFFFF_F662;
+const OTR: u32 = 0xFFFF_F664;
 const RLDENR: u32 = 0xFFFF_F66E;
 /// Pulses kept in [`Atu::pulses`].
 const PULSES_KEPT: usize = 4096;
@@ -632,6 +633,22 @@ impl Atu {
         (4 * ((r8(io, PSCR[0]) & 0x1F) as u64 + 1)) << sel.min(5)
     }
 
+    /// Finishes one-shot output `k` at `end`: clears `DSTR` and `DCNT8x`, sets `TSR8`,
+    /// and logs the pulse.
+    fn finish_one_shot(&mut self, io: &mut [u8], k: usize, end: u64) {
+        self.one_shot[k] = None;
+        w16(io, DCNT8 + 2 * k as u32, 0);
+        let dstr = r16(io, DSTR) & !(1 << k);
+        w16(io, DSTR, dstr);
+        set16(io, TSR8, 1 << k);
+        self.events += 1;
+        self.pulse_count += 1;
+        if self.pulses.len() == PULSES_KEPT {
+            self.pulses.pop_front();
+        }
+        self.pulses.push_back((k as u8, self.one_shot_rise[k], end));
+    }
+
     /// Channel 2's down-count start trigger for DCNT8x (`k` = 8..=15) at cycle `at`
     /// (11.3.6): DST8x is set and DCNT8x starts, after the reload, unless TCNR leaves it
     /// unconnected, it is running, or its count is 0.
@@ -801,6 +818,12 @@ impl Atu {
         self.corr = next;
         if set_tsr1a != 0 {
             set16(io, TSR1A, set_tsr1a);
+            let otr = r16(io, OTR);
+            for g in 0..8 {
+                if set_tsr1a & (1 << g) != 0 && otr & (1 << g) != 0 && self.one_shot[g].is_some() {
+                    self.finish_one_shot(io, g, now);
+                }
+            }
         }
         self.events += ev;
     }
@@ -958,17 +981,7 @@ impl Atu {
             if let Some((start, cpc, n)) = self.one_shot[k] {
                 let end = start + n as u64 * cpc;
                 if end <= now {
-                    self.one_shot[k] = None;
-                    w16(io, DCNT8 + 2 * k as u32, 0);
-                    let dstr = r16(io, DSTR) & !(1 << k);
-                    w16(io, DSTR, dstr);
-                    set16(io, TSR8, 1 << k);
-                    self.events += 1;
-                    self.pulse_count += 1;
-                    if self.pulses.len() == PULSES_KEPT {
-                        self.pulses.pop_front();
-                    }
-                    self.pulses.push_back((k as u8, self.one_shot_rise[k], end));
+                    self.finish_one_shot(io, k, end);
                 }
             }
         }
@@ -1021,10 +1034,16 @@ impl Atu {
                     set16(io, TSR2B, 0x0100);
                 }
                 let at = self.cnt[0].base;
+                let otr = r16(io, OTR);
                 for k in 0..8 {
                     if r16(io, CH2 + 0x14 + 2 * k) == v {
                         set16(io, TSR2B, 1 << k);
-                        self.trigger_one_shot(io, 8 + k as usize, at);
+                        let ch8 = 8 + k as usize;
+                        if otr & (1 << ch8) != 0 && self.one_shot[ch8].is_some() {
+                            self.finish_one_shot(io, ch8, at);
+                        } else {
+                            self.trigger_one_shot(io, ch8, at);
+                        }
                     }
                 }
             }
@@ -1732,5 +1751,30 @@ mod tests {
                 .iter()
                 .any(|r| r.0 == 97 && r.1 == 3 && r.2 == 4 && r.3)
         );
+    }
+
+    #[test]
+    fn otr_terminates_a_running_one_shot() {
+        let (mut a, mut io) = io();
+        // Start TO8I (bit 8) with a long 1000-count pulse at t = 0.
+        write8(&mut a, &mut io, 0, TCR8, 0x00); // Pphi/1 (4 cycles/count)
+        write16(&mut a, &mut io, 0, DCNT8 + 2 * 8, 1000);
+        write16(&mut a, &mut io, 0, OTR, 1 << 8); // OTEI: Channel 2 OCR2A terminates TO8I
+        write16(&mut a, &mut io, 0, TIER8, 1 << 8);
+        write16(&mut a, &mut io, 0, DSTR, 1 << 8);
+        assert!(a.one_shot[8].is_some());
+
+        // Channel 2B (TCNT2B at Pphi/1) reaches OCR2A = 9 -> leaves 9 at t = 40 (10 * 4 cycles).
+        write16(&mut a, &mut io, 0, CH2 + 0x14, 9);
+        write8(&mut a, &mut io, 0, CH2 + 0x02, 0x00); // TCR2B = Pphi/1
+        write8(&mut a, &mut io, 0, TSTR1, 0x08); // STR2B
+        a.advance(40, &mut io);
+        a.store(40, &mut io);
+
+        assert!(a.one_shot[8].is_none());
+        assert_eq!(r16(&io, DSTR) & (1 << 8), 0);
+        assert_eq!(r16(&io, DCNT8 + 2 * 8), 0);
+        assert_ne!(r16(&io, TSR8) & (1 << 8), 0);
+        assert_eq!(a.pulses.back(), Some(&(8, 0, 40)));
     }
 }

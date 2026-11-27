@@ -6,8 +6,10 @@
 //! enabled". That stands in for a running engine; it is not a bypass of any vehicle security
 //! function, and no such function is modelled or touched here.
 
+use engine::bus::{Road, RollingWheels};
 use engine::plants::{f32_at, Plants, Wiring, ASTRA};
 use engine::sensors::{maf_hz, pedal_sensors, Sensors, MAF_KEY};
+use engine::vehicle::Vehicle;
 use engine::wheel::Wheels;
 use sh7059::{Machine, Sh7059};
 
@@ -22,12 +24,6 @@ const IGNITION: (usize, u16) = (14, 600);
 /// the flash at 0xC0000; an unknown SW is an error rather than a run of zeros.
 #[derive(Clone, Copy, Debug)]
 pub struct Addrs {
-    /// Master engine running / combustion mode state flag (1 = running).
-    pub engine_running_flag: u32,
-    /// Global fuel-cut flag (0 = fuelling enabled, 1 = cut).
-    pub fuel_enable: u32,
-    /// Selected gear (0 = neutral/reverse, 1..6 = gears 1 to 6).
-    pub gear_selector: u32,
     /// Driver demand map output (pedal map output, Nm).
     pub driver_demand_trq: u32,
     /// Final delivered torque to the engine (Nm).
@@ -52,9 +48,6 @@ pub struct Addrs {
 /// variables have the same number of literal-pool references in both images and the tool
 /// returns the same values on both.
 pub const AX36: Addrs = Addrs {
-    engine_running_flag: 0xFFFE_E6DC,
-    fuel_enable: 0xFFFF_29D8,
-    gear_selector: 0xFFFE_E100,
     driver_demand_trq: 0xFFFE_FC14,
     delivered_trq: 0xFFFE_FC6C,
     net_trq: 0xFFFE_FC4C,
@@ -72,9 +65,6 @@ pub const AX36: Addrs = Addrs {
 /// The net torque has no second copy here as it has on AX36: it is read where it is
 /// computed, which is what 0x1A2D answers.
 pub const AZ07: Addrs = Addrs {
-    engine_running_flag: 0xFFFE_E870,
-    fuel_enable: 0xFFFF_2B84,
-    gear_selector: 0xFFFE_E294,
     driver_demand_trq: 0xFFFE_FDA8,
     delivered_trq: 0xFFFE_FE08,
     net_trq: 0xFFFE_FDC8,
@@ -88,9 +78,6 @@ pub const AZ07: Addrs = Addrs {
 
 /// AZ03NCLNP000, derived the same way as AZ07.
 pub const AZ03: Addrs = Addrs {
-    engine_running_flag: 0xFFFE_E870,
-    fuel_enable: 0xFFFF_2B88,
-    gear_selector: 0xFFFE_E294,
     driver_demand_trq: 0xFFFE_FDA8,
     delivered_trq: 0xFFFE_FE0C,
     net_trq: 0xFFFE_FDE0,
@@ -201,10 +188,15 @@ pub fn run_scenario(opts: &ScenarioOptions) -> Result<ScenarioResult, String> {
     )));
     chip.set_stimulus(Box::new(pins));
 
+    let road = Road::default();
+    road.set(Vehicle::astra(opts.gear).kmh_at(opts.rpm));
+    chip.set_can_source(Box::new(RollingWheels::new(road)));
+
     let mut m = Machine::new(chip, true);
     let wiring = Wiring {
         torque_at: Some(addrs.net_trq),
         quantity_at: Some(addrs.fuel_requested),
+        rail_asked_at: Some(addrs.rail_pressure_desired),
         ..ASTRA
     };
     let mut plants = Plants::new(wiring, opts.rpm, None, 100.0, 30.0);
@@ -214,12 +206,6 @@ pub fn run_scenario(opts: &ScenarioOptions) -> Result<ScenarioResult, String> {
     let mut last_egr = 0.0;
 
     for _ in 0..opts.millis {
-        // Engine state: running, fuelling enabled, in gear. No BCM in the emulator, so these
-        // are set directly rather than arriving from one. See the module docs.
-        m.chip.poke_ram(addrs.engine_running_flag, 0x01);
-        m.chip.poke_ram(addrs.fuel_enable, 0x00);
-        m.chip.poke_ram(addrs.gear_selector, opts.gear);
-
         m.run(1000 * bridge::link::CYCLES_PER_US);
         m.chip.hcan.ch[0].outbox.clear();
         let st = plants.step(&mut m, 0.001);

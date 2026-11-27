@@ -19,7 +19,7 @@ pub const RECORDED: [(&str, &str, usize); 2] = [
 ];
 
 /// The sensors the plants drive: a drive does not set them.
-const OF_THE_PLANTS: [&str; 4] = ["scv-feedback", "egr", "boost", MAF_KEY];
+const OF_THE_PLANTS: [&str; 5] = ["scv-feedback", "egr", "boost", "rail", MAF_KEY];
 
 /// One moment of a drive.
 #[derive(Clone, Debug, PartialEq)]

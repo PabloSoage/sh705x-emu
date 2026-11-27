@@ -19,6 +19,8 @@ fn plant_options() {
         "500",
         "--load",
         "20.5",
+        "--gear",
+        "4",
     ]
     .map(String::from)
     .to_vec();
@@ -27,16 +29,20 @@ fn plant_options() {
             assert_eq!(o.millis, 2000);
             assert_eq!(o.step_us, 500);
             assert_eq!(o.load, 20.5);
+            assert_eq!(o.gear, Some(4));
             assert_eq!(o.ecu.rpm, Some(750), "starts idling");
         }
         other => panic!("{other:?}"),
     }
     let args: Vec<String> = ["plant", "--flash", "a.bin"].map(String::from).to_vec();
     match parse(&args).unwrap() {
-        Command::Plant(o) => assert_eq!(o.load, 12.0, "the warm idling car's load"),
+        Command::Plant(o) => {
+            assert_eq!(o.load, 12.0, "the warm idling car's load");
+            assert_eq!(o.gear, None);
+        }
         other => panic!("{other:?}"),
     }
-    for bad in [["--step-us", "0"], ["--load", "x"]] {
+    for bad in [["--step-us", "0"], ["--load", "x"], ["--gear", "7"]] {
         let mut args: Vec<String> = ["plant", "--flash", "a.bin"].map(String::from).to_vec();
         args.extend(bad.map(String::from));
         assert!(parse(&args).is_err(), "{bad:?}");
@@ -124,4 +130,31 @@ fn in_neutral_the_pedal_revs_it_to_the_limit() {
     // well open as the car's are at that speed (28 to 36 % at 4000-4500 rpm).
     assert!((boost - asked).abs() < 8.0, "{out}");
     assert!((15.0..45.0).contains(&vgt), "{out}");
+}
+
+#[test]
+fn in_gear_the_pedal_accelerates_the_car() {
+    let Ok(flash) = std::env::var("SH705X_FLASH") else {
+        eprintln!("SH705X_FLASH not set: skipped");
+        return;
+    };
+    let args: Vec<String> = [
+        "plant", "--flash", &flash, "--rpm", "1500", "--gear", "3", "--millis", "3000", "--sensor",
+        "pedal=60",
+    ]
+    .map(String::from)
+    .to_vec();
+    let out = run(&parse(&args).unwrap()).unwrap();
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("Last quarter"))
+        .expect("summary");
+    let nums: Vec<f64> = line
+        .replace("mm3", "mm")
+        .split(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+        .filter_map(|w| w.trim_end_matches('.').parse().ok())
+        .collect();
+    let (rpm, kmh) = (nums[0], nums[1]);
+    assert!(rpm > 1700.0 && rpm < 4500.0, "{out}");
+    assert!(kmh > 42.0 && kmh < 120.0, "{out}");
 }

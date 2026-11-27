@@ -9,10 +9,13 @@
 //! GUI after each slice it runs.
 
 use crate::actuators::{Egr, Solenoid};
+use crate::bus::Road;
 use crate::crank::Crank;
+use crate::rail::Rail;
 use crate::sensors::{Input, MAF_KEY, input, maf_hz};
 use crate::software::Software;
 use crate::turbo::Turbo;
+use crate::vehicle::Vehicle;
 use sh7059::Machine;
 
 /// Where the plants meet one ECU: its outputs, as ATU-II (channel 0/1 = 6/7, timer
@@ -31,6 +34,8 @@ pub struct Wiring {
     pub torque_at: Option<u32>,
     /// The fuel per stroke it asks for, mm³, where its release is known.
     pub quantity_at: Option<u32>,
+    /// The rail pressure it asks for, MPa (what 0x308A reports), where its release is known.
+    pub rail_asked_at: Option<u32>,
 }
 
 /// The outputs of the Astra J's board (A17DTJ), found in its firmware NCLSW420AX36 [MED],
@@ -46,6 +51,7 @@ pub const ASTRA: Wiring = Wiring {
     egr_close: (1, 2),
     torque_at: None,
     quantity_at: None,
+    rail_asked_at: None,
 };
 
 impl Wiring {
@@ -55,6 +61,7 @@ impl Wiring {
         Self {
             torque_at: software.map(|s| s.ram.torque),
             quantity_at: software.map(|s| s.ram.quantity),
+            rail_asked_at: software.map(|s| s.ram.rail_asked),
             ..ASTRA
         }
     }
@@ -89,6 +96,10 @@ pub struct State {
     pub torque: f64,
     /// The fuel per stroke it asks for, mm³; NaN where its variable is not known.
     pub quantity: f64,
+    /// Rail pressure, MPa; NaN where the firmware's setpoint is not known.
+    pub rail: f64,
+    /// Road speed, km/h (0.0 in neutral or without a vehicle).
+    pub kmh: f64,
 }
 
 /// The plants and the inputs they feed.
@@ -99,6 +110,10 @@ pub struct Plants {
     /// The crankshaft, if the engine turns on the firmware's torque; otherwise the speed is
     /// held at [`Plants::rpm`].
     pub crank: Option<Crank>,
+    /// Optional vehicle + gearbox coupled to the crankshaft.
+    pub vehicle: Option<Vehicle>,
+    /// Optional road speed updated on the CAN bus when `vehicle` is set.
+    pub road: Option<Road>,
     /// The crankshaft is held at its speed for now (while the firmware boots: its torque
     /// only means something once it runs its idle governor).
     pub held: bool,
@@ -114,9 +129,12 @@ pub struct Plants {
     pub egr: Egr,
     /// The turbocharger.
     pub turbo: Turbo,
+    /// The high-pressure fuel rail.
+    pub rail: Rail,
     scv_in: &'static Input,
     egr_in: &'static Input,
     boost_in: &'static Input,
+    rail_in: &'static Input,
 }
 
 impl Plants {
@@ -131,19 +149,28 @@ impl Plants {
         intake_c: f64,
     ) -> Self {
         let crank = crank.filter(|_| wiring.torque_at.is_some());
+        let rpm = crank.as_ref().map_or(rpm, |c| c.rpm);
+        let mut rail = Rail::astra();
+        if rpm > 0.0 {
+            rail.p = 23.7;
+        }
         Self {
             wiring,
-            rpm: crank.as_ref().map_or(rpm, |c| c.rpm),
+            rpm,
             crank,
+            vehicle: None,
+            road: None,
             held: false,
             rest_kpa,
             intake_c,
             scv: Solenoid::scv(),
             egr: Egr::new(),
             turbo: Turbo::new(),
+            rail,
             scv_in: input("scv-feedback").expect("scv-feedback curve"),
             egr_in: input("egr").expect("egr curve"),
             boost_in: input("boost").expect("boost curve"),
+            rail_in: input("rail").expect("rail curve"),
         }
     }
 
@@ -154,11 +181,26 @@ impl Plants {
         let read = |m: &Machine, at: Option<u32>| at.map_or(f64::NAN, |a| f32_at(m, a));
         let torque = read(m, w.torque_at);
         let quantity = read(m, w.quantity_at);
+        let mut kmh = 0.0;
         if let Some(c) = self.crank.as_mut().filter(|_| !self.held) {
             let was = self.rpm;
-            self.rpm = c.step(torque, dt);
+            if let Some(v) = &self.vehicle {
+                let (rpm, k) = v.step(c, torque, dt);
+                self.rpm = rpm;
+                kmh = k;
+                if let Some(r) = &self.road {
+                    r.set(kmh);
+                }
+            } else {
+                self.rpm = c.step(torque, dt);
+            }
             if self.rpm != was {
                 m.chip.stimulus_set("rpm", self.rpm);
+            }
+        } else if let Some(v) = &self.vehicle {
+            kmh = v.kmh_at(self.rpm);
+            if let Some(r) = &self.road {
+                r.set(kmh);
             }
         }
         let duty = |(c, k): (usize, usize)| m.chip.pwm_duty(c, k);
@@ -169,6 +211,18 @@ impl Plants {
         let egr = self.egr.step(egr_drive, dt);
         m.chip.adc.input[self.scv_in.channel] = self.scv_in.code(self.scv.milliamps());
         m.chip.adc.input[self.egr_in.channel] = self.egr_in.code(egr);
+        let rail = if let Some(addr) = w.rail_asked_at {
+            let asked = f32_at(m, addr);
+            if asked.is_finite() && asked >= 0.0 {
+                let p = self.rail.step(asked, dt);
+                m.chip.adc.input[self.rail_in.channel] = self.rail_in.code(p);
+                p
+            } else {
+                f64::NAN
+            }
+        } else {
+            f64::NAN
+        };
         // The turbine on the fuel the firmware asks for, with its vanes where it puts them;
         // no boost where the fuel is not known.
         let burnt = w.quantity_at.map_or(0.0, |_| quantity);
@@ -193,6 +247,8 @@ impl Plants {
             boost,
             torque,
             quantity,
+            rail,
+            kmh,
         }
     }
 }

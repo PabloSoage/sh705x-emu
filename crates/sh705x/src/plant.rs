@@ -12,7 +12,9 @@
 
 use crate::rig::Rig;
 use crate::{EcuOptions, f32_at};
+use engine::bus::{Road, RollingWheels};
 use engine::crank::Crank;
+use engine::vehicle::Vehicle;
 use sh7059::Machine;
 use std::fmt::Write as _;
 
@@ -27,6 +29,8 @@ pub struct PlantOptions {
     pub step_us: u64,
     /// External load on the crank, N·m: by default [`IDLE_LOAD`].
     pub load: f64,
+    /// Optional gearbox gear (`0` = neutral, `1..=6` = forward gear) for vehicle road load.
+    pub gear: Option<u8>,
 }
 
 /// The load on a warm idling Astra beyond the friction the firmware models, N·m: the
@@ -54,6 +58,7 @@ fn diagnostic_torque(m: &mut Machine) -> Option<f64> {
 struct Sample {
     t: f64,
     rpm: f64,
+    kmh: f64,
     target: f64,
     torque: f64,
     quantity: f64,
@@ -69,16 +74,30 @@ pub fn plant(o: &PlantOptions) -> Result<String, String> {
     let mut crank = Crank::new(o.ecu.rpm.unwrap_or(750) as f64);
     crank.load = o.load;
     let mut rig = Rig::new(&o.ecu, Some(crank), o.step_us)?;
+    if let Some(g) = o.gear {
+        let mut v = Vehicle::astra(g);
+        v.aux_load_nm = o.load;
+        let road = Road::default();
+        road.set(v.kmh_at(rig.plants.rpm));
+        rig.m
+            .chip
+            .set_can_source(Box::new(RollingWheels::new(road.clone())));
+        rig.plants.vehicle = Some(v);
+        rig.plants.road = Some(road);
+    }
 
     let Some(ram) = rig.software.map(|s| s.ram) else {
         return Err("this software is not known: where it keeps its torque is not either".into());
     };
     // The RAM must hold what the diagnostics say, or the release is not what it says.
+    // Torque can move during the diagnostic exchange itself, so bracket it before/after.
+    let before = f32_at(&rig.m, ram.torque);
     let said = diagnostic_torque(&mut rig.m).ok_or("no answer to 0x1A2D")?;
-    let held = f32_at(&rig.m, ram.torque);
-    if (said - held).abs() > 0.5 {
+    let after = f32_at(&rig.m, ram.torque);
+    let (lo, hi) = (before.min(after) - 0.5, before.max(after) + 0.5);
+    if !(lo..=hi).contains(&said) {
         return Err(format!(
-            "the torque is not at {:08X} in this image ({held} there, {said} on \
+            "the torque is not at {:08X} in this image ({before}..{after} there, {said} on \
              diagnostics): another software",
             ram.torque
         ));
@@ -91,6 +110,7 @@ pub fn plant(o: &PlantOptions) -> Result<String, String> {
         trace.push(Sample {
             t: (k + 1) as f64 * rig.dt * 1000.0,
             rpm: st.rpm,
+            kmh: st.kmh,
             target: f32_at(&rig.m, ram.idle_target),
             torque: st.torque,
             quantity: f32_at(&rig.m, ram.quantity),
@@ -103,37 +123,91 @@ pub fn plant(o: &PlantOptions) -> Result<String, String> {
     }
 
     let mut out = String::new();
-    writeln!(
-        out,
-        "Engine on the firmware's torque: {} ms, every {} µs, external load {} N·m",
-        o.millis, o.step_us, o.load
-    )
+    match o.gear {
+        Some(g) => writeln!(
+            out,
+            "Engine on the firmware's torque: {} ms, every {} µs, gear {}, aux load {} N·m",
+            o.millis, o.step_us, g, o.load
+        ),
+        None => writeln!(
+            out,
+            "Engine on the firmware's torque: {} ms, every {} µs, external load {} N·m",
+            o.millis, o.step_us, o.load
+        ),
+    }
     .unwrap();
-    writeln!(
-        out,
-        "{:>8} {:>8} {:>8} {:>10} {:>9} {:>8} {:>6} {:>6} {:>6} {:>5}",
-        "t/ms", "rpm", "target", "torque/Nm", "fuel/mm3", "maf/g/s", "egr/%", "kPa", "asked", "vgt"
-    )
-    .unwrap();
+    if o.gear.is_some() {
+        writeln!(
+            out,
+            "{:>8} {:>8} {:>6} {:>8} {:>10} {:>9} {:>8} {:>6} {:>6} {:>6} {:>5}",
+            "t/ms",
+            "rpm",
+            "km/h",
+            "target",
+            "torque/Nm",
+            "fuel/mm3",
+            "maf/g/s",
+            "egr/%",
+            "kPa",
+            "asked",
+            "vgt"
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "{:>8} {:>8} {:>8} {:>10} {:>9} {:>8} {:>6} {:>6} {:>6} {:>5}",
+            "t/ms",
+            "rpm",
+            "target",
+            "torque/Nm",
+            "fuel/mm3",
+            "maf/g/s",
+            "egr/%",
+            "kPa",
+            "asked",
+            "vgt"
+        )
+        .unwrap();
+    }
     // Show at most ~40 rows, thinning evenly, but always the last.
     let keep = (trace.len() / 40).max(1);
     for (i, r) in trace.iter().enumerate() {
         if i % keep == 0 || i + 1 == trace.len() {
-            writeln!(
-                out,
-                "{:>8.0} {:>8.1} {:>8.0} {:>10.2} {:>9.2} {:>8.2} {:>6.1} {:>6.1} {:>6.1} {:>5.1}",
-                r.t,
-                r.rpm,
-                r.target,
-                r.torque,
-                r.quantity,
-                r.maf,
-                r.egr,
-                r.boost,
-                r.boost_asked,
-                r.vgt
-            )
-            .unwrap();
+            if o.gear.is_some() {
+                writeln!(
+                    out,
+                    "{:>8.0} {:>8.1} {:>6.1} {:>8.0} {:>10.2} {:>9.2} {:>8.2} {:>6.1} {:>6.1} {:>6.1} {:>5.1}",
+                    r.t,
+                    r.rpm,
+                    r.kmh,
+                    r.target,
+                    r.torque,
+                    r.quantity,
+                    r.maf,
+                    r.egr,
+                    r.boost,
+                    r.boost_asked,
+                    r.vgt
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    out,
+                    "{:>8.0} {:>8.1} {:>8.0} {:>10.2} {:>9.2} {:>8.2} {:>6.1} {:>6.1} {:>6.1} {:>5.1}",
+                    r.t,
+                    r.rpm,
+                    r.target,
+                    r.torque,
+                    r.quantity,
+                    r.maf,
+                    r.egr,
+                    r.boost,
+                    r.boost_asked,
+                    r.vgt
+                )
+                .unwrap();
+            }
         }
     }
     // Settling: the speed over the last quarter.
@@ -144,21 +218,41 @@ pub fn plant(o: &PlantOptions) -> Result<String, String> {
         .fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(v), b.max(v)));
     let mean = |f: fn(&Sample) -> f64| tail.iter().map(f).sum::<f64>() / tail.len() as f64;
     writeln!(out).unwrap();
-    writeln!(
-        out,
-        "Last quarter: {:.0} rpm on average (from {lo:.0} to {hi:.0}), aiming at an idle of \
-         {:.0}; {:.1} N·m, {:.2} mm3 a stroke asked for; EGR {:.1} % open, {:.2} g/s of \
-         fresh air; boost {:.1} kPa for {:.1} asked, VGT at {:.1} %.",
-        mean(|r| r.rpm),
-        mean(|r| r.target),
-        mean(|r| r.torque),
-        mean(|r| r.quantity),
-        mean(|r| r.egr),
-        mean(|r| r.maf),
-        mean(|r| r.boost),
-        mean(|r| r.boost_asked),
-        mean(|r| r.vgt),
-    )
-    .unwrap();
+    if o.gear.is_some() {
+        writeln!(
+            out,
+            "Last quarter: {:.0} rpm ({:.1} km/h) on average (from {lo:.0} to {hi:.0}), aiming \
+             at an idle of {:.0}; {:.1} N·m, {:.2} mm3 a stroke asked for; EGR {:.1} % open, \
+             {:.2} g/s of fresh air; boost {:.1} kPa for {:.1} asked, VGT at {:.1} %.",
+            mean(|r| r.rpm),
+            mean(|r| r.kmh),
+            mean(|r| r.target),
+            mean(|r| r.torque),
+            mean(|r| r.quantity),
+            mean(|r| r.egr),
+            mean(|r| r.maf),
+            mean(|r| r.boost),
+            mean(|r| r.boost_asked),
+            mean(|r| r.vgt),
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "Last quarter: {:.0} rpm on average (from {lo:.0} to {hi:.0}), aiming at an idle of \
+             {:.0}; {:.1} N·m, {:.2} mm3 a stroke asked for; EGR {:.1} % open, {:.2} g/s of \
+             fresh air; boost {:.1} kPa for {:.1} asked, VGT at {:.1} %.",
+            mean(|r| r.rpm),
+            mean(|r| r.target),
+            mean(|r| r.torque),
+            mean(|r| r.quantity),
+            mean(|r| r.egr),
+            mean(|r| r.maf),
+            mean(|r| r.boost),
+            mean(|r| r.boost_asked),
+            mean(|r| r.vgt),
+        )
+        .unwrap();
+    }
     Ok(out)
 }

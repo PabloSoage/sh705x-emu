@@ -620,7 +620,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }))
         }
         "plant" => {
-            let (mut millis, mut step_us, mut load) = (5000u64, 1000u64, plant::IDLE_LOAD);
+            let (mut millis, mut step_us, mut load, mut gear) =
+                (5000u64, 1000u64, plant::IDLE_LOAD, None);
             let (mut o, args) = parse_ecu("plant", rest, &mut |opt, value| match opt {
                 "--millis" => {
                     let v = value.ok_or("--millis needs a value")?;
@@ -635,6 +636,15 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 "--load" => {
                     let v = value.ok_or("--load needs a value")?;
                     load = v.parse().map_err(|_| format!("bad --load '{v}'"))?;
+                    Ok(true)
+                }
+                "--gear" => {
+                    let v = value.ok_or("--gear needs a value")?;
+                    let g: u8 = v.parse().map_err(|_| format!("bad --gear '{v}'"))?;
+                    if g > 6 {
+                        return Err(format!("bad --gear '{v}' (expected 0..=6)"));
+                    }
+                    gear = Some(g);
                     Ok(true)
                 }
                 _ => Ok(false),
@@ -653,6 +663,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 millis,
                 step_us,
                 load,
+                gear,
             }))
         }
         "disasm" => {

@@ -4,9 +4,9 @@
 //! a speed that can change from one tooth to the next ([`wheel`]); the crank as a
 //! rotating mass under the firmware's torque ([`crank`]); the air it draws ([`air`]); the
 //! analog sensors as A/D codes from physical values ([`sensors`]); the SCV and EGR
-//! actuators ([`actuators`]); the turbocharger ([`turbo`]); and other nodes on the CAN
-//! bus sending their periodic frames ([`bus`]). [`software`] says where each firmware
-//! release known keeps what they read. Planned: the rail.
+//! actuators ([`actuators`]); the turbocharger ([`turbo`]); the high-pressure fuel rail
+//! ([`rail`]); and other nodes on the CAN bus sending their periodic frames ([`bus`]).
+//! [`software`] says where each firmware release known keeps what they read.
 
 pub mod actuators;
 pub mod air;
@@ -14,7 +14,9 @@ pub mod bus;
 pub mod crank;
 pub mod curves;
 pub mod plants;
+pub mod rail;
 pub mod sensors;
 pub mod software;
 pub mod turbo;
+pub mod vehicle;
 pub mod wheel;
